@@ -38,7 +38,7 @@ class ProcessClass:
         self.Current_posture = "None"  # 当前姿态 None 站立 z 趴下 c 蹲下
         self.sensitivity = 1  # 瞄准灵敏度
         self.StartFire = False  # 是否开枪倍镜
-        self.RightClick = False  # 右键按下模式 False 单击 True 长按
+        self.RightClick = True  # 右键按下模式 False 单击 True 长按
         self.clicking = False
         self.shift_pressed = False  # 记录 Shift 键是否按下
         self.ScopeData = self.get_config_data('s')
