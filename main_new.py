@@ -2,7 +2,7 @@ import sys
 import os
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-# import Process
+import Process
 from modern_ui import Ui_ModernPUBG
 from ingame_display import IngameDisplayManager
 
@@ -105,7 +105,7 @@ class ModernPUBGApp(QtWidgets.QWidget):
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    # PC = Process.ProcessClass()
+    PC = Process.ProcessClass()
     window = ModernPUBGApp()
     window.show()
     sys.exit(app.exec_())

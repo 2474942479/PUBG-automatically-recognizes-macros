@@ -5,7 +5,13 @@ class Ui_PUBG(object):
     def setupUi(self, PUBG):
         PUBG.setObjectName("PUBG")
         PUBG.setWindowModality(QtCore.Qt.ApplicationModal)
-        PUBG.resize(543, 800)
+        PUBG.resize(543, 300)
+        # 设置窗口背景透明
+        PUBG.setStyleSheet("background-color: rgba(255, 255, 255, 128); color: black;")
+        # 设置窗口无边框
+        PUBG.setWindowFlags(PUBG.windowFlags() | QtCore.Qt.FramelessWindowHint)
+        # 设置窗口透明度（0.0完全透明，1.0完全不透明）
+        PUBG.setWindowOpacity(0.8)
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap("./_internal/GHUB.ico"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
         PUBG.setWindowIcon(icon)
@@ -19,45 +25,51 @@ class Ui_PUBG(object):
         self.gridLayout.setContentsMargins(0, 0, 0, 0)
         self.gridLayout.setSpacing(0)
         self.gridLayout.setObjectName("gridLayout")
-        self.TitleBox = QtWidgets.QWidget(self.Container)
-        self.TitleBox.setObjectName("TitleBox")
-        self.verticalLayout_4 = QtWidgets.QVBoxLayout(self.TitleBox)
-        self.verticalLayout_4.setObjectName("verticalLayout_4")
-        self.Title = QtWidgets.QLabel(self.TitleBox)
-        font = QtGui.QFont()
-        font.setFamily("Agency FB")
-        font.setPointSize(20)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Title.setFont(font)
-        self.Title.setTabletTracking(False)
-        self.Title.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.Title.setTextFormat(QtCore.Qt.RichText)
-        self.Title.setScaledContents(False)
-        self.Title.setAlignment(QtCore.Qt.AlignCenter)
-        self.Title.setWordWrap(False)
-        self.Title.setTextInteractionFlags(QtCore.Qt.LinksAccessibleByMouse)
-        self.Title.setObjectName("Title")
-        self.verticalLayout_4.addWidget(self.Title)
-        self.WinVersion = QtWidgets.QLabel(self.TitleBox)
-        self.WinVersion.setText("")
-        self.WinVersion.setAlignment(QtCore.Qt.AlignCenter)
-        self.WinVersion.setObjectName("WinVersion")
-        self.verticalLayout_4.addWidget(self.WinVersion)
-        self.gridLayout.addWidget(self.TitleBox, 0, 0, 1, 1)
-        self.RemindBox = QtWidgets.QWidget(self.Container)
-        self.RemindBox.setObjectName("RemindBox")
-        self.horizontalLayout_2 = QtWidgets.QHBoxLayout(self.RemindBox)
-        self.horizontalLayout_2.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_2.setSpacing(0)
-        self.horizontalLayout_2.setObjectName("horizontalLayout_2")
-        self.Remind = QtWidgets.QTextEdit(self.RemindBox)
-        self.Remind.setAutoFormatting(QtWidgets.QTextEdit.AutoNone)
-        self.Remind.setUndoRedoEnabled(False)
-        self.Remind.setReadOnly(True)
-        self.Remind.setObjectName("Remind")
-        self.horizontalLayout_2.addWidget(self.Remind)
-        self.gridLayout.addWidget(self.RemindBox, 1, 0, 1, 1)
+
+        # self.TitleBox = QtWidgets.QWidget(self.Container)
+        # self.TitleBox.setObjectName("TitleBox")
+        # self.verticalLayout_4 = QtWidgets.QVBoxLayout(self.TitleBox)
+        # self.verticalLayout_4.setObjectName("verticalLayout_4")
+
+        # self.Title = QtWidgets.QLabel(self.TitleBox)
+        # font = QtGui.QFont()
+        # font.setFamily("Agency FB")
+        # font.setPointSize(20)
+        # font.setBold(True)
+        # font.setWeight(75)
+        # self.Title.setFont(font)
+        # self.Title.setTabletTracking(False)
+        # self.Title.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.Title.setTextFormat(QtCore.Qt.RichText)
+        # self.Title.setScaledContents(False)
+        # self.Title.setAlignment(QtCore.Qt.AlignCenter)
+        # self.Title.setWordWrap(False)
+        # self.Title.setTextInteractionFlags(QtCore.Qt.LinksAccessibleByMouse)
+        # self.Title.setObjectName("Title")
+        # self.verticalLayout_4.addWidget(self.Title)
+        #
+        # self.WinVersion = QtWidgets.QLabel(self.TitleBox)
+        # self.WinVersion.setText("")
+        # self.WinVersion.setAlignment(QtCore.Qt.AlignCenter)
+        # self.WinVersion.setObjectName("WinVersion")
+        # self.verticalLayout_4.addWidget(self.WinVersion)
+        # self.gridLayout.addWidget(self.TitleBox, 0, 0, 1, 1)
+
+        # self.RemindBox = QtWidgets.QWidget(self.Container)
+        # self.RemindBox.setObjectName("RemindBox")
+        # self.horizontalLayout_2 = QtWidgets.QHBoxLayout(self.RemindBox)
+        # self.horizontalLayout_2.setContentsMargins(0, 0, 0, 0)
+        # self.horizontalLayout_2.setSpacing(0)
+        # self.horizontalLayout_2.setObjectName("horizontalLayout_2")
+        # self.Remind = QtWidgets.QTextEdit(self.RemindBox)
+        # self.Remind.setAutoFormatting(QtWidgets.QTextEdit.AutoNone)
+        # self.Remind.setUndoRedoEnabled(False)
+        # self.Remind.setReadOnly(True)
+        # self.Remind.setObjectName("Remind")
+        # self.horizontalLayout_2.addWidget(self.Remind)
+        # self.gridLayout.addWidget(self.RemindBox, 1, 0, 1, 1)
+
+        # 创建功能框小部件
         self.FunctionBox = QtWidgets.QWidget(self.Container)
         self.FunctionBox.setObjectName("FunctionBox")
         self.gridLayout_2 = QtWidgets.QGridLayout(self.FunctionBox)
@@ -494,13 +506,15 @@ class Ui_PUBG(object):
         self.Resolution.setObjectName("Resolution")
         self.horizontalLayout_24 = QtWidgets.QHBoxLayout(self.Resolution)
         self.horizontalLayout_24.setObjectName("horizontalLayout_24")
+
+        # 分辨率
         self.ResolutionLabel = QtWidgets.QLabel(self.Resolution)
         self.ResolutionLabel.setObjectName("ResolutionLabel")
         self.horizontalLayout_24.addWidget(self.ResolutionLabel)
         self.ResolutionSelect = QtWidgets.QComboBox(self.Resolution)
         self.ResolutionSelect.setObjectName("ResolutionSelect")
         self.ResolutionSelect.addItem("")
-        self.ResolutionSelect.setItemText(0, "1920x1080")
+        self.ResolutionSelect.setItemText(0, "2304x1440")
         self.ResolutionSelect.addItem("")
         self.ResolutionSelect.addItem("")
         self.ResolutionSelect.addItem("")
@@ -607,22 +621,22 @@ class Ui_PUBG(object):
     def retranslateUi(self, PUBG):
         _translate = QtCore.QCoreApplication.translate
         PUBG.setWindowTitle(_translate("PUBG", "LGHUB"))
-        self.Title.setText(_translate("PUBG", "PUBG 自动识别鼠标宏"))
-        self.Remind.setHtml(_translate("PUBG", "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n"
-"<html><head><meta name=\"qrichtext\" content=\"1\" /><style type=\"text/css\">\n"
-"p, li { white-space: pre-wrap; }\n"
-"</style></head><body style=\" font-family:\'SimSun\'; font-size:9pt; font-weight:400; font-style:normal;\">\n"
-"<p align=\"center\" style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">使用须知</span></p>\n"
-"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 1.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">本软件免费学习使用，禁止倒卖，交流QQ群：695919722</span></p>\n"
-"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 2.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">如果觉得好用，可以在下方支持下作者，广告联系作者微信：js_python98</span></p>\n"                                              
-"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 3.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">使用需要安装罗技GHUB 21版本或LGS蓝驱的驱动，并禁止驱动更新</span></p>\n"                                               
-"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 4.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">GHUB和本软件都需要以管理员身份运行</span></p>\n"
-"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 5.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">分辨率支持：1080p 1.5k 1440p 1660p 2.5k 4k</span></p>\n"
-"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">6.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">打开背包后，按下tab识别，识别率高达95%，支持全配件识别</span></p>\n"
-"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">7.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">适配所有灵敏度</span></p>\n"
-"<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">8.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">按下“Home键”弹出隐藏窗口，按下“ins”键重置当前所有状态（枪械，开镜方式，姿态，开镜状态）</span></p>\n"
-"<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"><br /></p>\n"
-"<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:\'宋体\',\'monospace\'; font-size:12pt; color:#ecc48d;\"><br /></p></body></html>"))
+#         self.Title.setText(_translate("PUBG", "PUBG 自动识别鼠标宏"))
+#         self.Remind.setHtml(_translate("PUBG", "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n"
+# "<html><head><meta name=\"qrichtext\" content=\"1\" /><style type=\"text/css\">\n"
+# "p, li { white-space: pre-wrap; }\n"
+# "</style></head><body style=\" font-family:\'SimSun\'; font-size:9pt; font-weight:400; font-style:normal;\">\n"
+# "<p align=\"center\" style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">使用须知</span></p>\n"
+# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 1.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">本软件免费学习使用，禁止倒卖，交流QQ群：695919722</span></p>\n"
+# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 2.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">如果觉得好用，可以在下方支持下作者，广告联系作者微信：js_python98</span></p>\n"
+# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 3.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">使用需要安装罗技GHUB 21版本或LGS蓝驱的驱动，并禁止驱动更新</span></p>\n"
+# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 4.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">GHUB和本软件都需要以管理员身份运行</span></p>\n"
+# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 5.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">分辨率支持：1080p 1.5k 1440p 1660p 2.5k 4k</span></p>\n"
+# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">6.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">打开背包后，按下tab识别，识别率高达95%，支持全配件识别</span></p>\n"
+# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">7.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">适配所有灵敏度</span></p>\n"
+# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">8.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">按下“Home键”弹出隐藏窗口，按下“ins”键重置当前所有状态（枪械，开镜方式，姿态，开镜状态）</span></p>\n"
+# "<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"><br /></p>\n"
+# "<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:\'宋体\',\'monospace\'; font-size:12pt; color:#ecc48d;\"><br /></p></body></html>"))
         self.ScopeMode.setTitle(_translate("PUBG", "开镜模式"))
         self.LongPress.setText(_translate("PUBG", "长按"))
         self.ClickPress.setText(_translate("PUBG", "单击"))
@@ -653,11 +667,12 @@ class Ui_PUBG(object):
         self.Resolution.setTitle(_translate("PUBG", "分辨率设置"))
         self.ResolutionLabel.setText(_translate("PUBG", "当前分辨率："))
         self.ResolutionSelect.setItemText(1, _translate("PUBG", "1728x1080"))
-        self.ResolutionSelect.setItemText(2, _translate("PUBG", "2560x1080"))
-        self.ResolutionSelect.setItemText(3, _translate("PUBG", "2560x1440"))
-        self.ResolutionSelect.setItemText(4, _translate("PUBG", "2560x1600"))
-        self.ResolutionSelect.setItemText(5, _translate("PUBG", "3440x1440"))
-        self.ResolutionSelect.setItemText(6, _translate("PUBG", "3840x2160"))
+        self.ResolutionSelect.setItemText(2, _translate("PUBG", "1920x1080"))
+        self.ResolutionSelect.setItemText(3, _translate("PUBG", "2560x1080"))
+        self.ResolutionSelect.setItemText(4, _translate("PUBG", "2560x1440"))
+        self.ResolutionSelect.setItemText(5, _translate("PUBG", "2560x1600"))
+        self.ResolutionSelect.setItemText(6, _translate("PUBG", "3440x1440"))
+        self.ResolutionSelect.setItemText(7, _translate("PUBG", "3840x2160"))
         self.ResolutionBtn.setText(_translate("PUBG", "保存设置"))
         self.Sensitivity.setTitle(_translate("PUBG", "灵敏度设置"))
         self.SensitivityLabel.setText(_translate("PUBG", "当前灵敏度："))

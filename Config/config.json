@@ -1,10 +1,10 @@
 {
-  "resolution": "2560x1440",
+  "resolution": "2304x1440",
   "sensitivity": {
-    "none": 3,
-    "hongdian": 3.4,
-    "quanxi": 3.9,
-    "2bei": 3.3,
+    "none": 3.4,
+    "hongdian": 3.45,
+    "quanxi": 3.5,
+    "2bei": 4,
     "3bei": 5,
     "4bei": 7,
     "6bei": 5,

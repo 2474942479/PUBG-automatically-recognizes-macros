@@ -23,7 +23,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.setWindowFlags(Qt.WindowStaysOnTopHint)  # 设置窗口始终置顶
         self.Init_UI_LOG("程序初始化中.....")  # 初始化日志
         self.Init_UI_LOG(PC.ghub_device_info)  # 初始化日志，显示设备信息
-        self.Init_UI_Win()  # 初始化窗口信息
+        # self.Init_UI_Win()  # 初始化窗口信息
         self.Init_UI_Equip(PC.Current_firearms)  # 初始化枪械信息
         self.Init_UI_Posture(PC.Current_posture)  # 初始化姿态信息
         self.Init_UI_ScopeMode(PC.RightClick)  # 初始化开镜模式
