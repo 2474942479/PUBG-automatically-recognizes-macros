@@ -3,7 +3,7 @@ import mss
 import os
 import time
 import asyncio
-from resolution_setting import RESOLUTION_SETTINGS, GUNS_REOLUTION_SETTINGS, Click
+from resolution_setting import RESOLUTION_SETTINGS, GUNS_REOLUTION_SETTINGS, Click, Zishi
 import numpy as np
 from PIL import ImageGrab
 
@@ -13,6 +13,13 @@ def MSS_Img(Values):
         monitor = {"top": x1, "left": y1, "width": x2, "height": y2}
         img = sct.grab(monitor)
         img_np = np.array(img)  # 转换为numpy数组
+        # # 创建或确保 test 文件夹存在
+        # if not os.path.exists('test'):
+        #     os.makedirs('test')
+        # # # 保存ROI图像
+        # roi_filename = f"test/captured_roi_zishi_{x1}_{y1}_{x2}_{y2}.png"
+        # cv2.imwrite(roi_filename, img_np)
+        # print(f"Saved captured ROI image to: {roi_filename}")
         img_gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)  # 转换为灰度图
     return img_gray
 
@@ -118,6 +125,16 @@ async def capture_all_positions_thread(current_res):
 
     return ReturnData
 
+async def capture_zishi_positions_thread(current_res):
+    start_time = time.time()  # 记录开始时间
+    zishi_img = Zishi[current_res]
+    Images = MSS_Img(zishi_img)
+
+    zishi = {"zishi_c": Images}
+    ReturnData = await asyncio.gather(capture_all_guns(zishi))
+    elapsed_time = time.time() - start_time  # 计算总耗时
+    print(f"解析姿势耗时: {elapsed_time:.2f} seconds，结果：{ReturnData}")
+    return ReturnData
 def recogniseif_firearm(current_res):
     x1, x2 = Click.get(current_res, None)
     # 使用Pillow库获取屏幕像素颜色

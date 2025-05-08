@@ -32,6 +32,10 @@ class AppMainMouseListener(QThread):  # 定义鼠标监听器类，继承自QThr
                 if self.PC.RightClick:  # 如果右键开镜模式为True
                     if pressed:  # 如果按下
                         self.PC.StartFire = True  # 设置开镜状态为True
+                        # 第一人称识别姿势
+                        if self.PC.firstPerson:
+                            Thread(target=self.PC.recognize_zishi_info).start()
+                            self.mouseClicked.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
                     else:  # 如果释放
                         self.PC.StartFire = False  # 设置开镜状态为False
                 else:  # 如果右键开镜模式为False

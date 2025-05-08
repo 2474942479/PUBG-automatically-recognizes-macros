@@ -31,6 +31,9 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
         elif Keys in "zc" or Keys == "space":  # 如果按下z、c或空格键
             self.PC.Change_posture(Keys)  # 更改姿态
             self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
+        elif Keys in "v":  # 切换视角
+            self.PC.firstPerson = not self.PC.firstPerson  # 更改视角
+            self.keyInfo.emit('v', (self.PC.firstPerson,))  # 发送视角信息信号
         elif Keys == "insert":  # 如果按下Insert键
             self.PC.reduction_data()  # 重置数据
             self.keyInfo.emit('c', (None,))  # 发送重置数据信号

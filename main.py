@@ -50,7 +50,8 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.SquatDown.clicked.connect(lambda: self.Btn_click("Posture", 'c'))  # 绑定趴下姿态按钮事件
         self.LongPress.clicked.connect(lambda: self.Btn_click("ScopeMode", True))  # 绑定长按开镜按钮事件
         self.ClickPress.clicked.connect(lambda: self.Btn_click("ScopeMode", False))  # 绑定点击开镜按钮事件
-    
+        self.FirstPerson.clicked.connect(lambda: self.Btn_click("personView", True))   # 绑定第一人称按钮事件
+        self.ThirdPerson.clicked.connect(lambda: self.Btn_click("personView", False))  # 绑定第一人称按钮事件
     def Init_UI_Win(self):  # 初始化窗口信息
         if PC.window_version:  # 判断操作系统版本
             version = "(Win11版)"  # 设置为Win11版本
@@ -71,6 +72,8 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
             PC.RightClick = value  # 设置开镜模式
         elif key == "ScopeOpen":  # 如果是开镜状态选择
             PC.StartFire = value  # 设置开镜状态
+        elif key == "personView": # 第一人称
+            PC.firstPerson = value
     
     def toggle_window(self):  # 切换窗口显示状态
         if self.isHidden:  # 如果当前隐藏
@@ -136,6 +139,14 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
             self.OpenScope.setChecked(True)  # 设置开镜按钮选中
         else:  # 如果不开镜
             self.CloseScope.setChecked(True)  # 设置关镜按钮选中
+
+    def Init_UI_firstPerson(self, model):
+        if model:  # 如果是第一人称
+            self.FirstPerson.setChecked(True)  # 设置第一人称按钮选中
+            self.ThirdPerson.setChecked(False)
+        else:  # 如果不是第一人称
+            self.ThirdPerson.setChecked(True)  # 设置第三人称按钮选中
+            self.FirstPerson.setChecked(False)
     
     def Init_UI_GunsData(self):  # 初始化UI枪械数据
         """
@@ -258,7 +269,8 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
             "e": (self.Init_UI_Equip, [values]),  # 枪械信息事件
             "p": (self.Init_UI_Posture, [values]),  # 姿态信息事件
             "c": (self.Init_UI_ReductionData, []),  # 所有数据事件
-            "t": (self.toggle_window, [])  # 切换窗口事件
+            "t": (self.toggle_window, []),  # 切换窗口事件
+            "v": (self.Init_UI_firstPerson, [values]) # 切换视角
         }
         
         action, args = actions.get(key, (None, None))  # 获取事件处理函数和参数

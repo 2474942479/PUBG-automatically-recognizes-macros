@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 from GHUB import ghub_device
-from recognition import capture_all_positions_thread, recogniseif_firearm
+from recognition import capture_all_positions_thread, recogniseif_firearm, capture_zishi_positions_thread
 from fire_data import KEY_DATA
 import asyncio
 import numpy as np
@@ -40,6 +40,7 @@ class ProcessClass:
         self.StartFire = False  # 是否开枪倍镜
         self.RightClick = True  # 右键按下模式 False 单击 True 长按
         self.clicking = False
+        self.firstPerson = False # 是否第一人称
         self.shift_pressed = False  # 记录 Shift 键是否按下
         self.ScopeData = self.get_config_data('s')
         self.GunsName = None
@@ -157,6 +158,16 @@ class ProcessClass:
 
     def IF_Open_Lens(self):
         self.StartFire = recogniseif_firearm(self.Monitor)
+
+    def recognize_zishi_info(self):
+        """
+        姿势识别
+        :return:
+        """
+
+        Data = asyncio.run(capture_zishi_positions_thread(self.Monitor))
+        self.Current_posture = Data[0].get("zishi", "None")
+
 
     def Change_posture(self, keyWord):
         """
