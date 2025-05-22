@@ -165,7 +165,7 @@ class ProcessClass:
         :return:
         """
 
-        Data = asyncio.run(capture_zishi_positions_thread(self.Monitor))
+        Data = asyncio.run(capture_zishi_positions_thread(self.Monitor, self.firstPerson))
         self.Current_posture = Data[0].get("zishi", "None")
 
 
