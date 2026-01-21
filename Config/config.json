@@ -1,15 +1,1 @@
-{
-  "resolution": "2304x1440",
-  "sensitivity": {
-    "none": 3.4,
-    "hongdian": 3.45,
-    "quanxi": 3.5,
-    "2bei": 4,
-    "3bei": 5,
-    "4bei": 7,
-    "6bei": 5,
-    "8bei": 5.7,
-    "15bei": 10,
-    "shift": 1.5
-  }
-}
+{"resolution": "3840x2160", "sensitivity": {"none": 3.4, "hongdian": 1.8, "quanxi": 2, "2bei": 6, "3bei": 8, "4bei": 11.5, "6bei": 5, "8bei": 5.7, "15bei": 10, "shift": 1.5}}

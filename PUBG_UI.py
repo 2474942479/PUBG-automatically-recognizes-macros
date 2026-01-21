@@ -534,7 +534,7 @@ class Ui_PUBG(object):
         self.ResolutionSelect = QtWidgets.QComboBox(self.Resolution)
         self.ResolutionSelect.setObjectName("ResolutionSelect")
         self.ResolutionSelect.addItem("")
-        self.ResolutionSelect.setItemText(0, "2304x1440")
+        self.ResolutionSelect.setItemText(0, "3840x2160")
         self.ResolutionSelect.addItem("")
         self.ResolutionSelect.addItem("")
         self.ResolutionSelect.addItem("")
