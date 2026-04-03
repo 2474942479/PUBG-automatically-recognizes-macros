@@ -1,11 +1,12 @@
-import sys  # 导入系统模块，用于退出应用程序
+﻿import sys  # 导入系统模块，用于退出应用程序
 import fire_data  # 导入自定义模块，可能包含枪械数据
 import Process  # 导入自定义模块，可能包含核心处理逻辑
 from PyQt5.QtCore import QThread, Qt, pyqtSignal, QEvent  # 导入PyQt5的核心模块
 from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QMainWindow  # 导入PyQt5的GUI模块
 from PUBG_UI import Ui_PUBG  # 导入自定义的UI类
 from MouseListener import AppMainMouseListener  # 导入鼠标监听器类
-from KeyListener import AppMainKeyListener  # 导入键盘监听器类
+from KeyListener import AppMainKeyListener
+from overlay_hud import GameHUD  # 导入键盘监听器类
 
 class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidget和UI类
     def __init__(self):  # 初始化方法
@@ -33,6 +34,8 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.Init_UI_Sensitivity()  # 初始化灵敏度
         self.Init_UI_Btn()  # 初始化按钮
         self.Init_UI_LOG("程序初始化完成.....")  # 初始化完成日志
+        # 初始化 HUD 浮窗
+        self._hud = GameHUD(PC)
     
     def Init_UI_Btn(self):  # 初始化按钮事件
         self.Startbtn.clicked.connect(self.start)  # 绑定开始按钮事件
@@ -228,6 +231,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         
         self.SetStatus()  # 设置状态
         self.StatusInfo.setText('程序运行中.....')  # 更新状态信息
+        self._hud.show_hud()
     
     def SetStatus(self):  # 设置按钮状态
         self.Startbtn.setEnabled(False)  # 禁用开始按钮
@@ -239,6 +243,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
     
     def stop(self):  # 停止程序
         self.StatusInfo.setText('程序退出中....')  # 更新状态信息
+        self._hud.stop()
         self.my_key_thread.stop_listener()  # 停止键盘监听
         self.my_mouse_thread.stop_listener()  # 停止鼠标监听
         self.my_key_thread.terminate()  # 终止键盘线程
@@ -252,12 +257,14 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
             self.my_mouse_thread.stop_listener()  # 停止鼠标监听
             self.Pausebtn.setText("继续")  # 更新按钮文本
             self.StatusInfo.setText('程序暂停中....')  # 更新状态信息
+            self._hud.hide_hud()
             self.pauses = False  # 更新暂停状态
         else:  # 如果当前继续
             self.my_key_thread.rerun()  # 重新启动键盘监听
             self.my_mouse_thread.rerun()  # 重新启动鼠标监听
             self.Pausebtn.setText("暂停")  # 更新按钮文本
             self.StatusInfo.setText('程序运行中....')  # 更新状态信息
+            self._hud.show_hud()
             self.pauses = True  # 更新暂停状态
     
     def onKeyPressed(self, key, value):  # 处理按键事件
