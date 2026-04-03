@@ -91,6 +91,7 @@ class MouseController:
         if self.driver_name == 'GHUB':
             self.driver.mouse_To(int(x), int(y))
         elif self.driver_name == 'pyopdll':
+            # pyopdll API: MoveTo(x, y)
             self.driver.MoveTo(int(x), int(y))
         elif self.driver_name == 'pynput':
             from pynput.mouse import Button
@@ -102,7 +103,11 @@ class MouseController:
         if self.driver_name == 'GHUB':
             self.driver.mouse_down(int(button))
         elif self.driver_name == 'pyopdll':
-            self.driver.MouseDown(int(button))
+            # pyopdll API: 使用 keyboard 模拟鼠标点击
+            # pyopdll 主要用于键盘，鼠标需要其他方式
+            # 尝试使用 ctypes 调用 Windows API
+            import ctypes
+            ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
         elif self.driver_name == 'pynput':
             from pynput.mouse import Button
             self.driver.press(Button.left)
@@ -112,7 +117,9 @@ class MouseController:
         if self.driver_name == 'GHUB':
             self.driver.mouse_up(int(button))
         elif self.driver_name == 'pyopdll':
-            self.driver.MouseUp(int(button))
+            # pyopdll API: 使用 ctypes 调用 Windows API
+            import ctypes
+            ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
         elif self.driver_name == 'pynput':
             from pynput.mouse import Button
             self.driver.release(Button.left)
