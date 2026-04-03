@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PUBG 压枪参数一键自动校准工具
-refactor 分支专用版本 - 完全自动化版
+PUBG 压枪参数一键自动校准工具 V4
+refactor 分支专用版本 - 多轮分段射击版
 
 功能：
-1. 自动按 Tab 打开背包
+1. 自动按 Tab 打开/关闭背包
 2. 自动识别武器和配件
-3. 自动关闭背包
-4. 自动开枪射击 30 发
-5. 自动分析弹痕
-6. 自动更新配置
+3. 自动长按右键开镜 + 左键射击
+4. 分段射击：15 发 → 30 发 → 40 发（避免飘出靶墙）
+5. 射击过程中高速截图（50 FPS）
+6. 多轮测试交叉比对
+7. 分段弹道分析（前 10 发、10-20 发、20 发后）
+8. 自动更新配置
 
 依赖：mss, opencv-python, numpy, pillow, pyautogui, keyboard
 """
@@ -23,6 +25,7 @@ import json
 import os
 import sys
 import asyncio
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -34,7 +37,7 @@ from Process import ProcessClass
 # 尝试导入键盘鼠标控制
 try:
     import pyautogui
-    pyautogui.FAILSAFE = False  # 禁用故障保护
+    pyautogui.FAILSAFE = False
     HAS_PYAUTOGUI = True
 except ImportError:
     HAS_PYAUTOGUI = False
@@ -48,7 +51,7 @@ except ImportError:
 
 
 class MouseController:
-    """通用鼠标控制器（支持多种驱动）"""
+    """通用鼠标控制器"""
     
     def __init__(self):
         self.driver_name = None
@@ -102,25 +105,33 @@ class MouseController:
         elif self.driver_name == 'pyautogui':
             pyautogui.moveTo(int(x), int(y))
     
-    def mouse_down(self, button=1):
+    def mouse_down(self, button='left'):
         """按下鼠标按钮"""
         if self.driver_name == 'pyopdll':
             import ctypes
-            ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+            if button == 'right':
+                ctypes.windll.user32.mouse_event(0x0008, 0, 0, 0, 0)
+            else:
+                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
         elif self.driver_name == 'GHUB':
-            self.driver.mouse_down(int(button))
+            btn = 2 if button == 'right' else 1
+            self.driver.mouse_down(btn)
         elif self.driver_name == 'pyautogui':
-            pyautogui.mouseDown(button='left')
+            pyautogui.mouseDown(button=button)
     
-    def mouse_up(self, button=1):
+    def mouse_up(self, button='left'):
         """释放鼠标按钮"""
         if self.driver_name == 'pyopdll':
             import ctypes
-            ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+            if button == 'right':
+                ctypes.windll.user32.mouse_event(0x0010, 0, 0, 0, 0)
+            else:
+                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
         elif self.driver_name == 'GHUB':
-            self.driver.mouse_up(int(button))
+            btn = 2 if button == 'right' else 1
+            self.driver.mouse_up(btn)
         elif self.driver_name == 'pyautogui':
-            pyautogui.mouseUp(button='left')
+            pyautogui.mouseUp(button=button)
     
     def is_available(self):
         """检查驱动是否可用"""
@@ -128,7 +139,7 @@ class MouseController:
 
 
 class AutoCalibrator:
-    """一键自动校准器（完全自动化版）"""
+    """一键自动校准器 V4 - 多轮分段射击"""
     
     def __init__(self):
         self.config_path = Path("./Config/config.json")
@@ -144,7 +155,7 @@ class AutoCalibrator:
             print("\n✗ 鼠标驱动不可用，退出校准")
             sys.exit(1)
         
-        # 截图区域（默认全屏，用户可以调整）
+        # 截图区域
         self.resolution = self.PC.Monitor
         self.capture_region = self._get_capture_region(self.resolution)
         
@@ -154,17 +165,26 @@ class AutoCalibrator:
         self.min_circularity = 0.3
         self.diff_threshold = 20
         
-        # 截图频率
-        self.capture_interval = 0.03  # 30ms
+        # 截图频率 - 射击过程中高速截图
+        self.capture_interval = 0.02  # 20ms (50 FPS)
         
         # 校准结果
-        self.bullet_holes = []
-        self.vertical_displacements = []
+        self.all_round_results = []  # 多轮测试结果
         self.suggested_scopes = {}
         
         # 当前武器信息
         self.current_weapon = None
         self.current_scope = None
+        
+        # 分段射击配置
+        self.shooting_phases = [15, 30, 40]  # 分段射击：15 发 → 30 发 → 40 发
+        
+        # 分段弹道分析
+        self.phase_analysis = {
+            'phase1': {'bullets': [], 'avg_displacement': 0},  # 前 10 发
+            'phase2': {'bullets': [], 'avg_displacement': 0},  # 10-20 发
+            'phase3': {'bullets': [], 'avg_displacement': 0}   # 20 发后
+        }
         
     def _get_capture_region(self, resolution):
         """获取截图区域"""
@@ -188,38 +208,8 @@ class AutoCalibrator:
             return np.array(img)
     
     def auto_press_tab(self):
-        """
-        自动按 Tab 键打开背包
-        """
-        print("\n正在打开背包...")
-        
-        if HAS_KEYBOARD:
-            # 使用 keyboard 库
-            keyboard.press('tab')
-            keyboard.release('tab')
-            print("✓ 已按 Tab 键（keyboard 库）")
-        elif HAS_PYAUTOGUI:
-            # 使用 pyautogui
-            pyautogui.press('tab')
-            print("✓ 已按 Tab 键（pyautogui）")
-        else:
-            # 使用 ctypes 模拟按键
-            import ctypes
-            user32 = ctypes.windll.user32
-            VK_TAB = 0x09
-            user32.keybd_event(VK_TAB, 0, 0, 0)  # 按下
-            time.sleep(0.1)
-            user32.keybd_event(VK_TAB, 0, 2, 0)  # 释放
-            print("✓ 已按 Tab 键（Windows API）")
-        
-        # 等待背包打开
-        time.sleep(1.5)
-    
-    def auto_close_bag(self):
-        """
-        自动按 Tab 键关闭背包
-        """
-        print("\n关闭背包...")
+        """自动按 Tab 键"""
+        print("  → 按 Tab 键...")
         
         if HAS_KEYBOARD:
             keyboard.press('tab')
@@ -235,18 +225,19 @@ class AutoCalibrator:
             user32.keybd_event(VK_TAB, 0, 2, 0)
         
         time.sleep(0.5)
-        print("✓ 背包已关闭")
     
     def detect_weapon(self):
-        """
-        使用现有 recognition.py 识别武器
-        """
+        """识别武器（自动按 Tab 打开/关闭背包）"""
         print("\n正在识别武器...")
         
-        # 1. 自动按 Tab 打开背包
+        # 1. 按 Tab 打开背包
         self.auto_press_tab()
         
-        # 2. 调用现有识别逻辑
+        # 2. 等待背包打开动画
+        print("  → 等待背包打开...")
+        time.sleep(1.0)
+        
+        # 3. 调用现有识别逻辑
         try:
             result = asyncio.run(capture_all_positions_thread(self.resolution))
             weapon_info = result[0]
@@ -261,8 +252,11 @@ class AutoCalibrator:
                 print(f"  枪口：{weapon_info.get('Muzzle', '无')}")
                 print(f"  握把：{weapon_info.get('Grip', '无')}")
                 
-                # 3. 自动关闭背包
-                self.auto_close_bag()
+                # 4. 再按一次 Tab 关闭背包
+                print("\n  → 关闭背包...")
+                self.auto_press_tab()
+                time.sleep(0.5)
+                print("✓ 背包已关闭")
                 
                 return True
             else:
@@ -270,24 +264,18 @@ class AutoCalibrator:
                 print("使用默认武器 M762 进行校准")
                 self.current_weapon = 'M762'
                 self.current_scope = 'hongdian'
-                self.auto_close_bag()
+                self.auto_press_tab()
                 return True
                 
         except Exception as e:
             print(f"\n✗ 识别失败：{e}")
-            self.auto_close_bag()
+            self.auto_press_tab()
             self.current_weapon = 'M762'
             self.current_scope = 'hongdian'
             return True
     
-    def auto_fire(self, num_shots=30, fire_mode='auto'):
-        """
-        自动控制鼠标开火
-        
-        参数:
-            num_shots: 射击次数
-            fire_mode: 'auto' 或 'single'
-        """
+    def auto_fire_with_aim(self, num_shots=30, fire_mode='auto'):
+        """自动控制鼠标开火（长按右键开镜 + 左键射击）"""
         print(f"\n准备自动射击 {num_shots} 发...")
         print(f"射击模式：{fire_mode}")
         print(f"武器：{self.current_weapon}")
@@ -299,24 +287,30 @@ class AutoCalibrator:
         else:
             fire_mode = 'single'
         
-        # 等待 3 秒准备
-        print("\n射击准备：3 秒...")
-        for i in range(3, 0, -1):
+        # 等待 2 秒准备
+        print("\n射击准备：2 秒...")
+        for i in range(2, 0, -1):
             print(f"  {i}...")
             time.sleep(1)
         
         print("\n开始射击，请保持准星稳定...")
         
-        # 移动鼠标到屏幕中心（确保游戏窗口激活）
+        # 移动鼠标到屏幕中心
         screen_center_x = self.capture_region[0] + self.capture_region[2] // 2
         screen_center_y = self.capture_region[1] + self.capture_region[3] // 2
         self.mouse.mouse_move_to(screen_center_x, screen_center_y)
-        time.sleep(0.5)
+        time.sleep(0.3)
         
+        # 1. 长按右键开镜
+        print("  → 长按右键开镜...")
+        self.mouse.mouse_down('right')
+        time.sleep(0.5)  # 等待开镜动画
+        
+        # 2. 射击
         if fire_mode == 'auto':
             # 自动武器：按住左键
-            print("  → 按住左键...")
-            self.mouse.mouse_down(1)
+            print("  → 按住左键射击...")
+            self.mouse.mouse_down('left')
             
             # 根据武器射速计算射击时间
             fire_rate = 10  # 发/秒
@@ -325,19 +319,23 @@ class AutoCalibrator:
             
             # 松开左键
             print("  → 松开左键")
-            self.mouse.mouse_up(1)
+            self.mouse.mouse_up('left')
             
         else:
             # 单发武器：点击 num_shots 次
             print(f"  → 点击左键 {num_shots} 次...")
             for i in range(num_shots):
-                self.mouse.mouse_down(1)
+                self.mouse.mouse_down('left')
                 time.sleep(0.15)
-                self.mouse.mouse_up(1)
+                self.mouse.mouse_up('left')
                 time.sleep(0.05)
                 
                 if (i + 1) % 10 == 0:
                     print(f"    已射击 {i+1}/{num_shots} 发")
+        
+        # 3. 松开右键
+        print("  → 松开右键")
+        self.mouse.mouse_up('right')
         
         print(f"\n✓ 射击完成")
     
@@ -429,17 +427,237 @@ class AutoCalibrator:
                 filtered.append(hole)
         return filtered
     
-    def run_calibration(self, num_shots=30):
-        """运行全自动校准"""
+    def analyze_phase_recoil(self, bullet_holes, total_shots=30):
+        """分段分析后坐力"""
+        print("\n分析分段弹道...")
+        
+        sorted_holes = sorted(bullet_holes, key=lambda h: h[1])
+        
+        # 计算每发的垂直位移
+        displacements = []
+        for i in range(1, len(sorted_holes)):
+            dy = sorted_holes[i][1] - sorted_holes[i-1][1]
+            displacements.append(dy)
+        
+        # 分段分析
+        phase1_end = min(10, len(displacements))
+        phase2_end = min(20, len(displacements))
+        
+        # 前 10 发
+        if phase1_end > 0:
+            phase1_disp = displacements[:phase1_end]
+            self.phase_analysis['phase1']['bullets'] = phase1_disp
+            self.phase_analysis['phase1']['avg_displacement'] = np.mean(phase1_disp)
+            print(f"  前 10 发：平均位移 {np.mean(phase1_disp):.2f} 像素")
+        
+        # 10-20 发
+        if phase2_end > phase1_end:
+            phase2_disp = displacements[phase1_end:phase2_end]
+            self.phase_analysis['phase2']['bullets'] = phase2_disp
+            self.phase_analysis['phase2']['avg_displacement'] = np.mean(phase2_disp)
+            print(f"  10-20 发：平均位移 {np.mean(phase2_disp):.2f} 像素")
+        
+        # 20 发后
+        if len(displacements) > phase2_end:
+            phase3_disp = displacements[phase2_end:]
+            self.phase_analysis['phase3']['bullets'] = phase3_disp
+            self.phase_analysis['phase3']['avg_displacement'] = np.mean(phase3_disp)
+            print(f"  20 发后：平均位移 {np.mean(phase3_disp):.2f} 像素")
+        
+        # 计算水平偏移（随机性）
+        horizontal_offsets = []
+        for i in range(1, len(sorted_holes)):
+            dx = sorted_holes[i][0] - sorted_holes[i-1][0]
+            horizontal_offsets.append(dx)
+        
+        if horizontal_offsets:
+            avg_horizontal = np.mean(horizontal_offsets)
+            std_horizontal = np.std(horizontal_offsets)
+            print(f"\n  水平偏移：平均 {avg_horizontal:.2f} 像素，标准差 {std_horizontal:.2f} 像素（随机）")
+        
+        return self.phase_analysis
+    
+    def run_single_round(self, round_num, num_shots=30):
+        """执行单轮测试"""
+        print(f"\n{'='*60}")
+        print(f"    第 {round_num} 轮测试：射击 {num_shots} 发")
+        print(f"{'='*60}")
+        
+        round_data = {
+            'round': round_num,
+            'shots': num_shots,
+            'bullet_holes': [],
+            'screenshots': [],
+            'phase_analysis': {}
+        }
+        
+        # 1. 保存基准图像
+        base_image = self.capture_screen()
+        base_path = self.save_dir / f"round_{round_num}_base.png"
+        cv2.imwrite(str(base_path), base_image)
+        print(f"✓ 基准图像已保存")
+        
+        # 2. 启动射击线程
+        fire_thread = threading.Thread(
+            target=self.auto_fire_with_aim,
+            args=(num_shots, 'auto')
+        )
+        fire_thread.start()
+        
+        # 3. 同时开始截图
+        start_time = time.time()
+        frame_count = 0
+        shooting_duration = num_shots / 10 + 1  # 射击时间 + 1 秒缓冲
+        
+        print(f"\n正在高速截图（{1/self.capture_interval:.0f} FPS）...")
+        
+        while time.time() - start_time < shooting_duration:
+            current_image = self.capture_screen()
+            round_data['screenshots'].append(current_image)
+            frame_count += 1
+            
+            # 每 10 帧保存一张调试图
+            if frame_count % 10 == 0:
+                screenshot_path = self.save_dir / f"round{round_num}_frame_{frame_count}.png"
+                cv2.imwrite(str(screenshot_path), current_image)
+            
+            time.sleep(self.capture_interval)
+        
+        # 等待射击线程结束
+        fire_thread.join()
+        
+        print(f"\n✓ 第 {round_num} 轮射击完成，共截图 {frame_count} 张")
+        
+        # 4. 分析弹痕
+        print("\n开始分析弹痕分布...")
+        
+        if len(round_data['screenshots']) >= 2:
+            first_frame = round_data['screenshots'][0]
+            last_frame = round_data['screenshots'][-1]
+            
+            # 保存最后一张截图
+            last_path = self.save_dir / f"round_{round_num}_last_frame.png"
+            cv2.imwrite(str(last_path), last_frame)
+            
+            # 分析弹痕
+            for i, frame in enumerate(round_data['screenshots'][::5]):
+                new_holes = self.detect_bullet_holes_wall(first_frame, frame, i)
+                new_holes_coords = [(h[0], h[1], h[2], h[3]) for h in new_holes]
+                new_holes_coords = self.filter_duplicate_holes(new_holes_coords)
+                
+                for hole in new_holes_coords:
+                    is_duplicate = False
+                    for existing in round_data['bullet_holes']:
+                        dist = np.sqrt((hole[0]-existing[0])**2 + (hole[1]-existing[1])**2)
+                        if dist < 25:
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        round_data['bullet_holes'].append(hole)
+                        print(f"  检测到新弹痕 #{len(round_data['bullet_holes'])}: ({hole[0]}, {hole[1]})")
+        
+        print(f"\n第 {round_num} 轮识别到弹痕数量：{len(round_data['bullet_holes'])}")
+        
+        # 5. 分段分析
+        phase_analysis = self.analyze_phase_recoil(round_data['bullet_holes'], num_shots)
+        round_data['phase_analysis'] = phase_analysis.copy()
+        
+        # 6. 保存结果
+        self.all_round_results.append(round_data)
+        
+        return round_data
+    
+    def cross_validate_results(self):
+        """交叉比对多轮测试结果"""
+        print(f"\n{'='*60}")
+        print("    多轮测试交叉比对")
+        print(f"{'='*60}")
+        
+        if len(self.all_round_results) < 2:
+            print("⚠ 只有一轮测试数据，无法交叉比对")
+            return self.all_round_results[0] if self.all_round_results else None
+        
+        # 收集所有轮次的数据
+        all_displacements = []
+        all_phase1 = []
+        all_phase2 = []
+        all_phase3 = []
+        
+        for round_data in self.all_round_results:
+            phase = round_data['phase_analysis']
+            
+            if phase['phase1']['bullets']:
+                all_phase1.extend(phase['phase1']['bullets'])
+            
+            if phase['phase2']['bullets']:
+                all_phase2.extend(phase['phase2']['bullets'])
+            
+            if phase['phase3']['bullets']:
+                all_phase3.extend(phase['phase3']['bullets'])
+        
+        # 计算综合平均值
+        print("\n综合统计:")
+        
+        if all_phase1:
+            avg_phase1 = np.mean(all_phase1)
+            std_phase1 = np.std(all_phase1)
+            print(f"  前 10 发：平均 {avg_phase1:.2f} 像素，标准差 {std_phase1:.2f}")
+            all_displacements.extend(all_phase1)
+        
+        if all_phase2:
+            avg_phase2 = np.mean(all_phase2)
+            std_phase2 = np.std(all_phase2)
+            print(f"  10-20 发：平均 {avg_phase2:.2f} 像素，标准差 {std_phase2:.2f}")
+            all_displacements.extend(all_phase2)
+        
+        if all_phase3:
+            avg_phase3 = np.mean(all_phase3)
+            std_phase3 = np.std(all_phase3)
+            print(f"  20 发后：平均 {avg_phase3:.2f} 像素，标准差 {std_phase3:.2f}")
+            all_displacements.extend(all_phase3)
+        
+        # 计算总体平均
+        if all_displacements:
+            overall_avg = np.mean(all_displacements)
+            overall_std = np.std(all_displacements)
+            print(f"\n  总体平均：{overall_avg:.2f} 像素，标准差 {overall_std:.2f}")
+            
+            # 检查各轮次一致性
+            print("\n各轮次一致性检查:")
+            for i, round_data in enumerate(self.all_round_results, 1):
+                phase = round_data['phase_analysis']
+                if phase['phase1']['bullets']:
+                    round_avg = np.mean(phase['phase1']['bullets'])
+                    diff = abs(round_avg - overall_avg) / overall_avg * 100
+                    status = "✓" if diff < 20 else "⚠"
+                    print(f"  第{i}轮：{round_avg:.2f} 像素 (偏差 {diff:.1f}%) {status}")
+        
+        return {
+            'overall_avg': overall_avg if all_displacements else 0,
+            'overall_std': overall_std if all_displacements else 0,
+            'phase1_avg': np.mean(all_phase1) if all_phase1 else 0,
+            'phase2_avg': np.mean(all_phase2) if all_phase2 else 0,
+            'phase3_avg': np.mean(all_phase3) if all_phase3 else 0,
+            'rounds': len(self.all_round_results)
+        }
+    
+    def run_calibration(self, shooting_phases=None):
+        """运行全自动校准（多轮分段射击）"""
+        
+        if shooting_phases is None:
+            shooting_phases = self.shooting_phases
+        
         print("\n" + "="*60)
-        print("    PUBG 压枪参数一键自动校准工具")
-        print("    (完全自动化版)")
+        print("    PUBG 压枪参数一键自动校准工具 V4")
+        print("    (多轮分段射击版)")
         print("="*60)
         print(f"\n当前分辨率：{self.resolution}")
         print(f"截图区域：{self.capture_region}")
         print(f"截图频率：{1/self.capture_interval:.0f} FPS")
+        print(f"分段射击配置：{shooting_phases}")
         
-        # 1. 识别武器（自动按 Tab）
+        # 1. 识别武器（自动按 Tab 打开/关闭背包）
         if not self.detect_weapon():
             print("\n✗ 武器识别失败，退出校准")
             return None
@@ -453,92 +671,31 @@ class AutoCalibrator:
             print(f"\n✗ 配置文件加载失败：{e}")
             return None
         
-        # 3. 射击前准备
-        print("\n准备截图区域...")
-        print("提示：请确保准星对准墙面，墙面上没有弹痕")
-        time.sleep(2)
-        
-        # 4. 自动射击
-        self.auto_fire(num_shots=num_shots)
-        
-        # 5. 等待 0.5 秒开始捕获
-        print("\n等待 0.5 秒后开始捕获弹痕...")
-        time.sleep(0.5)
-        
-        # 6. 开始捕获
-        print("\n开始捕获弹痕...")
-        
-        self.bullet_holes = []
-        base_image = self.capture_screen()
-        
-        # 保存基准图像
-        base_path = self.save_dir / "base_image.png"
-        cv2.imwrite(str(base_path), base_image)
-        print(f"✓ 基准图像已保存：{base_path}")
-        
-        start_time = time.time()
-        frame_count = 0
-        
-        # 捕获循环（持续 10 秒）
-        while time.time() - start_time < 10:
-            current_image = self.capture_screen()
-            frame_count += 1
+        # 3. 多轮分段射击
+        for i, num_shots in enumerate(shooting_phases, 1):
+            self.run_single_round(i, num_shots)
             
-            new_holes = self.detect_bullet_holes_wall(base_image, current_image, frame_count)
-            new_holes_coords = [(h[0], h[1], h[2], h[3]) for h in new_holes]
-            new_holes_coords = self.filter_duplicate_holes(new_holes_coords)
-            
-            for hole in new_holes_coords:
-                is_duplicate = False
-                for existing in self.bullet_holes:
-                    dist = np.sqrt((hole[0]-existing[0])**2 + (hole[1]-existing[1])**2)
-                    if dist < 25:
-                        is_duplicate = True
-                        break
+            # 轮次间隔
+            if i < len(shooting_phases):
+                print(f"\n等待 3 秒后开始下一轮...")
+                time.sleep(3)
                 
-                if not is_duplicate:
-                    self.bullet_holes.append(hole)
-                    print(f"  [帧{frame_count}] 检测到新弹痕 #{len(self.bullet_holes)}: ({hole[0]}, {hole[1]})")
-            
-            if len(self.bullet_holes) >= num_shots * 0.8:
-                print(f"\n✓ 已检测到足够的弹痕 ({len(self.bullet_holes)}/{num_shots})")
-                break
-            
-            base_image = current_image
-            time.sleep(self.capture_interval)
+                # 提醒用户重新对准
+                print("⚠ 请重新对准墙面空白区域，避免弹痕重叠")
+                time.sleep(2)
         
-        elapsed_time = time.time() - start_time
-        print(f"\n捕获完成：{frame_count} 帧，{elapsed_time:.1f} 秒")
-        print(f"识别到弹痕数量：{len(self.bullet_holes)}")
+        # 4. 交叉比对多轮结果
+        cross_result = self.cross_validate_results()
         
-        # 7. 分析弹痕分布
-        if len(self.bullet_holes) < 5:
-            print("\n✗ 识别到的弹痕太少，校准失败")
-            print("建议:")
-            print("  1. 选择颜色单一的墙面（灰色/白色最佳）")
-            print("  2. 调整截图区域，只包含准星周围")
-            print("  3. 增加射击次数")
+        if not cross_result:
+            print("\n✗ 校准失败，没有有效数据")
             return None
         
-        print("\n分析弹痕分布...")
-        sorted_holes = sorted(self.bullet_holes, key=lambda h: h[1])
-        
-        self.vertical_displacements = []
-        for i in range(1, len(sorted_holes)):
-            dy = sorted_holes[i][1] - sorted_holes[i-1][1]
-            self.vertical_displacements.append(dy)
-        
-        avg_displacement = np.mean(self.vertical_displacements)
-        std_displacement = np.std(self.vertical_displacements)
-        
-        print(f"\n弹痕统计:")
-        print(f"  平均垂直位移：{avg_displacement:.2f} 像素")
-        print(f"  标准差：{std_displacement:.2f} 像素")
-        
-        # 8. 计算建议的 scope 值
+        # 5. 计算建议的 scope 值
         print("\n计算建议的压枪参数...")
         
         BASE_RECOIL = 5.0
+        avg_displacement = cross_result['overall_avg']
         
         if abs(avg_displacement) > 0:
             current_value = self.config['sensitivity'].get(self.current_scope, 1.0)
@@ -554,15 +711,21 @@ class AutoCalibrator:
                 'change': round(suggested - current_value, 2)
             }
         
-        # 9. 保存结果
+        # 6. 保存结果
         result = {
             'timestamp': datetime.now().isoformat(),
             'weapon': self.current_weapon,
             'scope': self.current_scope,
             'resolution': self.resolution,
-            'bullet_count': len(self.bullet_holes),
-            'avg_displacement': round(avg_displacement, 2),
-            'std_displacement': round(std_displacement, 2),
+            'shooting_phases': shooting_phases,
+            'total_rounds': len(self.all_round_results),
+            'cross_validation': {
+                'overall_avg': round(cross_result['overall_avg'], 2),
+                'overall_std': round(cross_result['overall_std'], 2),
+                'phase1_avg': round(cross_result['phase1_avg'], 2),
+                'phase2_avg': round(cross_result['phase2_avg'], 2),
+                'phase3_avg': round(cross_result['phase3_avg'], 2)
+            },
             'suggested_scopes': self.suggested_scopes
         }
         
@@ -572,13 +735,21 @@ class AutoCalibrator:
         
         print(f"\n结果已保存：{result_path}")
         
-        # 10. 显示结果
+        # 7. 显示结果
         print("\n" + "="*60)
         print("    校准结果")
         print("="*60)
         print(f"\n武器：{self.current_weapon}")
         print(f"倍镜：{self.current_scope}")
-        print(f"识别弹痕：{len(self.bullet_holes)} 个")
+        print(f"测试轮次：{len(self.all_round_results)} 轮")
+        print(f"\n交叉比对结果:")
+        print(f"  总体平均：{cross_result['overall_avg']:.2f} 像素")
+        print(f"  标准差：{cross_result['overall_std']:.2f} 像素")
+        print(f"\n分段弹道分析:")
+        print(f"  前 10 发：{cross_result['phase1_avg']:.2f} 像素/发")
+        print(f"  10-20 发：{cross_result['phase2_avg']:.2f} 像素/发")
+        print(f"  20 发后：{cross_result['phase3_avg']:.2f} 像素/发")
+        print(f"\n使用总体平均值计算压枪参数")
         print(f"平均位移：{avg_displacement:.2f} 像素\n")
         
         print("建议的灵敏度配置:")
@@ -598,7 +769,7 @@ class AutoCalibrator:
         
         print("-" * 60)
         
-        # 11. 询问是否应用
+        # 8. 询问是否应用
         print("\n是否应用建议的配置？")
         print("  Y - 应用并更新 Config/config.json")
         print("  N - 不应用，仅保存结果")
@@ -642,7 +813,10 @@ def main():
         time.sleep(2)
     
     calibrator = AutoCalibrator()
-    calibrator.run_calibration(num_shots=30)
+    
+    # 自定义分段射击配置
+    # 可以修改为 [15, 30, 40] 或其他组合
+    calibrator.run_calibration(shooting_phases=[15, 30, 40])
 
 
 if __name__ == "__main__":
