@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PUBG 压枪参数一键自动校准工具 V4
-refactor 分支专用版本 - 多轮分段射击版
+PUBG 压枪参数一键自动校准工具 V5
+refactor 分支专用版本 - 多轮分段射击版（修正版）
 
 功能：
-1. 自动按 Tab 打开/关闭背包
+1. 自动按 Tab 打开/关闭背包（间隔 2 秒）
 2. 自动识别武器和配件
-3. 自动长按右键开镜 + 左键射击
+3. 自动长按右键开镜 + 长按左键射击
 4. 分段射击：15 发 → 30 发 → 40 发（避免飘出靶墙）
-5. 射击过程中高速截图（50 FPS）
-6. 多轮测试交叉比对
-7. 分段弹道分析（前 10 发、10-20 发、20 发后）
-8. 自动更新配置
+5. 每轮结束后按 R 换弹（间隔 5 秒）
+6. 射击过程中高速截图（50 FPS）
+7. 多轮测试交叉比对
+8. 分段弹道分析（前 10 发、10-20 发、20 发后）
+9. 自动更新配置
 
 依赖：mss, opencv-python, numpy, pillow, pyautogui, keyboard
 """
@@ -48,6 +49,27 @@ try:
     HAS_KEYBOARD = True
 except ImportError:
     HAS_KEYBOARD = False
+
+
+# 枪械射速数据（发/秒）- 来自 PUBG 官方数据
+GUN_FIRE_RATES = {
+    'm762': 10.9,      # AKM 变体，射速较快
+    'akm': 10.0,       # AKM
+    'm416': 12.0,      # M416 射速最快
+    'scar-l': 10.4,    # SCAR-L
+    'aug': 10.4,       # AUG
+    'groza': 12.0,     # Groza 空投枪
+    'dp28': 9.2,       # DP-28 机枪
+    'm249': 12.5,      # M249 机枪
+    'uzi': 16.7,       # UZI 冲锋枪
+    'vector': 16.7,    # Vector 冲锋枪
+    'tommy': 10.9,     # 汤姆逊
+    'beryl': 10.9,     # Beryl M762
+    'mk47': 6.7,       # MK47 点射
+    'qbz': 10.4,       # QBZ
+    'g36c': 10.4,      # G36C
+    'default': 10.0    # 默认射速
+}
 
 
 class MouseController:
@@ -139,7 +161,7 @@ class MouseController:
 
 
 class AutoCalibrator:
-    """一键自动校准器 V4 - 多轮分段射击"""
+    """一键自动校准器 V5 - 多轮分段射击（修正版）"""
     
     def __init__(self):
         self.config_path = Path("./Config/config.json")
@@ -178,6 +200,9 @@ class AutoCalibrator:
         
         # 分段射击配置
         self.shooting_phases = [15, 30, 40]  # 分段射击：15 发 → 30 发 → 40 发
+        
+        # 枪械射速
+        self.fire_rate = GUN_FIRE_RATES.get('default', 10.0)
         
         # 分段弹道分析
         self.phase_analysis = {
@@ -224,7 +249,44 @@ class AutoCalibrator:
             time.sleep(0.1)
             user32.keybd_event(VK_TAB, 0, 2, 0)
         
-        time.sleep(0.5)
+        # Tab 间隔 2 秒
+        time.sleep(2.0)
+    
+    def auto_press_r(self):
+        """自动按 R 键换弹"""
+        print("  → 按 R 键换弹...")
+        
+        if HAS_KEYBOARD:
+            keyboard.press('r')
+            keyboard.release('r')
+        elif HAS_PYAUTOGUI:
+            pyautogui.press('r')
+        else:
+            import ctypes
+            user32 = ctypes.windll.user32
+            VK_R = 0x52
+            user32.keybd_event(VK_R, 0, 0, 0)
+            time.sleep(0.1)
+            user32.keybd_event(VK_R, 0, 2, 0)
+        
+        # 换弹动画时间
+        time.sleep(2.0)
+    
+    def get_fire_rate(self, weapon_name):
+        """获取武器射速"""
+        weapon_lower = weapon_name.lower() if weapon_name else ''
+        
+        # 从枪械名称匹配射速
+        for gun_name, rate in GUN_FIRE_RATES.items():
+            if gun_name in weapon_lower:
+                self.fire_rate = rate
+                print(f"  → 武器射速：{rate} 发/秒")
+                return rate
+        
+        # 默认射速
+        self.fire_rate = GUN_FIRE_RATES['default']
+        print(f"  → 使用默认射速：{self.fire_rate} 发/秒")
+        return self.fire_rate
     
     def detect_weapon(self):
         """识别武器（自动按 Tab 打开/关闭背包）"""
@@ -252,6 +314,9 @@ class AutoCalibrator:
                 print(f"  枪口：{weapon_info.get('Muzzle', '无')}")
                 print(f"  握把：{weapon_info.get('Grip', '无')}")
                 
+                # 获取武器射速
+                self.get_fire_rate(self.current_weapon)
+                
                 # 4. 再按一次 Tab 关闭背包
                 print("\n  → 关闭背包...")
                 self.auto_press_tab()
@@ -264,6 +329,7 @@ class AutoCalibrator:
                 print("使用默认武器 M762 进行校准")
                 self.current_weapon = 'M762'
                 self.current_scope = 'hongdian'
+                self.get_fire_rate('M762')
                 self.auto_press_tab()
                 return True
                 
@@ -272,16 +338,18 @@ class AutoCalibrator:
             self.auto_press_tab()
             self.current_weapon = 'M762'
             self.current_scope = 'hongdian'
+            self.get_fire_rate('M762')
             return True
     
     def auto_fire_with_aim(self, num_shots=30, fire_mode='auto'):
-        """自动控制鼠标开火（长按右键开镜 + 左键射击）"""
+        """自动控制鼠标开火（长按右键开镜 + 长按左键射击）"""
         print(f"\n准备自动射击 {num_shots} 发...")
         print(f"射击模式：{fire_mode}")
         print(f"武器：{self.current_weapon}")
+        print(f"射速：{self.fire_rate} 发/秒")
         
         # 判断是否为自动武器
-        auto_weapons = ['m762', 'm416', 'scar-l', 'akm', 'groza', 'aug', 'dp28', 'm249']
+        auto_weapons = ['m762', 'm416', 'scar-l', 'akm', 'groza', 'aug', 'dp28', 'm249', 'uzi', 'vector']
         if self.current_weapon.lower() in auto_weapons:
             fire_mode = 'auto'
         else:
@@ -306,15 +374,14 @@ class AutoCalibrator:
         self.mouse.mouse_down('right')
         time.sleep(0.5)  # 等待开镜动画
         
-        # 2. 射击
+        # 2. 长按左键射击（根据射速计算射击时间）
         if fire_mode == 'auto':
-            # 自动武器：按住左键
-            print("  → 按住左键射击...")
+            # 自动武器：长按左键持续射击
+            print("  → 长按左键射击...")
             self.mouse.mouse_down('left')
             
             # 根据武器射速计算射击时间
-            fire_rate = 10  # 发/秒
-            fire_duration = num_shots / fire_rate
+            fire_duration = num_shots / self.fire_rate
             time.sleep(fire_duration)
             
             # 松开左键
@@ -507,7 +574,7 @@ class AutoCalibrator:
         # 3. 同时开始截图
         start_time = time.time()
         frame_count = 0
-        shooting_duration = num_shots / 10 + 1  # 射击时间 + 1 秒缓冲
+        shooting_duration = num_shots / self.fire_rate + 1  # 射击时间 + 1 秒缓冲
         
         print(f"\n正在高速截图（{1/self.capture_interval:.0f} FPS）...")
         
@@ -649,8 +716,8 @@ class AutoCalibrator:
             shooting_phases = self.shooting_phases
         
         print("\n" + "="*60)
-        print("    PUBG 压枪参数一键自动校准工具 V4")
-        print("    (多轮分段射击版)")
+        print("    PUBG 压枪参数一键自动校准工具 V5")
+        print("    (多轮分段射击版 - 修正版)")
         print("="*60)
         print(f"\n当前分辨率：{self.resolution}")
         print(f"截图区域：{self.capture_region}")
@@ -677,8 +744,13 @@ class AutoCalibrator:
             
             # 轮次间隔
             if i < len(shooting_phases):
-                print(f"\n等待 3 秒后开始下一轮...")
-                time.sleep(3)
+                print(f"\n等待 5 秒后开始下一轮...")
+                time.sleep(5)
+                
+                # 按 R 键换弹
+                print("⚠ 正在换弹...")
+                self.auto_press_r()
+                time.sleep(2)
                 
                 # 提醒用户重新对准
                 print("⚠ 请重新对准墙面空白区域，避免弹痕重叠")
@@ -719,6 +791,7 @@ class AutoCalibrator:
             'resolution': self.resolution,
             'shooting_phases': shooting_phases,
             'total_rounds': len(self.all_round_results),
+            'fire_rate': self.fire_rate,
             'cross_validation': {
                 'overall_avg': round(cross_result['overall_avg'], 2),
                 'overall_std': round(cross_result['overall_std'], 2),
@@ -741,6 +814,7 @@ class AutoCalibrator:
         print("="*60)
         print(f"\n武器：{self.current_weapon}")
         print(f"倍镜：{self.current_scope}")
+        print(f"射速：{self.fire_rate} 发/秒")
         print(f"测试轮次：{len(self.all_round_results)} 轮")
         print(f"\n交叉比对结果:")
         print(f"  总体平均：{cross_result['overall_avg']:.2f} 像素")
