@@ -3,6 +3,7 @@
 """
 PUBG 压枪参数一键自动校准工具
 refactor 分支专用版本 - 普通墙面版
+支持多种鼠标驱动：GHUB / pyopdll / pynput
 
 使用方法：
 1. 打开 PUBG，进入训练场
@@ -13,8 +14,9 @@ refactor 分支专用版本 - 普通墙面版
 6. 关闭背包，脚本会自动开火射击 30 发
 7. 脚本自动分析、更新配置
 
-注意：此脚本需要 Windows 系统 + 罗技 GHUB 驱动
+注意：此脚本需要 Windows 系统
 依赖：mss, opencv-python, numpy, pillow
+鼠标驱动：GHUB 或 pyopdll 或 pynput（三选一）
 """
 
 import cv2
@@ -32,7 +34,92 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from recognition import capture_all_positions_thread
 from Process import ProcessClass
-from GHUB import ghub_device
+
+# 尝试导入多种鼠标驱动
+class MouseController:
+    """通用鼠标控制器（支持多种驱动）"""
+    
+    def __init__(self):
+        self.driver_name = None
+        self.driver = None
+        self._init_driver()
+    
+    def _init_driver(self):
+        """尝试初始化多种驱动"""
+        
+        # 尝试 1: GHUB
+        try:
+            from GHUB import ghub_device
+            self.driver = ghub_device()
+            if self.driver.gm_ok:
+                self.driver_name = 'GHUB'
+                print(f"\n✓ 鼠标驱动：罗技 GHUB")
+                return
+        except Exception as e:
+            pass
+        
+        # 尝试 2: pyopdll
+        try:
+            from pyopdll import OP
+            self.driver = OP()
+            self.driver_name = 'pyopdll'
+            print(f"\n✓ 鼠标驱动：pyopdll")
+            return
+        except Exception as e:
+            pass
+        
+        # 尝试 3: pynput（备用）
+        try:
+            from pynput.mouse import Controller as MouseController
+            self.driver = MouseController()
+            self.driver_name = 'pynput'
+            print(f"\n✓ 鼠标驱动：pynput（功能受限）")
+            return
+        except Exception as e:
+            pass
+        
+        # 都失败
+        self.driver_name = None
+        print(f"\n✗ 未找到可用的鼠标驱动")
+        print("请安装以下驱动之一：")
+        print("  1. 罗技 GHUB: https://www.logitechg.com/zh-cn/innovation/g-hub.html")
+        print("  2. pyopdll: pip install pyopdll")
+        print("  3. pynput: pip install pynput")
+    
+    def mouse_move_to(self, x, y):
+        """移动鼠标到指定位置"""
+        if self.driver_name == 'GHUB':
+            self.driver.mouse_To(int(x), int(y))
+        elif self.driver_name == 'pyopdll':
+            self.driver.MoveTo(int(x), int(y))
+        elif self.driver_name == 'pynput':
+            from pynput.mouse import Button
+            # pynput 只能相对移动，无法绝对定位
+            print("⚠ pynput 不支持绝对定位，跳过鼠标移动")
+    
+    def mouse_down(self, button=1):
+        """按下鼠标按钮"""
+        if self.driver_name == 'GHUB':
+            self.driver.mouse_down(int(button))
+        elif self.driver_name == 'pyopdll':
+            self.driver.MouseDown(int(button))
+        elif self.driver_name == 'pynput':
+            from pynput.mouse import Button
+            self.driver.press(Button.left)
+    
+    def mouse_up(self, button=1):
+        """释放鼠标按钮"""
+        if self.driver_name == 'GHUB':
+            self.driver.mouse_up(int(button))
+        elif self.driver_name == 'pyopdll':
+            self.driver.MouseUp(int(button))
+        elif self.driver_name == 'pynput':
+            from pynput.mouse import Button
+            self.driver.release(Button.left)
+    
+    def is_available(self):
+        """检查驱动是否可用"""
+        return self.driver_name is not None
 
 
 class AutoCalibrator:
@@ -43,17 +130,14 @@ class AutoCalibrator:
         self.save_dir = Path("./calibration_results")
         self.save_dir.mkdir(exist_ok=True)
         
-        # 初始化 Process 类和 GHUB 设备
+        # 初始化 Process 类和鼠标控制器
         self.PC = ProcessClass()
-        self.ghub = ghub_device()
+        self.mouse = MouseController()
         
-        # 检查 GHUB 是否可用
-        if not self.ghub.gm_ok:
-            print(f"\n✗ GHUB 驱动初始化失败：{self.ghub.info}")
-            print("请确保已安装罗技 GHUB 驱动")
+        # 检查鼠标驱动是否可用
+        if not self.mouse.is_available():
+            print("\n✗ 鼠标驱动不可用，退出校准")
             sys.exit(1)
-        
-        print(f"\n✓ GHUB 驱动初始化成功：{self.ghub.info}")
         
         # 截图区域（默认全屏，用户可以调整）
         self.resolution = self.PC.Monitor
@@ -171,13 +255,13 @@ class AutoCalibrator:
         # 移动鼠标到屏幕中心（确保游戏窗口激活）
         screen_center_x = self.capture_region[0] + self.capture_region[2] // 2
         screen_center_y = self.capture_region[1] + self.capture_region[3] // 2
-        self.ghub.mouse_To(screen_center_x, screen_center_y)
+        self.mouse.mouse_move_to(screen_center_x, screen_center_y)
         time.sleep(0.5)
         
         if fire_mode == 'auto':
             # 自动武器：按住左键
             print("  → 按住左键...")
-            self.ghub.mouse_down(1)  # 1=左键
+            self.mouse.mouse_down(1)  # 1=左键
             
             # 根据武器射速计算射击时间
             # M762 约 10 发/秒，M416 约 12 发/秒
@@ -187,15 +271,15 @@ class AutoCalibrator:
             
             # 松开左键
             print("  → 松开左键")
-            self.ghub.mouse_up(1)
+            self.mouse.mouse_up(1)
             
         else:
             # 单发武器：点击 num_shots 次
             print(f"  → 点击左键 {num_shots} 次...")
             for i in range(num_shots):
-                self.ghub.mouse_down(1)
+                self.mouse.mouse_down(1)
                 time.sleep(0.15)  # 单发间隔
-                self.ghub.mouse_up(1)
+                self.mouse.mouse_up(1)
                 time.sleep(0.05)
                 
                 if (i + 1) % 10 == 0:
