@@ -611,3 +611,90 @@ class ParameterCorrector:
         key = correction_result['acc_code']
         formatted = ParameterCorrector.format_array_for_json(arr)
         return f'    "{key}": {formatted}'
+
+
+# ═══════════════════════════════════════════
+# CLI 入口
+# ═══════════════════════════════════════════
+
+def _cli_main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="PUBG 弹痕分析工具 — 对比基线与结果截图，输出校准参数",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("base", help="空白墙面截图路径")
+    parser.add_argument("result", help="打完后的墙面截图路径")
+    parser.add_argument("--gun", default="m762", help="枪械名（JSON 文件名，默认 m762）")
+    parser.add_argument("--acc", default="A0B0C0", help="配件码（默认 A0B0C0）")
+    parser.add_argument("--scope", type=float, default=1.0, help="倍镜灵敏度系数（默认 1.0）")
+    parser.add_argument("--posture", type=float, default=1.0, help="姿态系数（默认 1.0）")
+    parser.add_argument("--resolution", default="1920x1080", help="分辨率（默认 1920x1080）")
+    parser.add_argument("--no-save", action="store_true", help="不保存结果到磁盘")
+
+    args = parser.parse_args()
+
+    base = cv2.imread(args.base)
+    result = cv2.imread(args.result)
+    if base is None:
+        print(f"错误: 无法读取基线图 {args.base}")
+        return 1
+    if result is None:
+        print(f"错误: 无法读取结果图 {args.result}")
+        return 1
+
+    print(f"\n{'='*55}")
+    print(f"  PUBG 弹痕分析")
+    print(f"{'='*55}")
+    print(f"  枪械: {args.gun}  配件码: {args.acc}")
+    print(f"  倍镜系数: {args.scope}  姿态系数: {args.posture}")
+    print(f"  分辨率: {args.resolution}")
+    print(f"{'='*55}\n")
+
+    r = analyze_bullet_pattern(
+        base, result,
+        gun_name=args.gun,
+        acc_code=args.acc,
+        scope_val=args.scope,
+        posture_val=args.posture,
+        resolution=args.resolution,
+        save_results=not args.no_save,
+    )
+
+    if not r['holes']:
+        print("  未检测到弹痕。请检查两张截图是否正确。")
+        return 1
+
+    print(f"  检测到 {r['shot_count']} 个弹痕\n")
+
+    comp = r.get('comparison')
+    if comp:
+        print(f"  {'发数':>4} {'实际':>8} {'理论':>8} {'比值':>8} {'状态'}")
+        print(f"  {'-'*48}")
+        for d in comp['details']:
+            ratio_str = f"{d['ratio']:.3f}" if d['ratio'] is not None else "  N/A"
+            print(f"  {d['shot']:>4} {d['actual_dy']:>8.1f} {d['theory_dy']:>8.1f} {ratio_str:>8}  {d['status']}")
+        print(f"  {'-'*48}")
+        print(f"  平均比值: {comp['avg_ratio']:.3f}  标准差: {comp['std_ratio']:.3f}")
+        print(f"  建议倍镜系数: {comp['suggested_scope']}")
+        print(f"  水平漂移: 平均 {comp['avg_horizontal_drift']:+.1f}px  最大 {comp['max_horizontal_drift']:.1f}px")
+
+        corrector = ParameterCorrector()
+        correction = corrector.correct(comp, args.gun, args.acc)
+        if correction:
+            print(f"\n  修正后弹道数据 ({args.acc}):")
+            patch = corrector.generate_patch_json(correction)
+            print(patch)
+    else:
+        print("  无理论数据可供对比")
+
+    if not args.no_save:
+        print(f"\n  结果已保存到 calibration_results/")
+
+    return 0
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(_cli_main() or 0)

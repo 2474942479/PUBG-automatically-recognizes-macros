@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """游戏内 HUD 悬浮窗 — 三档可切换（极简 / 紧凑 / 完整）
 用法：from ui.overlay_hud import GameHUD; hud = GameHUD(PC); hud.show_hud()
-Tab 键循环：极简 → 紧凑 → 完整 → 隐藏 → 极简
+Tab → 临时隐藏/恢复（配合背包识别）
+F9  → 循环切换显示模式：极简 → 紧凑 → 完整
 """
 import sys, ctypes
 from ctypes import wintypes
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QRect, QRectF
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QRectF
 from PyQt5.QtWidgets import QApplication, QWidget
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QLinearGradient
 from pynput import keyboard
-from pynput.keyboard import Key
+from pynput.keyboard import Key, KeyCode
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -33,11 +34,13 @@ try:
 except Exception:
     _HAS_WIN32 = False
 
+
 def _make_click_through(hwnd):
     if not _HAS_WIN32:
         return
     ex = _GetWindowLongW(hwnd, GWL_EXSTYLE)
-    _SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE)
+    _SetWindowLongW(hwnd, GWL_EXSTYLE,
+                    ex | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE)
 
 
 GUN_CN = {
@@ -69,15 +72,18 @@ ATTACH_CN = {
 POSTURE_CN = {'None': '站', 'space': '站', 'z': '卧', 'c': '蹲'}
 POSTURE_FULL = {'None': '站立', 'space': '站立', 'z': '卧倒', 'c': '蹲下'}
 
+
 def _gun_cn(name):
     if not name or str(name).lower() == 'none':
         return '—'
     return GUN_CN.get(str(name).lower(), str(name).upper())
 
+
 def _scope_cn(name):
     if not name or str(name).lower() == 'none':
         return '机瞄'
     return SCOPE_SHORT.get(str(name).lower(), str(name))
+
 
 def _attach_cn(name):
     if not name or str(name).lower() == 'none':
@@ -86,31 +92,45 @@ def _attach_cn(name):
 
 
 MODE_MINIMAL, MODE_COMPACT, MODE_FULL = 0, 1, 2
-MODE_NAMES = ['极简', '紧凑', '完整']
 
 
-class _TabListener(QThread):
-    sig_toggle = pyqtSignal()
+class _KeyListener(QThread):
+    """监听 Tab（临时隐藏）和 F9（切换模式）"""
+    sig_tab_press = pyqtSignal()
+    sig_tab_release = pyqtSignal()
+    sig_mode_switch = pyqtSignal()
 
     def run(self):
-        def on_press(key):
+        def _key_name(key):
             try:
-                k = key.name if isinstance(key, Key) else key.char
+                return key.name if isinstance(key, Key) else key.char
             except AttributeError:
-                return
-            if k == 'tab':
-                self.sig_toggle.emit()
+                return None
 
-        listener = keyboard.Listener(on_press=on_press)
+        def on_press(key):
+            k = _key_name(key)
+            if k == 'tab':
+                self.sig_tab_press.emit()
+            elif key == Key.f9:
+                self.sig_mode_switch.emit()
+
+        def on_release(key):
+            k = _key_name(key)
+            if k == 'tab':
+                self.sig_tab_release.emit()
+
+        listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         listener.start()
         listener.join()
 
 
 class GameHUD(QWidget):
-    """三档游戏内 HUD — Tab 循环切换"""
+    """三档游戏内 HUD
+    Tab  = 临时隐藏/恢复（背包识别期间不挡视线）
+    F9   = 极简 → 紧凑 → 完整 → 极简
+    """
 
     _COL_BG = QColor(12, 12, 12, 220)
-    _COL_BG_LIGHT = QColor(22, 22, 22, 200)
     _COL_BORDER = QColor(255, 186, 8, 100)
     _COL_GOLD = QColor(255, 186, 8)
     _COL_GREEN = QColor(74, 229, 74)
@@ -124,15 +144,18 @@ class GameHUD(QWidget):
         super().__init__(parent)
         self._pc = pc
         self._mode = MODE_MINIMAL
-        self._hidden = False
+        self._visible = True
+        self._tab_hidden = False
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._apply_size()
         self._position_right()
 
-        self._tab_t = _TabListener()
-        self._tab_t.sig_toggle.connect(self._on_tab)
-        self._tab_t.start()
+        self._key_t = _KeyListener()
+        self._key_t.sig_tab_press.connect(self._on_tab_press)
+        self._key_t.sig_tab_release.connect(self._on_tab_release)
+        self._key_t.sig_mode_switch.connect(self._on_mode_switch)
+        self._key_t.start()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
@@ -153,22 +176,23 @@ class GameHUD(QWidget):
             self.move(g.width() - self.width() - 20, 20)
         _make_click_through(int(self.winId()))
 
-    def _on_tab(self):
-        if self._hidden:
-            self._hidden = False
-            self._mode = MODE_MINIMAL
-            self._apply_size()
-            self._position_right()
-            self.show()
-            return
-
-        next_mode = self._mode + 1
-        if next_mode > MODE_FULL:
-            self._hidden = True
+    def _on_tab_press(self):
+        if self._visible:
+            self._tab_hidden = True
             self.hide()
-            return
+            self._timer.stop()
 
-        self._mode = next_mode
+    def _on_tab_release(self):
+        if self._tab_hidden:
+            self._tab_hidden = False
+            if self._visible:
+                self.show()
+                self._timer.start()
+
+    def _on_mode_switch(self):
+        if not self._visible:
+            return
+        self._mode = (self._mode + 1) % 3
         self._apply_size()
         self._position_right()
         self.update()
@@ -216,11 +240,12 @@ class GameHUD(QWidget):
 
         font = QFont('Microsoft YaHei', 10, QFont.Bold)
         p.setFont(font)
+        fm = QFontMetrics(font)
 
         x = 10
         p.setPen(QPen(self._COL_GOLD))
         p.drawText(x, 20, gun_name)
-        x += QFontMetrics(font).horizontalAdvance(gun_name) + 6
+        x += fm.horizontalAdvance(gun_name) + 6
 
         p.setPen(QPen(self._COL_DIM))
         p.drawText(x, 20, '|')
@@ -228,7 +253,7 @@ class GameHUD(QWidget):
 
         p.setPen(QPen(self._COL_GREEN if scope != '机瞄' else self._COL_GRAY))
         p.drawText(x, 20, scope)
-        x += QFontMetrics(font).horizontalAdvance(scope) + 6
+        x += fm.horizontalAdvance(scope) + 6
 
         p.setPen(QPen(self._COL_DIM))
         p.drawText(x, 20, '|')
@@ -236,7 +261,7 @@ class GameHUD(QWidget):
 
         p.setPen(QPen(self._COL_WHITE))
         p.drawText(x, 20, posture)
-        x += QFontMetrics(font).horizontalAdvance(posture) + 8
+        x += fm.horizontalAdvance(posture) + 8
 
         dot_color = self._COL_RED if getattr(pc, 'mouse_one', False) else \
             self._COL_YELLOW if pc.StartFire else self._COL_GREEN
@@ -244,10 +269,11 @@ class GameHUD(QWidget):
         p.setPen(Qt.NoPen)
         p.drawEllipse(x, 10, 10, 10)
 
-        p.setFont(QFont('Microsoft YaHei', 7))
+        hint_font = QFont('Microsoft YaHei', 7)
+        p.setFont(hint_font)
         p.setPen(QPen(self._COL_DIM))
-        mode_hint = 'Tab→紧凑'
-        p.drawText(w - QFontMetrics(QFont('Microsoft YaHei', 7)).horizontalAdvance(mode_hint) - 8, 20, mode_hint)
+        hint = 'F9切换'
+        p.drawText(w - QFontMetrics(hint_font).horizontalAdvance(hint) - 8, 20, hint)
 
     def _paint_compact(self, p):
         pc = self._pc
@@ -259,11 +285,11 @@ class GameHUD(QWidget):
 
         gun, slot = self._get_current_gun()
 
-        header_font = QFont('Microsoft YaHei', 9, QFont.Bold)
-        body_font = QFont('Microsoft YaHei', 9)
-        small_font = QFont('Microsoft YaHei', 7)
+        hf = QFont('Microsoft YaHei', 9, QFont.Bold)
+        bf = QFont('Microsoft YaHei', 9)
+        sf = QFont('Microsoft YaHei', 7)
 
-        p.setFont(header_font)
+        p.setFont(hf)
         p.setPen(QPen(self._COL_GOLD))
         gun_name = _gun_cn(gun.get('Name')) if gun else '—'
         slot_text = f'武器{slot}' if slot else ''
@@ -273,15 +299,14 @@ class GameHUD(QWidget):
         p.drawLine(10, 24, w - 10, 24)
 
         y = 40
-        p.setFont(body_font)
+        p.setFont(bf)
         if gun:
-            rows = [
+            for label, val, has in [
                 ('瞄具', _scope_cn(gun.get('Scope')), gun.get('Scope', 'none').lower() != 'none'),
                 ('枪口', _attach_cn(gun.get('Muzzle')), gun.get('Muzzle', 'none').lower() != 'none'),
                 ('握把', _attach_cn(gun.get('Grip')), gun.get('Grip', 'none').lower() != 'none'),
                 ('枪托', _attach_cn(gun.get('Stock')), gun.get('Stock', 'none').lower() != 'none'),
-            ]
-            for label, val, has in rows:
+            ]:
                 p.setPen(QPen(self._COL_GRAY))
                 p.drawText(14, y, label)
                 p.setPen(QPen(self._COL_GREEN if has else self._COL_WHITE))
@@ -298,23 +323,20 @@ class GameHUD(QWidget):
         y += 14
 
         posture = POSTURE_CN.get(pc.Current_posture, '站')
-        scope_st = '开镜' if pc.StartFire else '—'
-        fire_st = '开火' if getattr(pc, 'mouse_one', False) else '—'
-
-        p.setFont(body_font)
+        p.setFont(bf)
         p.setPen(QPen(self._COL_GRAY))
         p.drawText(14, y, posture)
 
         p.setPen(QPen(self._COL_GREEN if pc.StartFire else self._COL_GRAY))
-        p.drawText(50, y, scope_st)
+        p.drawText(50, y, '开镜' if pc.StartFire else '—')
 
         if getattr(pc, 'mouse_one', False):
             p.setPen(QPen(self._COL_RED))
-            p.drawText(100, y, fire_st)
+            p.drawText(100, y, '开火')
 
-        p.setFont(small_font)
+        p.setFont(sf)
         p.setPen(QPen(self._COL_DIM))
-        p.drawText(w - QFontMetrics(small_font).horizontalAdvance('Tab→完整') - 8, h - 6, 'Tab→完整')
+        p.drawText(w - QFontMetrics(sf).horizontalAdvance('F9切换') - 8, h - 6, 'F9切换')
 
     def _paint_full(self, p):
         pc = self._pc
@@ -324,11 +346,11 @@ class GameHUD(QWidget):
         p.setPen(QPen(self._COL_BORDER, 1))
         p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 6, 6)
 
-        header_font = QFont('Microsoft YaHei', 9, QFont.Bold)
-        body_font = QFont('Microsoft YaHei', 9)
-        small_font = QFont('Microsoft YaHei', 7)
+        hf = QFont('Microsoft YaHei', 9, QFont.Bold)
+        bf = QFont('Microsoft YaHei', 9)
+        sf = QFont('Microsoft YaHei', 7)
 
-        p.setFont(header_font)
+        p.setFont(hf)
         p.setPen(QPen(self._COL_GOLD))
         p.drawText(10, 18, 'HUD 信息')
 
@@ -340,9 +362,9 @@ class GameHUD(QWidget):
 
         status_text = '开火中' if getattr(pc, 'mouse_one', False) else \
             '瞄准中' if pc.StartFire else '就绪'
-        p.setFont(small_font)
+        p.setFont(sf)
         p.setPen(QPen(dot_color))
-        p.drawText(w - 24 - QFontMetrics(small_font).horizontalAdvance(status_text), 18, status_text)
+        p.drawText(w - 24 - QFontMetrics(sf).horizontalAdvance(status_text), 18, status_text)
 
         p.setPen(QPen(QColor(255, 255, 255, 30)))
         p.drawLine(10, 24, w - 10, 24)
@@ -355,7 +377,7 @@ class GameHUD(QWidget):
             is_active = pc.Current_firearms == slot_idx + 1
             gun_name = _gun_cn(gun.get('Name')) if gun and gun.get('Name') else '— 未装备 —'
 
-            p.setFont(header_font)
+            p.setFont(hf)
             if is_active:
                 p.setPen(QPen(self._COL_GOLD))
                 p.drawText(10, y, f'► 武器{slot_idx + 1}')
@@ -368,17 +390,12 @@ class GameHUD(QWidget):
             y += 16
 
             if gun and gun.get('Name') and str(gun['Name']).lower() != 'none':
-                p.setFont(body_font)
-                scope_val = _scope_cn(gun.get('Scope'))
-                muzz_val = _attach_cn(gun.get('Muzzle'))
-                grip_val = _attach_cn(gun.get('Grip'))
-                stock_val = _attach_cn(gun.get('Stock'))
-
+                p.setFont(bf)
                 col_w = (w - 24) // 2
-                items_left = [('瞄', scope_val, gun.get('Scope', 'none').lower() != 'none'),
-                              ('口', muzz_val, gun.get('Muzzle', 'none').lower() != 'none')]
-                items_right = [('握', grip_val, gun.get('Grip', 'none').lower() != 'none'),
-                               ('托', stock_val, gun.get('Stock', 'none').lower() != 'none')]
+                items_left = [('瞄', _scope_cn(gun.get('Scope')), gun.get('Scope', 'none').lower() != 'none'),
+                              ('口', _attach_cn(gun.get('Muzzle')), gun.get('Muzzle', 'none').lower() != 'none')]
+                items_right = [('握', _attach_cn(gun.get('Grip')), gun.get('Grip', 'none').lower() != 'none'),
+                               ('托', _attach_cn(gun.get('Stock')), gun.get('Stock', 'none').lower() != 'none')]
 
                 for row_items, x_off in [(items_left, 14), (items_right, 14 + col_w)]:
                     for lbl, val, has in row_items:
@@ -402,33 +419,31 @@ class GameHUD(QWidget):
         p.drawLine(10, y, w - 10, y)
         y += 14
 
-        p.setFont(body_font)
-
+        p.setFont(bf)
         posture = POSTURE_FULL.get(pc.Current_posture, '站立')
         p.setPen(QPen(self._COL_GRAY))
         p.drawText(14, y, '姿态')
         p.setPen(QPen(self._COL_WHITE))
         p.drawText(50, y, posture)
 
-        scope_st = '已开镜' if pc.StartFire else '关闭'
         p.setPen(QPen(self._COL_GRAY))
         p.drawText(110, y, '开镜')
         p.setPen(QPen(self._COL_GREEN if pc.StartFire else self._COL_GRAY))
-        p.drawText(146, y, scope_st)
+        p.drawText(146, y, '已开镜' if pc.StartFire else '关闭')
 
-        view_st = '第一人称' if pc.firstPerson else '第三人称'
         p.setPen(QPen(self._COL_GRAY))
         p.drawText(210, y, '视角')
         p.setPen(QPen(self._COL_WHITE))
-        p.drawText(246, y, view_st)
+        p.drawText(246, y, '第一人称' if pc.firstPerson else '第三人称')
 
-        p.setFont(small_font)
+        p.setFont(sf)
         p.setPen(QPen(self._COL_DIM))
-        p.drawText(w - QFontMetrics(small_font).horizontalAdvance('Tab→隐藏') - 8, h - 6, 'Tab→隐藏')
+        p.drawText(w - QFontMetrics(sf).horizontalAdvance('F9切换') - 8, h - 6, 'F9切换')
 
     # ── Public API（向后兼容）──
     def show_hud(self):
-        self._hidden = False
+        self._visible = True
+        self._tab_hidden = False
         self._mode = MODE_MINIMAL
         self._apply_size()
         self._position_right()
@@ -436,20 +451,21 @@ class GameHUD(QWidget):
         self._timer.start()
 
     def hide_hud(self):
-        self._hidden = True
+        self._visible = False
+        self._tab_hidden = False
         self._timer.stop()
         self.hide()
 
     def toggle(self):
-        if self._hidden:
-            self.show_hud()
-        else:
+        if self._visible:
             self.hide_hud()
+        else:
+            self.show_hud()
 
     def stop(self):
         self._timer.stop()
-        if hasattr(self, '_tab_t') and self._tab_t.isRunning():
-            self._tab_t.terminate()
+        if hasattr(self, '_key_t') and self._key_t.isRunning():
+            self._key_t.terminate()
         self.close()
 
 
