@@ -1,32 +1,155 @@
-# PUBG-automatically-recognizes-macros
-## 声明，此源码用于学习使用，用于其他用途和本人无关
-PUBG-automatically-recognizes-macros是一个自动识别枪械并进行压枪的的工具，它利用opencv的sift算法进行识别，达到了一个素材全分辨率匹配，  
-不用再去做各种分辨率的素材库，如果使用了里面的源码请标明出处，谢谢！
+# PUBG 自动识别压枪工具
+
+> **声明**：此源码仅供学习交流使用，用于其他用途与本人无关。如使用了本项目源码请标明出处。
+
+利用 OpenCV SIFT 算法自动识别枪械与配件，实现一套素材即可匹配所有分辨率，无需为每种分辨率单独制作模板。
+
 ## 核心功能
-- sift识别算法
-- 智能识别当前开火状态
-- 匹配所有灵敏度，无需修改游戏内灵敏度
-## 环境安装
-- 需要python >= 3.8.0
-- 安装requirements.txt的库
-## 源码模块说明
-- bullet_data.py 枪械数据模块
-- fire_data.py 枪械配件及名字和数据加密模块
-- GHUB.py 调用GHUB的源码模块
-- KeyListener.py 键盘按键功能模块
-- main.py 主入口程序（启动用）
-- MouseListener.py 鼠标按键功能模块
-- Process.py 数据加载开火模块
-- PUBG_UI.py UI模块
-- recognition.py 图像识别模块
-- resolution_setting.py 截图分辨率设置，开火检测坐标模块
-- main.spec pyinstaller打包文件，定位到PUBG文件夹下，在终端使用pyinstaller main.spec即可打包成exe文件
-## 使用方法
-- 运行main.py程序，此时会弹出来gui界面，选择你的分辨率，点击保存，选择你的开镜模式，然后点击启动
-- 按下tab截图识别，只要按下了tab就会进行截图识别，识别后按下键盘上的“1”或“2”切换枪械进行压枪
-- 如果感觉枪械压不住调整灵敏度设置：
-- 无：代表的是机瞄倍率，红点，全息，2倍，3倍，4倍，6倍，8倍，15倍，压过头调低灵敏度数值，压不住调高灵敏度数值，调完后记得保存，不保存没有效果
-- 如果2号枪无法截图识别到，请调整resolution_setting.py模块相对于的分辨率截图位置，如果不知道截图是否正常截取，调整resolution.py的capture_and_compare函数，把里面的注释删除掉即可在test文件夹下面查看是否截图正常，正常后请注释掉，提升程序性能
-## 目前没有精力维护这个项目了，本来想增加按键自定义和游戏内画面显示当前获取的枪械以及配件，这样就知道自己获取了哪些枪械和配件了
-## 程序GUI界面展示
-- ![img.png](img.png)
+
+- **SIFT 枪械识别** — 按 Tab 截图，自动识别枪名、倍镜、枪口、握把、枪托
+- **智能压枪** — 根据弹道数据 + 配件组合 + 姿势系数 + 灵敏度自动计算后坐力补偿
+- **开火状态检测** — 像素取色判定是否开镜，自动启停压枪
+- **姿势识别** — 图标识别 + 键盘追踪双策略
+- **三档游戏内 HUD** — Tab 循环切换：极简 → 紧凑 → 完整 → 隐藏
+- **弹痕校准工具** — GUI / CLI / 游戏内 HUD 三种模式，支持交互式标注修正
+
+## 环境要求
+
+- Python ≥ 3.8
+- Windows 10/11（依赖 Win32 API + Logitech GHUB 驱动）
+- 安装依赖：`pip install -r requirements.txt`
+
+## 项目结构
+
+```
+project_root/
+├── main.py                  # 主入口
+├── main_new.py              # 备选入口（现代 UI）
+├── requirements.txt         # Python 依赖
+├── README.md
+│
+├── core/                    # 核心逻辑
+│   ├── process.py           # 数据加载、开火控制、压枪计算
+│   ├── ghub.py              # Logitech GHUB 驱动封装
+│   └── recognition.py       # SIFT 图像识别、姿势识别
+│
+├── data/                    # 数据定义
+│   ├── fire_data.py         # 配件映射 & 按键编码
+│   ├── bullet_data.py       # 枪械弹道原始数据
+│   └── resolution_setting.py # 分辨率截图区域配置
+│
+├── input/                   # 输入监听
+│   ├── mouse_listener.py    # 鼠标事件（开镜/开火/姿势识别）
+│   └── key_listener.py      # 键盘事件（Tab/切枪/姿势/视角）
+│
+├── ui/                      # 界面
+│   ├── overlay_hud.py       # 游戏内三档 HUD 浮窗
+│   ├── ingame_display.py    # 游戏内信息展示组件
+│   ├── pubg_ui.py           # 主窗口 UI（PyQt5 生成）
+│   ├── modern_ui.py         # 现代风格 UI（PyQt5 生成）
+│   └── designer/            # Qt Designer 源文件
+│       ├── PUBG.ui
+│       └── Card.ui
+│
+├── calibration/             # 弹痕校准工具
+│   ├── bullet_analysis.py   # 弹痕检测/排序/对比/可视化/参数修正
+│   ├── calibrate.py         # CLI 校准工具
+│   ├── calibrate_gui.py     # GUI 校准工具（交互式标注）
+│   └── calibrate_hud.py     # 游戏内校准 HUD
+│
+├── Config/
+│   └── config.json          # 用户配置（分辨率、灵敏度）
+│
+└── _internal/               # 运行时资源（PyInstaller 打包）
+    ├── GunData/*.json        # 各枪械弹道数据
+    ├── data/firearms/...     # SIFT 模板图片
+    └── ghub_device_GHUB.dll  # GHUB 驱动 DLL
+```
+
+## 快速开始
+
+```bash
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 启动主程序
+python main.py
+```
+
+1. 在 GUI 中选择你的屏幕分辨率，点击"保存"
+2. 选择开镜模式（长按/点击），点击"启动"
+3. 游戏中按 **Tab** 打开背包进行截图识别
+4. 按 **1** / **2** 切换枪械，右键开镜后自动压枪
+5. 游戏内 HUD 会自动显示，按 **Tab** 切换显示模式
+
+## 配置说明
+
+### config.json
+
+```json
+{
+  "resolution": "1920x1080",
+  "sensitivity": {
+    "none": 3.4,
+    "hongdian": 2.0,
+    "quanxi": 2.0,
+    "2bei": 6.0,
+    "3bei": 8.0,
+    "4bei": 11.5,
+    "6bei": 5.0,
+    "8bei": 5.7,
+    "15bei": 10.0
+  }
+}
+```
+
+- `resolution` — 屏幕分辨率，支持 `3840x2160` / `2560x1440` / `1920x1080`
+- `sensitivity` — 各倍镜灵敏度系数
+  - 压过头 → 调低数值；压不住 → 调高数值
+  - 修改后需在 GUI 中点击"保存"生效
+
+### 分辨率适配
+
+如果识别不准确，编辑 `data/resolution_setting.py` 调整截图区域坐标。
+可以取消 `core/recognition.py` 中的调试截图注释，在 `test/` 目录查看截图效果。
+
+## 弹痕校准工具
+
+三种使用方式：
+
+| 模式 | 启动命令 | 说明 |
+|------|---------|------|
+| GUI | `python -m calibration.calibrate_gui` | 可视化界面，支持交互标注修正 |
+| CLI | `python -m calibration.calibrate` | 命令行模式，快捷键 F5/F6/F7 |
+| HUD | `python -m calibration.calibrate_hud` | 游戏内悬浮窗，边打边校准 |
+
+### 校准流程
+
+1. 对准一面白墙，开镜
+2. 截取空白墙面（基线图）
+3. 射击若干发
+4. 截取弹痕墙面（结果图）
+5. 工具自动检测弹痕，与 JSON 理论数据对比
+6. 可交互修正弹痕标注，输出修正后的压枪参数
+
+## 支持的枪械
+
+**步枪**: M416, AKM, SCAR-L, M762, Groza, AUG, M16A4, QBZ, G36C, ACE32, FAMAS, K2
+
+**狙击/射手**: Mini14, SKS, MK12, MK14, MK47, QBU, VSS
+
+**冲锋枪**: UZI, Vector, MP5K, UMP45, PP-19, P90, JS9
+
+**机枪**: DP-28, M249, MG3
+
+## 打包
+
+```bash
+pyinstaller main.spec
+```
+
+生成的 exe 位于 `dist/` 目录。
+
+## 程序界面
+
+![img.png](img.png)

@@ -1,12 +1,12 @@
-﻿import sys  # 导入系统模块，用于退出应用程序
-import fire_data  # 导入自定义模块，可能包含枪械数据
-import Process  # 导入自定义模块，可能包含核心处理逻辑
-from PyQt5.QtCore import QThread, Qt, pyqtSignal, QEvent  # 导入PyQt5的核心模块
-from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QMainWindow  # 导入PyQt5的GUI模块
-from PUBG_UI import Ui_PUBG  # 导入自定义的UI类
-from MouseListener import AppMainMouseListener  # 导入鼠标监听器类
-from KeyListener import AppMainKeyListener
-from overlay_hud import GameHUD  # 导入键盘监听器类
+import sys
+from data import fire_data
+from core import process as Process
+from PyQt5.QtCore import QThread, Qt, pyqtSignal, QEvent
+from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QMainWindow
+from ui.pubg_ui import Ui_PUBG
+from input.mouse_listener import AppMainMouseListener
+from input.key_listener import AppMainKeyListener
+from ui.overlay_hud import GameHUD
 
 class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidget和UI类
     def __init__(self):  # 初始化方法

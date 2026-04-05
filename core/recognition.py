@@ -3,7 +3,7 @@ import mss
 import os
 import time
 import asyncio
-from resolution_setting import RESOLUTION_SETTINGS, GUNS_REOLUTION_SETTINGS, Click, Zishi
+from data.resolution_setting import RESOLUTION_SETTINGS, GUNS_REOLUTION_SETTINGS, Click, Zishi
 import numpy as np
 from PIL import ImageGrab
 

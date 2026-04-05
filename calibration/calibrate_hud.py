@@ -25,9 +25,9 @@ import mss
 import numpy as np
 import cv2
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from Process import ProcessClass
-from fire_data import KEY_DATA
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.process import ProcessClass
+from data.fire_data import KEY_DATA
 
 try:
     import keyboard as kb_lib

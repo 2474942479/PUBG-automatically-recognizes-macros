@@ -2,9 +2,9 @@ import sys
 import os
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-import Process
-from modern_ui import Ui_ModernPUBG
-from ingame_display import IngameDisplayManager
+from core import process as Process
+from ui.modern_ui import Ui_ModernPUBG
+from ui.ingame_display import IngameDisplayManager
 
 class ModernPUBGApp(QtWidgets.QWidget):
     def __init__(self):

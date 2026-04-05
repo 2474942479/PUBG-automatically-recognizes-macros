@@ -24,10 +24,10 @@ from pathlib import Path
 from datetime import datetime
 
 # 复用项目现有模块
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fire_data import KEY_DATA
-from resolution_setting import RESOLUTION_SETTINGS, Zishi
-from Process import ProcessClass
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data.fire_data import KEY_DATA
+from data.resolution_setting import RESOLUTION_SETTINGS, Zishi
+from core.process import ProcessClass
 
 try:
     import keyboard

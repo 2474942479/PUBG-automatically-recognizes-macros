@@ -20,8 +20,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QPixmap, QImage, QFont
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fire_data import KEY_DATA
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data.fire_data import KEY_DATA
 
 # 配件中文名映射
 MUZZLE_CN = {
@@ -371,7 +371,7 @@ class MainWindow(QWidget):
         # 读倍镜系数 (简化: 默认 1.0, 如果有配置文件则读取)
         scope_val = 1.0
         try:
-            from Process import ProcessClass
+            from core.process import ProcessClass
             pc = ProcessClass()
             cfg = pc.get_config_data('a')
             scope_val = cfg.get('sensitivity', {}).get(scope_name, 1.0)

@@ -3,9 +3,9 @@ import os
 import sys
 import threading
 import time
-from GHUB import ghub_device
-from recognition import capture_all_positions_thread, recogniseif_firearm, capture_zishi_positions_thread
-from fire_data import KEY_DATA
+from core.ghub import ghub_device
+from core.recognition import capture_all_positions_thread, recogniseif_firearm, capture_zishi_positions_thread
+from data.fire_data import KEY_DATA
 import asyncio
 import numpy as np
 from pyopdll import OP
