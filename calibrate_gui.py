@@ -419,6 +419,14 @@ class MainWindow(QWidget):
 
 
 if __name__ == '__main__':
+    import traceback
+    def excepthook(etype, value, tb):
+        err = ''.join(traceback.format_exception(etype, value, tb))
+        try:
+            QMessageBox.critical(None, '程序崩溃', f'出错了:\n\n{err}')
+        except Exception:
+            print(err)
+    sys.excepthook = excepthook
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()
