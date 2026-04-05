@@ -46,6 +46,8 @@ SAVE_DIR.mkdir(exist_ok=True)
 
 
 def detect_holes(base, result):
+    if base.shape != result.shape:
+        result = cv2.resize(result, (base.shape[1], base.shape[0]))
     bg = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
     rg = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
     diff = cv2.absdiff(bg, rg)
@@ -224,24 +226,48 @@ class MainWindow(QWidget):
         self.scope_val_lb = QLabel("倍镜系数: 1.00")
         self.scope_val_lb.setStyleSheet("color:#888;font-size:11px;")
         main.addWidget(self.scope_val_lb)
+        self.progress_lb = QLabel("")
+        self.progress_lb.setStyleSheet("color:#FFBA08;font-size:12px;font-weight:bold;")
+        main.addWidget(self.progress_lb)
 
-        # ── 分析按钮 ──
+        # ── 结果图预览 ──
+        self._section(main, "🖼️ 结果预览")
+        self.img_label = QLabel("  分析后将在此显示标注弹痕的图片")
+        self.img_label.setStyleSheet("background:#111;color:#555;border:1px solid #333;border-radius:6px;")
+        self.img_label.setAlignment(Qt.AlignCenter)
+        self.img_label.setFixedHeight(260)
+        main.addWidget(self.img_label)
+
+        # ── 数据结果 ──
+        self._section(main, "📊 分析结果")
+        self.result_text = QTextEdit()
+        self.result_text.setReadOnly(True)
+        self.result_text.setStyleSheet("background:#111;color:#4AE54A;border:1px solid #333;border-radius:6px;font-size:13px;")
+        self.result_text.setFixedHeight(180)
+        main.addWidget(self.result_text)
+
+        self.resize(520, 850)
+
+        btn_row = QHBoxLayout()
         self.btn_go = QPushButton("🔍 开始分析")
         self.btn_go.setStyleSheet(btn_style("#FFBA08"))
         self.btn_go.setFixedHeight(44)
         self.btn_go.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
         self.btn_go.clicked.connect(self._analyze)
-        main.addWidget(self.btn_go)
+        btn_row.addWidget(self.btn_go)
+        btn_open = QPushButton("📂 打开标注图")
+        btn_open.setStyleSheet(btn_style("#4AE54A"))
+        btn_open.setFixedHeight(44)
+        btn_open.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        btn_open.clicked.connect(self._open_result_img)
+        btn_row.addWidget(btn_open)
+        main.addLayout(btn_row)
+        self._vis_path = None
 
-        # ── 结果 ──
-        self._section(main, "📊 分析结果")
-        self.result_text = QTextEdit()
-        self.result_text.setReadOnly(True)
-        self.result_text.setStyleSheet("background:#111;color:#4AE54A;border:1px solid #333;border-radius:6px;font-size:13px;")
-        self.result_text.setFixedHeight(250)
-        main.addWidget(self.result_text)
-
-        self.resize(520, 680)
+    def _open_result_img(self):
+        if self._vis_path and os.path.exists(self._vis_path):
+            import subprocess
+            subprocess.Popen(["start", "", self._vis_path], shell=True)
 
     def _section(self, parent, title):
         lb = QLabel(title)
@@ -317,6 +343,8 @@ class MainWindow(QWidget):
             if base is None or result is None:
                 QMessageBox.warning(self, "错误", "图片加载失败，请检查路径")
                 return
+            if result.shape != base.shape:
+                result = cv2.resize(result, (base.shape[1], base.shape[0]))
         except Exception as e:
             QMessageBox.warning(self, "错误", f"读取图片失败: {e}")
             return
