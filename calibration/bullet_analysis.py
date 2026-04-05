@@ -3,14 +3,14 @@
 """
 PUBG 弹痕分析统一模块
 ═══════════════════════
-提供弹痕检测、排序、对比、可视化的统一实现，供所有校准工具复用。
-
 核心类:
-  BulletDetector   - 基于图像差分检测弹痕
-  BulletSorter     - 按开枪顺序排序（先打的在下面）
-  BulletComparator - 与 GunData JSON 理论数据对比
-  BulletVisualizer - 绘制标注图和间距柱状图
-  ResultSaver      - 保存分析结果（图片+JSON）
+  BulletDetector      - 基于图像差分检测弹痕
+  BulletSorter        - 按开枪顺序排序（先打的在下面）
+  BulletComparator    - 与 GunData JSON 理论数据对比
+  BulletVisualizer    - 绘制标注图和间距柱状图
+  ResultSaver         - 保存分析结果（图片+JSON）
+  ParameterCorrector  - 根据校准结果生成修正后的压枪参数
+  MultiGroupAnalyzer  - 多组弹痕数据交叉比对
 """
 
 import cv2
@@ -22,7 +22,7 @@ from datetime import datetime
 
 
 def _find_gun_data_dir():
-    """智能查找 GunData 目录，兼容从项目根目录或子目录运行"""
+    """智能查找 GunData 目录"""
     candidates = [
         Path('./_internal/GunData'),
         Path('../_internal/GunData'),
@@ -35,24 +35,46 @@ def _find_gun_data_dir():
     return str(candidates[0])
 
 
+def _load_sensitivity_config():
+    """直接从配置文件读取灵敏度设置，不依赖 ProcessClass"""
+    candidates = [
+        Path('./Config/config.json'),
+        Path('../Config/config.json'),
+        Path(__file__).resolve().parent.parent / 'Config' / 'config.json',
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                with open(p, encoding='utf-8') as f:
+                    return json.load(f).get('sensitivity', {})
+            except Exception:
+                pass
+    return {}
+
+
+# FIRE1 (半自动枪械)：每个数组元素 = 一发子弹，tick间隔100ms
+_SEMI_AUTO_GUNS = frozenset([
+    "sks", "mini14", "delagongnuofu", "m16a4", "mk12", "mk47",
+    "qbu", "zidongzhuangtianbuqiang",
+])
+
+# 全自动枪械：9ms/tick，每发子弹约10-15个tick
+_AUTO_TICK_MS = 9
+
+
 # ═══════════════════════════════════════════
 # 自适应检测参数
 # ═══════════════════════════════════════════
 
 _DEFAULT_PARAMS = {
-    'min_area': 20,
-    'max_area': 800,
-    'min_circularity': 0.20,
-    'color_threshold': 12,
-    'morph_kernel': 5,
-    'dilate_iterations': 1,
-    'close_iterations': 2,
-    'max_lateral_deviation': 50,
+    'min_area': 20, 'max_area': 800,
+    'min_circularity': 0.20, 'color_threshold': 12,
+    'morph_kernel': 5, 'dilate_iterations': 1,
+    'close_iterations': 2, 'max_lateral_deviation': 50,
 }
 
 
 def _scale_params(resolution):
-    """根据分辨率自动缩放检测参数"""
     try:
         w, h = map(int, resolution.split('x'))
     except (ValueError, AttributeError):
@@ -82,19 +104,12 @@ class BulletDetector:
         self.params = _scale_params(resolution)
 
     def detect(self, base, result):
-        """
-        检测弹痕。
-        :param base: 空白墙面截图 (BGR numpy array)
-        :param result: 打完后的墙面截图 (BGR numpy array)
-        :return: list[dict] 弹痕列表, 每个 {'x','y','area','circularity','color_diff'}
-        """
         if base.shape != result.shape:
             result = cv2.resize(result, (base.shape[1], base.shape[0]))
 
         bg = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
         rg = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
         diff = cv2.absdiff(bg, rg)
-
         _, thresh = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         ks = self.params['morph_kernel']
@@ -107,8 +122,7 @@ class BulletDetector:
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         holes = []
-        min_a = self.params['min_area']
-        max_a = self.params['max_area']
+        min_a, max_a = self.params['min_area'], self.params['max_area']
         min_c = self.params['min_circularity']
         color_th = self.params['color_threshold']
 
@@ -140,23 +154,15 @@ class BulletDetector:
                 'color_diff': round(color_diff, 1),
             })
 
-        holes = self._filter_noise(holes)
-        return holes
+        return self._filter_noise(holes)
 
     def _filter_noise(self, holes):
-        """
-        过滤偏离主弹道线的噪点。
-        算法: 按 X 坐标聚类，取最大组作为主弹道线。
-        """
         if len(holes) < 4:
             return holes
-
         max_dx = self.params['max_lateral_deviation']
         xs = [h['x'] for h in holes]
         median_x = float(np.median(xs))
-
         main_group = [h for h in holes if abs(h['x'] - median_x) <= max_dx]
-
         if len(main_group) < 3:
             best_group = []
             for h in holes:
@@ -164,7 +170,6 @@ class BulletDetector:
                 if len(group) > len(best_group):
                     best_group = group
             return best_group if len(best_group) >= 3 else holes
-
         return main_group
 
 
@@ -176,7 +181,6 @@ class BulletSorter:
     """
     按开枪顺序排序弹痕。
     PUBG 后坐力使子弹向上飞，先打的弹痕在下面（Y值大），后打的在上面（Y值小）。
-    shot_num=1 对应最下面的弹痕（第一发）。
     """
 
     @staticmethod
@@ -190,26 +194,23 @@ class BulletSorter:
 
 
 # ═══════════════════════════════════════════
-# 理论数据对比
+# 理论数据对比（核心修复）
 # ═══════════════════════════════════════════
 
 class BulletComparator:
-    """与 GunData JSON 弹道数据对比，计算校准系数"""
+    """与 GunData JSON 弹道数据对比，计算校准系数。
+
+    数据格式说明:
+      Process.FIRE() 对弹道数组逐元素执行 mouse_R(0, posture*(val*scope))，
+      间隔 9ms/tick。每发子弹约占 10-15 个 tick。
+      因此每发子弹的理论补偿 = sum(chunk_values) * scope * posture (像素)。
+      实际弹孔间距(像素) 与之对比可得校准比值。
+    """
 
     def __init__(self, gun_data_dir=None):
         self.gun_data_dir = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
 
     def compare(self, holes, gun_name, acc_code, scope_val, posture_val):
-        """
-        对比实际弹痕间距与理论弹道数据。
-
-        :param holes: 已排好序的弹痕列表（含 shot_num）
-        :param gun_name: 枪械名称（JSON文件名，不含扩展名）
-        :param acc_code: 配件码，如 "A0B0C0"
-        :param scope_val: 倍镜灵敏度系数
-        :param posture_val: 姿态系数
-        :return: dict 分析结果 或 None
-        """
         if len(holes) < 2:
             return None
 
@@ -223,27 +224,31 @@ class BulletComparator:
         if not raw:
             return None
 
-        # shot_num=1 在最下面（Y最大），shot_num=2 在上面（Y较小）
-        # 间距 = 前一发Y - 后一发Y = 正值
-        actual_spacings = []
-        for i in range(1, len(s)):
-            dy = s[i - 1]['y'] - s[i]['y']
-            actual_spacings.append(dy)
+        is_semi = gun_name.lower() in _SEMI_AUTO_GUNS
+        chunk = self._estimate_chunk_size(raw, is_semi)
 
-        # 从理论数据提取每发对应的值（偶数索引）
-        n_pairs = min(len(actual_spacings), len(raw) // 2)
-        if n_pairs == 0:
-            return None
+        n_intervals = len(s) - 1
+        max_intervals = max(1, len(raw) // max(1, chunk))
+        n_compare = min(n_intervals, max_intervals)
 
-        theory_raw = [raw[j * 2] for j in range(n_pairs)]
-        theory_spacings = [v * scope_val * posture_val for v in theory_raw]
+        # 实际间距: shot_num=1 在最下面(Y最大), 间距 = 前一发Y - 后一发Y
+        actual_spacings = [s[i - 1]['y'] - s[i]['y'] for i in range(1, len(s))]
+        actual_dx = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
 
-        # 逐发配对对比，保持严格1:1对齐
+        # 理论间距: 每个chunk的值求和 * scope * posture
+        theory_chunks = []
+        for i in range(n_compare):
+            start = i * chunk
+            end = min(start + chunk, len(raw))
+            chunk_sum = sum(raw[start:end])
+            theory_chunks.append(chunk_sum)
+
         details = []
         ratios = []
-        for i in range(n_pairs):
+        for i in range(n_compare):
             actual = actual_spacings[i]
-            theory = theory_spacings[i]
+            raw_sum = theory_chunks[i]
+            theory = raw_sum * scope_val * posture_val
 
             if theory > 0 and actual > 0:
                 ratio = actual / theory
@@ -254,13 +259,15 @@ class BulletComparator:
                 status = "⚠异常(负间距)"
             else:
                 ratio = None
-                status = "⚠理论值为0"
+                status = "⚠理论=0"
 
             details.append({
                 'shot': i + 1,
                 'actual_dy': round(float(actual), 1),
                 'theory_dy': round(float(theory), 1),
-                'ratio': round(float(ratio), 3) if ratio is not None else None,
+                'raw_chunk_sum': round(float(raw_sum), 1),
+                'ratio': round(float(ratio), 4) if ratio is not None else None,
+                'x_drift': round(float(actual_dx[i]), 1) if i < len(actual_dx) else 0,
                 'status': status,
             })
 
@@ -269,12 +276,12 @@ class BulletComparator:
 
         avg_ratio = float(np.mean(ratios))
         std_ratio = float(np.std(ratios))
-        suggested_scope = round(scope_val * avg_ratio, 2)
+        suggested_scope = round(scope_val * avg_ratio, 3)
 
-        # 水平漂移分析
-        dx_list = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
-        avg_dx = float(np.mean(dx_list)) if dx_list else 0.0
-        max_dx = float(max(abs(d) for d in dx_list)) if dx_list else 0.0
+        # 水平漂移统计
+        avg_dx = float(np.mean(actual_dx)) if actual_dx else 0.0
+        max_dx = float(max(abs(d) for d in actual_dx)) if actual_dx else 0.0
+        std_dx = float(np.std(actual_dx)) if len(actual_dx) > 1 else 0.0
 
         return {
             'gun': gun_name,
@@ -282,14 +289,31 @@ class BulletComparator:
             'scope_val': scope_val,
             'posture_val': posture_val,
             'suggested_scope': suggested_scope,
-            'avg_ratio': round(avg_ratio, 3),
-            'std_ratio': round(std_ratio, 3),
+            'avg_ratio': round(avg_ratio, 4),
+            'std_ratio': round(std_ratio, 4),
             'shot_count': len(s),
             'valid_pairs': len(ratios),
+            'chunk_size': chunk,
+            'is_semi_auto': is_semi,
             'avg_horizontal_drift': round(avg_dx, 1),
             'max_horizontal_drift': round(max_dx, 1),
+            'std_horizontal_drift': round(std_dx, 1),
+            'horizontal_drifts': [round(d, 1) for d in actual_dx],
             'details': details,
         }
+
+    @staticmethod
+    def _estimate_chunk_size(raw, is_semi):
+        """估算每发子弹对应的数组元素数量"""
+        if is_semi:
+            return 1
+        # 全自动: 9ms/tick, 典型射速600-900RPM → 67-100ms/发 → 7-11 ticks
+        # 用12作为默认值，适合大多数步枪(~600RPM)
+        n = len(raw)
+        if n <= 15:
+            return max(1, n)
+        estimated_intervals = max(1, round(n / 12))
+        return max(3, n // estimated_intervals)
 
     def _load_gun_data(self, gun_name):
         gp = self.gun_data_dir / f"{gun_name}.json"
@@ -311,23 +335,15 @@ class BulletVisualizer:
 
     @staticmethod
     def draw_holes(img, holes):
-        """在图像上绘制弹痕标注（编号、连线、统计信息）"""
         vis = img.copy()
         s = sorted(holes, key=lambda h: h['shot_num'])
 
         for i in range(len(s) - 1):
             dy = abs(s[i]['y'] - s[i + 1]['y'])
             dx = abs(s[i]['x'] - s[i + 1]['x'])
-            if dy < 5 and dx < 5:
-                color = (0, 0, 255)
-            elif dy < 15:
-                color = (0, 255, 255)
-            else:
-                color = (0, 255, 0)
-            cv2.arrowedLine(vis,
-                            (s[i]['x'], s[i]['y']),
-                            (s[i + 1]['x'], s[i + 1]['y']),
-                            color, 2, tipLength=0.15)
+            color = (0, 0, 255) if (dy < 5 and dx < 5) else (0, 255, 255) if dy < 15 else (0, 255, 0)
+            cv2.arrowedLine(vis, (s[i]['x'], s[i]['y']),
+                            (s[i + 1]['x'], s[i + 1]['y']), color, 2, tipLength=0.15)
 
         for hv in s:
             n = hv['shot_num']
@@ -341,14 +357,13 @@ class BulletVisualizer:
             spacings = [abs(s[i - 1]['y'] - s[i]['y']) for i in range(1, len(s))]
             dx_list = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
             y_pos = 35
-            stats = [
+            for text in [
                 f"Shots: {len(holes)}",
                 f"Avg Y-spacing: {np.mean(spacings):.1f}px",
                 f"Max: {max(spacings):.1f}px  Min: {min(spacings):.1f}px",
                 f"Avg X-drift: {np.mean(dx_list):+.1f}px",
                 f"Max X-drift: {max(abs(d) for d in dx_list):.1f}px",
-            ]
-            for text in stats:
+            ]:
                 cv2.putText(vis, text, (10, y_pos),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
                 y_pos += 28
@@ -357,15 +372,10 @@ class BulletVisualizer:
 
     @staticmethod
     def draw_spacing_chart(holes):
-        """绘制垂直间距柱状图"""
         if len(holes) < 2:
             return None
-
         s = sorted(holes, key=lambda h: h['shot_num'])
-        spacings = []
-        for i in range(1, len(s)):
-            dy = abs(s[i - 1]['y'] - s[i]['y'])
-            spacings.append({'shot': i + 1, 'dy': dy})
+        spacings = [{'shot': i + 1, 'dy': abs(s[i - 1]['y'] - s[i]['y'])} for i in range(1, len(s))]
 
         W, H = 1000, 450
         chart = np.zeros((H, W, 3), dtype=np.uint8)
@@ -379,21 +389,13 @@ class BulletVisualizer:
         for i, d in enumerate(spacings):
             x = 90 + i * bar_w
             bar_h = int(d['dy'] / max_dy * plot_h)
-            if d['dy'] < 2:
-                color = (0, 0, 255)
-            elif d['dy'] < 8:
-                color = (0, 165, 255)
-            elif d['dy'] > 20:
-                color = (255, 100, 0)
-            else:
-                color = (0, 255, 0)
+            color = (0, 0, 255) if d['dy'] < 2 else (0, 165, 255) if d['dy'] < 8 else \
+                (255, 100, 0) if d['dy'] > 20 else (0, 255, 0)
             cv2.rectangle(chart, (x, base_y + plot_h - bar_h),
                           (x + bar_w - 3, base_y + plot_h), color, -1)
-            cv2.putText(chart, f"{d['dy']:.0f}",
-                        (x + 3, base_y + plot_h - bar_h - 5),
+            cv2.putText(chart, f"{d['dy']:.0f}", (x + 3, base_y + plot_h - bar_h - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            cv2.putText(chart, str(d['shot']),
-                        (x + bar_w // 2 - 5, H - 15),
+            cv2.putText(chart, str(d['shot']), (x + bar_w // 2 - 5, H - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
         cv2.line(chart, (82, 60), (82, base_y + plot_h + 5), (100, 100, 100), 1)
@@ -408,24 +410,21 @@ class BulletVisualizer:
 
     @staticmethod
     def draw_drift_chart(holes):
-        """绘制水平漂移图"""
         if len(holes) < 2:
             return None
-
         s = sorted(holes, key=lambda h: h['shot_num'])
+        dx_list = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
+        if not dx_list:
+            return None
+
         W, H = 1000, 300
         chart = np.zeros((H, W, 3), dtype=np.uint8)
         cv2.putText(chart, "Horizontal Drift (px)", (W // 2 - 120, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
-        dx_list = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
-        if not dx_list:
-            return None
-
         max_abs = max(abs(d) for d in dx_list) or 1
         bar_w = max(18, (W - 110) // len(dx_list))
-        mid_y = H // 2 + 20
-        plot_h = (H - 100) // 2
+        mid_y, plot_h = H // 2 + 20, (H - 100) // 2
 
         cv2.line(chart, (85, mid_y), (W - 10, mid_y), (80, 80, 80), 1)
 
@@ -452,8 +451,6 @@ class BulletVisualizer:
 # ═══════════════════════════════════════════
 
 class ResultSaver:
-    """保存分析结果到磁盘"""
-
     def __init__(self, save_dir="./calibration_results"):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
@@ -472,28 +469,280 @@ class ResultSaver:
 
 
 # ═══════════════════════════════════════════
+# 修正参数生成（支持小数）
+# ═══════════════════════════════════════════
+
+class ParameterCorrector:
+    """根据校准结果生成修正后的压枪参数，支持小数精度"""
+
+    def __init__(self, gun_data_dir=None):
+        self.gun_data_dir = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
+
+    def correct(self, comparison_result, gun_name, acc_code, use_float=True):
+        """
+        生成修正后的弹道数组。
+
+        :param use_float: True=保留1位小数精度, False=取整(兼容旧逻辑)
+        """
+        if not comparison_result:
+            return None
+
+        gp = self.gun_data_dir / f"{gun_name}.json"
+        if not gp.exists():
+            return None
+        try:
+            with open(gp, encoding='utf-8') as f:
+                gun_data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return None
+
+        original = gun_data.get(acc_code)
+        fallback_code = acc_code
+        if original is None:
+            original = gun_data.get("A0B0C0", [])
+            fallback_code = "A0B0C0"
+        if not original:
+            return None
+
+        avg_ratio = comparison_result['avg_ratio']
+        chunk = comparison_result.get('chunk_size', 12)
+        details = comparison_result.get('details', [])
+
+        def _round(v):
+            return round(v, 1) if use_float else round(v)
+
+        # 方案一：均匀修正（所有值乘以相同比率）
+        corrected_uniform = [_round(v * avg_ratio) if v != 0 else 0 for v in original]
+
+        # 方案二：逐发修正（每个chunk用对应的ratio）
+        per_shot = list(original)
+        for i, d in enumerate(details):
+            r = d.get('ratio')
+            if r is None:
+                continue
+            start = i * chunk
+            end = min((i + 1) * chunk, len(per_shot))
+            for j in range(start, end):
+                per_shot[j] = _round(original[j] * r) if original[j] != 0 else 0
+
+        # 水平漂移补偿建议
+        x_comp = self._calc_x_compensation(comparison_result, chunk, original)
+
+        return {
+            'gun_name': gun_name,
+            'acc_code': fallback_code,
+            'file_path': str(gp),
+            'avg_ratio': round(avg_ratio, 4),
+            'scope_val': comparison_result.get('scope_val', 1.0),
+            'posture_val': comparison_result.get('posture_val', 1.0),
+            'suggested_scope': comparison_result.get('suggested_scope', 1.0),
+            'original_array': original,
+            'corrected_uniform': corrected_uniform,
+            'corrected_per_shot': per_shot,
+            'x_compensation': x_comp,
+            'details': details,
+            'chunk_size': chunk,
+        }
+
+    @staticmethod
+    def _calc_x_compensation(comp, chunk, original):
+        """根据水平漂移数据计算X轴补偿建议"""
+        drifts = comp.get('horizontal_drifts', [])
+        if not drifts:
+            return None
+
+        avg_dx = comp.get('avg_horizontal_drift', 0)
+        std_dx = comp.get('std_horizontal_drift', 0)
+
+        # 标准差 > 均值绝对值 → 随机性太强，不建议固定补偿
+        if std_dx > abs(avg_dx) * 1.5 and abs(avg_dx) < 3:
+            return {'type': 'random', 'avg': avg_dx, 'std': std_dx,
+                    'suggestion': '水平漂移随机性强，不建议固定X补偿'}
+
+        scope = comp.get('scope_val', 1.0)
+        posture = comp.get('posture_val', 1.0)
+        factor = max(0.01, scope * posture)
+
+        # 生成每个chunk的X补偿值
+        x_per_chunk = []
+        for i, dx in enumerate(drifts):
+            # dx > 0 表示弹道向右偏 → 需要向左补偿(负X移动)
+            x_raw = round(-dx / factor / max(1, chunk), 1)
+            x_per_chunk.append(x_raw)
+
+        return {
+            'type': 'compensatable',
+            'avg': avg_dx,
+            'std': std_dx,
+            'x_per_chunk': x_per_chunk,
+            'suggestion': f'平均水平偏移 {avg_dx:+.1f}px，可添加X轴补偿',
+        }
+
+    @staticmethod
+    def format_array_for_json(arr, items_per_line=36):
+        lines = []
+        for i in range(0, len(arr), items_per_line):
+            chunk = arr[i:i + items_per_line]
+            lines.append("        " + ", ".join(str(v) for v in chunk))
+        return "[\n" + ",\n".join(lines) + "\n    ]"
+
+    @staticmethod
+    def generate_patch_json(correction_result, mode='uniform'):
+        """mode: 'uniform' (均匀修正) 或 'per_shot' (逐发修正)"""
+        if not correction_result:
+            return ""
+        arr = correction_result['corrected_uniform'] if mode == 'uniform' \
+            else correction_result['corrected_per_shot']
+        key = correction_result['acc_code']
+        formatted = ParameterCorrector.format_array_for_json(arr)
+        return f'    "{key}": {formatted}'
+
+
+# ═══════════════════════════════════════════
+# 多组交叉比对
+# ═══════════════════════════════════════════
+
+class MultiGroupAnalyzer:
+    """多组弹痕数据的交叉比对分析，取最优参数"""
+
+    def __init__(self):
+        self.groups = []
+
+    def add_group(self, comparison_result, label=""):
+        if comparison_result:
+            self.groups.append({
+                'result': comparison_result,
+                'label': label or f"第{len(self.groups) + 1}组",
+            })
+
+    def remove_group(self, index):
+        if 0 <= index < len(self.groups):
+            self.groups.pop(index)
+
+    def clear(self):
+        self.groups = []
+
+    @property
+    def count(self):
+        return len(self.groups)
+
+    def analyze(self):
+        if not self.groups:
+            return None
+
+        max_intervals = max(len(g['result']['details']) for g in self.groups)
+        per_interval_ratios = [[] for _ in range(max_intervals)]
+        per_interval_drifts = [[] for _ in range(max_intervals)]
+
+        for g in self.groups:
+            for i, d in enumerate(g['result']['details']):
+                if d['ratio'] is not None:
+                    per_interval_ratios[i].append(d['ratio'])
+            for i, dx in enumerate(g['result'].get('horizontal_drifts', [])):
+                if i < max_intervals:
+                    per_interval_drifts[i].append(dx)
+
+        interval_stats = []
+        for i in range(max_intervals):
+            rs = per_interval_ratios[i]
+            ds = per_interval_drifts[i]
+            if not rs:
+                interval_stats.append(None)
+                continue
+            interval_stats.append({
+                'interval': i + 1,
+                'n_groups': len(rs),
+                'avg_ratio': round(float(np.mean(rs)), 4),
+                'std_ratio': round(float(np.std(rs)), 4),
+                'min_ratio': round(float(min(rs)), 4),
+                'max_ratio': round(float(max(rs)), 4),
+                'avg_x_drift': round(float(np.mean(ds)), 1) if ds else 0,
+                'std_x_drift': round(float(np.std(ds)), 1) if len(ds) > 1 else 0,
+            })
+
+        all_ratios = [r for rs in per_interval_ratios for r in rs]
+        all_drifts = [d for ds in per_interval_drifts for d in ds]
+
+        # IQR 去除离群值
+        clean_ratios = all_ratios
+        n_outliers = 0
+        if len(all_ratios) >= 4:
+            q1, q3 = np.percentile(all_ratios, [25, 75])
+            iqr = q3 - q1
+            lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            clean_ratios = [r for r in all_ratios if lower <= r <= upper]
+            n_outliers = len(all_ratios) - len(clean_ratios)
+
+        if len(self.groups) >= 3 and float(np.std(clean_ratios)) < 0.1:
+            confidence = 'high'
+        elif len(self.groups) >= 2:
+            confidence = 'medium'
+        else:
+            confidence = 'low'
+
+        return {
+            'n_groups': len(self.groups),
+            'interval_stats': interval_stats,
+            'overall_avg_ratio': round(float(np.mean(clean_ratios)), 4) if clean_ratios else 1.0,
+            'overall_std_ratio': round(float(np.std(clean_ratios)), 4) if clean_ratios else 0.0,
+            'overall_avg_x_drift': round(float(np.mean(all_drifts)), 1) if all_drifts else 0,
+            'overall_std_x_drift': round(float(np.std(all_drifts)), 1) if len(all_drifts) > 1 else 0,
+            'n_outliers_removed': n_outliers,
+            'confidence': confidence,
+            'group_labels': [g['label'] for g in self.groups],
+            'group_ratios': [round(g['result']['avg_ratio'], 4) for g in self.groups],
+        }
+
+    def generate_optimal_correction(self, gun_name, acc_code, gun_data_dir=None):
+        """基于多组数据生成最优修正参数"""
+        analysis = self.analyze()
+        if not analysis:
+            return None
+
+        gd = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
+        gp = gd / f"{gun_name}.json"
+        if not gp.exists():
+            return None
+        try:
+            with open(gp, encoding='utf-8') as f:
+                gun_data = json.load(f)
+        except Exception:
+            return None
+
+        original = gun_data.get(acc_code, gun_data.get("A0B0C0", []))
+        if not original:
+            return None
+
+        # 使用逐发最优比率修正
+        chunk = self.groups[0]['result'].get('chunk_size', 12) if self.groups else 12
+        corrected = list(original)
+
+        for i, stat in enumerate(analysis['interval_stats']):
+            if stat is None:
+                continue
+            r = stat['avg_ratio']
+            start = i * chunk
+            end = min((i + 1) * chunk, len(corrected))
+            for j in range(start, end):
+                corrected[j] = round(original[j] * r, 1) if original[j] != 0 else 0
+
+        return {
+            'gun_name': gun_name,
+            'acc_code': acc_code,
+            'corrected_optimal': corrected,
+            'original_array': original,
+            'analysis': analysis,
+        }
+
+
+# ═══════════════════════════════════════════
 # 一站式分析 API
 # ═══════════════════════════════════════════
 
 def analyze_bullet_pattern(base_img, result_img, gun_name, acc_code,
                            scope_val=1.0, posture_val=1.0,
-                           resolution="1920x1080",
-                           save_results=True):
-    """
-    一站式弹痕分析入口。
-
-    :param base_img: 空白墙面 BGR 图像
-    :param result_img: 打完后 BGR 图像
-    :param gun_name: 枪械名（JSON 文件名）
-    :param acc_code: 配件码 "A#B#C#"
-    :param scope_val: 倍镜灵敏度系数
-    :param posture_val: 姿态系数
-    :param resolution: 当前分辨率
-    :param save_results: 是否保存结果到磁盘
-    :return: dict with keys: holes, comparison, vis_path, chart_path
-    """
+                           resolution="1920x1080", save_results=True):
     detector = BulletDetector(resolution)
-    sorter = BulletSorter()
     comparator = BulletComparator()
     visualizer = BulletVisualizer()
 
@@ -501,7 +750,7 @@ def analyze_bullet_pattern(base_img, result_img, gun_name, acc_code,
     if not holes:
         return {'holes': [], 'comparison': None, 'error': '未检测到弹痕'}
 
-    sorted_holes = sorter.sort(holes)
+    sorted_holes = BulletSorter.sort(holes)
     comparison = comparator.compare(sorted_holes, gun_name, acc_code, scope_val, posture_val)
 
     result = {
@@ -532,102 +781,6 @@ def analyze_bullet_pattern(base_img, result_img, gun_name, acc_code,
 
 
 # ═══════════════════════════════════════════
-# 修正参数生成
-# ═══════════════════════════════════════════
-
-class ParameterCorrector:
-    """根据校准结果生成修正后的压枪参数"""
-
-    def __init__(self, gun_data_dir=None):
-        self.gun_data_dir = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
-
-    def correct(self, comparison_result, gun_name, acc_code):
-        """
-        生成修正后的弹道数组。
-
-        原理:
-          ratio = 实际间距 / 理论间距
-          ratio > 1 → 实际后坐力 > 理论预测 → JSON值偏低 → 需要放大
-          ratio < 1 → 实际后坐力 < 理论预测 → JSON值偏高 → 需要缩小
-          corrected_value = original_value * avg_ratio
-
-        :return: dict 包含原始和修正数组、元信息
-        """
-        if not comparison_result:
-            return None
-
-        gp = self.gun_data_dir / f"{gun_name}.json"
-        if not gp.exists():
-            return None
-
-        try:
-            with open(gp, encoding='utf-8') as f:
-                gun_data = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return None
-
-        original = gun_data.get(acc_code)
-        if original is None:
-            original = gun_data.get("A0B0C0", [])
-            acc_code = "A0B0C0"
-        if not original:
-            return None
-
-        avg_ratio = comparison_result['avg_ratio']
-        corrected = [round(v * avg_ratio) if v != 0 else 0 for v in original]
-
-        # 逐发修正（如果有逐发 ratio）
-        per_shot_corrected = None
-        details = comparison_result.get('details', [])
-        if details:
-            per_shot_ratios = [d['ratio'] for d in details if d.get('ratio') is not None]
-            if per_shot_ratios:
-                per_shot_corrected = list(original)
-                ticks_per_bullet = max(1, len(original) // max(1, comparison_result.get('shot_count', 10)))
-                for i, d in enumerate(details):
-                    r = d.get('ratio')
-                    if r is None:
-                        continue
-                    start = i * ticks_per_bullet
-                    end = min((i + 1) * ticks_per_bullet, len(per_shot_corrected))
-                    for j in range(start, end):
-                        v = per_shot_corrected[j]
-                        per_shot_corrected[j] = round(v * r) if v != 0 else 0
-
-        return {
-            'gun_name': gun_name,
-            'acc_code': acc_code,
-            'file_path': str(gp),
-            'avg_ratio': round(avg_ratio, 3),
-            'scope_val': comparison_result.get('scope_val', 1.0),
-            'suggested_scope': comparison_result.get('suggested_scope', 1.0),
-            'original_array': original,
-            'corrected_uniform': corrected,
-            'corrected_per_shot': per_shot_corrected,
-            'details': details,
-        }
-
-    @staticmethod
-    def format_array_for_json(arr, items_per_line=36):
-        """将数组格式化为可直接粘贴到 JSON 文件的字符串"""
-        lines = []
-        for i in range(0, len(arr), items_per_line):
-            chunk = arr[i:i + items_per_line]
-            lines.append("        " + ", ".join(str(v) for v in chunk))
-        return "[\n" + ",\n".join(lines) + "\n    ]"
-
-    @staticmethod
-    def generate_patch_json(correction_result):
-        """生成可直接替换的完整 JSON 片段"""
-        if not correction_result:
-            return ""
-        arr = correction_result['corrected_uniform']
-        key = correction_result['acc_code']
-        formatted = ParameterCorrector.format_array_for_json(arr)
-        return f'    "{key}": {formatted}'
-
-
-# ═══════════════════════════════════════════
 # CLI 入口
 # ═══════════════════════════════════════════
 
@@ -642,12 +795,19 @@ def _cli_main():
     parser.add_argument("result", help="打完后的墙面截图路径")
     parser.add_argument("--gun", default="m762", help="枪械名（JSON 文件名，默认 m762）")
     parser.add_argument("--acc", default="A0B0C0", help="配件码（默认 A0B0C0）")
-    parser.add_argument("--scope", type=float, default=1.0, help="倍镜灵敏度系数（默认 1.0）")
+    parser.add_argument("--scope", type=float, default=None,
+                        help="倍镜灵敏度系数（默认从config.json读取）")
     parser.add_argument("--posture", type=float, default=1.0, help="姿态系数（默认 1.0）")
-    parser.add_argument("--resolution", default="1920x1080", help="分辨率（默认 1920x1080）")
+    parser.add_argument("--resolution", default="1920x1080", help="分辨率")
     parser.add_argument("--no-save", action="store_true", help="不保存结果到磁盘")
 
     args = parser.parse_args()
+
+    # 自动从config读取scope
+    scope = args.scope
+    if scope is None:
+        cfg = _load_sensitivity_config()
+        scope = cfg.get('none', 1.0)
 
     base = cv2.imread(args.base)
     result = cv2.imread(args.result)
@@ -662,18 +822,14 @@ def _cli_main():
     print(f"  PUBG 弹痕分析")
     print(f"{'='*55}")
     print(f"  枪械: {args.gun}  配件码: {args.acc}")
-    print(f"  倍镜系数: {args.scope}  姿态系数: {args.posture}")
-    print(f"  分辨率: {args.resolution}")
+    print(f"  倍镜系数: {scope}  姿态系数: {args.posture}")
     print(f"{'='*55}\n")
 
     r = analyze_bullet_pattern(
         base, result,
-        gun_name=args.gun,
-        acc_code=args.acc,
-        scope_val=args.scope,
-        posture_val=args.posture,
-        resolution=args.resolution,
-        save_results=not args.no_save,
+        gun_name=args.gun, acc_code=args.acc,
+        scope_val=scope, posture_val=args.posture,
+        resolution=args.resolution, save_results=not args.no_save,
     )
 
     if not r['holes']:
@@ -684,15 +840,18 @@ def _cli_main():
 
     comp = r.get('comparison')
     if comp:
-        print(f"  {'发数':>4} {'实际':>8} {'理论':>8} {'比值':>8} {'状态'}")
-        print(f"  {'-'*48}")
+        print(f"  {'发数':>4} {'实际px':>8} {'理论px':>8} {'原值':>6} {'比值':>8} {'X漂':>6} {'状态'}")
+        print(f"  {'-'*58}")
         for d in comp['details']:
-            ratio_str = f"{d['ratio']:.3f}" if d['ratio'] is not None else "  N/A"
-            print(f"  {d['shot']:>4} {d['actual_dy']:>8.1f} {d['theory_dy']:>8.1f} {ratio_str:>8}  {d['status']}")
-        print(f"  {'-'*48}")
-        print(f"  平均比值: {comp['avg_ratio']:.3f}  标准差: {comp['std_ratio']:.3f}")
+            ratio_str = f"{d['ratio']:.4f}" if d['ratio'] is not None else "  N/A"
+            print(f"  {d['shot']:>4} {d['actual_dy']:>8.1f} {d['theory_dy']:>8.1f} "
+                  f"{d['raw_chunk_sum']:>6.1f} {ratio_str:>8}  {d['x_drift']:>+5.0f} {d['status']}")
+        print(f"  {'-'*58}")
+        print(f"  平均比值: {comp['avg_ratio']:.4f}  标准差: {comp['std_ratio']:.4f}")
         print(f"  建议倍镜系数: {comp['suggested_scope']}")
-        print(f"  水平漂移: 平均 {comp['avg_horizontal_drift']:+.1f}px  最大 {comp['max_horizontal_drift']:.1f}px")
+        print(f"  水平漂移: 均值{comp['avg_horizontal_drift']:+.1f} "
+              f"标准差{comp['std_horizontal_drift']:.1f} "
+              f"最大{comp['max_horizontal_drift']:.1f}px")
 
         corrector = ParameterCorrector()
         correction = corrector.correct(comp, args.gun, args.acc)
