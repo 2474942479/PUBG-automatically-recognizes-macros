@@ -23,6 +23,21 @@ from PyQt5.QtGui import QPixmap, QFont, QPainter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fire_data import KEY_DATA
 
+# 配件中文名映射
+MUZZLE_CN = {
+    'none':'无','eliuquan':'扼流圈','yazuiqiangkou':'鸭嘴枪口',
+    'jujiqiangbuchang':'狙击补偿','jujiqiangxiaoyan':'狙击消焰',
+    'buqiangbuchang':'步枪补偿','buqiangxiaoyan':'步枪消焰','xiaoyin':'消音器',
+    'chongfengqiangxiaoyan':'冲锋消焰','chongfengqiangbuchang':'冲锋补偿',
+}
+GRIP_CN = {
+    'none':'无','banjieshi':'半截式','muzhi':'拇指','zhijiao':'直角','chuizhi':'垂直',
+}
+STOCK_CN = {
+    'none':'无','zhanshuqiangtuo':'战术枪托','zhongxinqiangtuo':'重型枪托',
+    'tuosaiban':'托腮板','zidandai':'子弹袋','zhedieshiqiangtuo':'折叠枪托',
+}
+
 # ── 检测参数 ──
 MIN_AREA, MAX_AREA, MIN_CIRC, COLOR_TH = 20, 800, 0.25, 15
 
@@ -184,11 +199,11 @@ class MainWindow(QWidget):
         main.addLayout(row1)
 
         row2 = QHBoxLayout()
-        self.c_muzz = self._cbox(KEY_DATA.get("Muzzle",{}))
+        self.c_muzz = self._cbox(MUZZLE_CN)
         row2.addWidget(QLabel("枪口:")); row2.addWidget(self.c_muzz); row2.addSpacing(10)
-        self.c_grip = self._cbox(KEY_DATA.get("Grip",{}))
+        self.c_grip = self._cbox(GRIP_CN)
         row2.addWidget(QLabel("握把:")); row2.addWidget(self.c_grip); row2.addSpacing(10)
-        self.c_stk = self._cbox(KEY_DATA.get("Stock",{}))
+        self.c_stk = self._cbox(STOCK_CN)
         row2.addWidget(QLabel("枪托:")); row2.addWidget(self.c_stk); row2.addSpacing(10)
         self.c_pose = self._cbox({"none":"站立","c":"蹲下","z":"趴下"})
         row2.addWidget(QLabel("姿势:")); row2.addWidget(self.c_pose)
