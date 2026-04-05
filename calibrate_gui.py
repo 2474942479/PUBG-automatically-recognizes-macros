@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
     QLabel, QComboBox, QPushButton, QFileDialog,
     QFrame, QMessageBox, QSpinBox, QTextEdit
 )
-from PyQt5.QtGui import QPixmap, QFont, QPainter
+from PyQt5.QtGui import QPixmap, QImage, QFont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fire_data import KEY_DATA
@@ -43,6 +43,18 @@ MIN_AREA, MAX_AREA, MIN_CIRC, COLOR_TH = 20, 800, 0.25, 15
 
 SAVE_DIR = Path("./calibration_results")
 SAVE_DIR.mkdir(exist_ok=True)
+
+
+def _filter_line(holes, max_dx=50):
+    """弹痕应该大致在一条竖线上，排除远离主线的孤立噪点
+    算法：按 X 分组，取最多的组（弹道主线）"""
+    if len(holes) < 4: return holes
+    holes = sorted(holes, key=lambda h: h['x'])
+    max_group = []
+    for i in range(len(holes)):
+        group = [h for h in holes if abs(h['x'] - holes[i]['x']) <= max_dx]
+        if len(group) > len(max_group): max_group = group
+    return max_group if len(max_group) >= 3 else holes
 
 
 def detect_holes(base, result):
@@ -71,16 +83,17 @@ def detect_holes(base, result):
         cd = abs(cv2.mean(bg, mask=mask)[0] - cv2.mean(rg, mask=mask)[0])
         if cd < COLOR_TH: continue
         holes.append({'x':cx, 'y':cy, 'area':area})
+    holes = _filter_line(holes)
     return holes
 
 
 def sort_holes(holes):
+    """
+    PUBG 后坐力子弹从下往上飞，先打的弹痕在下面（Y值大）。
+    从下往上排：shot_num=1 是最下面的弹痕。
+    """
     if not holes: return holes
-    s = sorted(holes, key=lambda h:(h['y'], h['x']))
-    if len(s) > 1:
-        mid = len(s)//2
-        if np.mean([h['y'] for h in s[mid:]]) < np.mean([h['y'] for h in s[:mid]]):
-            s = s[::-1]
+    s = sorted(holes, key=lambda h: h['y'], reverse=True)  # Y 大的在前
     for i, h in enumerate(s): h['shot_num'] = i+1
     return s
 
@@ -94,7 +107,8 @@ def compare_with_json(holes, gun_name, acc_code, scope_val, pose_val):
         gun = json.load(f)
     raw = gun.get(acc_code, gun.get("A0B0C0", []))
     if not raw: return None
-    actual = [s[i]['y']-s[i-1]['y'] for i in range(1, len(s))]
+    # shot_num=1在最下面(Y大)，shot_num=2在上面(Y小)，所以间距是前一个减后一个
+    actual = [s[i-1]['y'] - s[i]['y'] for i in range(1, len(s))]
     jd = [raw[j] for j in range(0, min(len(actual)*2, len(raw)), 2)]
     theory = [j*scope_val*pose_val for j in jd if j != 0]
     av = [d for d in actual if d > 0]
@@ -381,14 +395,29 @@ class MainWindow(QWidget):
         s = sort_holes(holes)
         self.scope_val_lb.setText(f"倍镜系数: {scope_val:.2f}  姿势系数: {pose_val:.2f}  |  检测到 {len(s)} 个弹痕")
 
+        self.progress_lb.setText("⏳ 绘制标注图...")
+        QApplication.processEvents()
+
         # 可视化
         vis = make_vis(s, result)
         ts = time.strftime('%Y%m%d_%H%M%S')
         vis_path = SAVE_DIR / f"{ts}_result_marked.png"
         cv2.imwrite(str(vis_path), vis)
+        self._vis_path = str(vis_path)
+
+        # 在窗口显示标注图
+        h, w = vis.shape[:2]
+        fmt = QImage.Format_BGR888 if len(vis.shape)==3 and vis.shape[2]==3 else QImage.Format_Grayscale8
+        qimg = QImage(vis.data, w, h, vis.strides[0], fmt)
+        px = QPixmap.fromImage(qimg)
+        scaled = px.scaled(self.img_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.img_label.setPixmap(scaled)
+
+        self.progress_lb.setText("⏳ 对比分析...")
+        QApplication.processEvents()
 
         # 对比
-        res = compare_with_json(holes, gun_name, acc_code, scope_val, pose_val)
+        res = compare_with_json(s, gun_name, acc_code, scope_val, pose_val)
 
         text = f"{'='*42}\n"
         text += f"  弹痕分析结果\n"
@@ -417,7 +446,7 @@ class MainWindow(QWidget):
             with open(gp2, encoding='utf-8') as f:
                 gun2 = json.load(f)
             raw2 = gun2.get(acc_code, gun2.get("A0B0C0", []))
-            actual2 = [s2[i]['y']-s2[i-1]['y'] for i in range(1, len(s2))]
+            actual2 = [s2[i-1]['y'] - s2[i]['y'] for i in range(1, len(s2))]
             jd2 = [raw2[j] for j in range(0, min(len(actual2)*2, len(raw2)), 2)]
             theory2 = [j*scope_val*pose_val for j in jd2 if j != 0]
             av2 = [d2 for d2 in actual2 if d2 > 0]
