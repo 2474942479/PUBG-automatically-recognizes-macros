@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-"""游戏内 HUD 悬浮窗 — 三档可切换（极简 / 紧凑 / 完整）
+"""游戏内 HUD 悬浮窗 — 三档可切换 + 可配置 + 可拖动
 用法：from ui.overlay_hud import GameHUD; hud = GameHUD(PC); hud.show_hud()
-Tab → 临时隐藏/恢复（配合背包识别）
-F9  → 循环切换显示模式：极简 → 紧凑 → 完整
+Tab  → 临时隐藏/恢复（配合背包识别）
+F9   → 循环切换显示模式：极简 → 紧凑 → 完整
+F10  → 切换拖动模式（解除/恢复鼠标穿透，方便拖动位置）
+配置文件：Config/hud_config.json
 """
-import sys, ctypes
+import sys, os, json, ctypes
+from pathlib import Path
 from ctypes import wintypes
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QRectF
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QRectF, QPoint
 from PyQt5.QtWidgets import QApplication, QWidget
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QFontMetrics, QLinearGradient
 from pynput import keyboard
@@ -42,6 +45,97 @@ def _make_click_through(hwnd):
     _SetWindowLongW(hwnd, GWL_EXSTYLE,
                     ex | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE)
 
+
+def _remove_click_through(hwnd):
+    if not _HAS_WIN32:
+        return
+    ex = _GetWindowLongW(hwnd, GWL_EXSTYLE)
+    _SetWindowLongW(hwnd, GWL_EXSTYLE,
+                    ex & ~WS_EX_TRANSPARENT)
+
+
+# ──────────────────────────────────────────────
+# 配置加载
+# ──────────────────────────────────────────────
+
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / 'Config' / 'hud_config.json'
+_CONFIG_CANDIDATES = [
+    _CONFIG_PATH,
+    Path('./Config/hud_config.json'),
+    Path('../Config/hud_config.json'),
+]
+
+_DEFAULT_CONFIG = {
+    "position": {"x": -1, "y": 20, "anchor": "top-right", "margin_right": 20},
+    "default_mode": "minimal",
+    "font_family": "Microsoft YaHei",
+    "font_size": {"minimal": 10, "compact_header": 9, "compact_body": 9,
+                  "full_header": 9, "full_body": 9, "hint": 7},
+    "colors": {
+        "background": [12, 12, 12, 220], "border": [255, 186, 8, 100],
+        "gold": [255, 186, 8, 255], "green": [74, 229, 74, 255],
+        "red": [255, 68, 68, 255], "yellow": [255, 215, 0, 255],
+        "white": [255, 255, 255, 255], "gray": [140, 140, 140, 255],
+        "dim": [80, 80, 80, 255],
+    },
+    "size": {"minimal": [290, 30], "compact": [260, 140], "full": [300, 260]},
+    "opacity": 0.9,
+    "refresh_ms": 250,
+    "hotkey_mode_switch": "F9",
+}
+
+
+def _load_config():
+    for p in _CONFIG_CANDIDATES:
+        if p.is_file():
+            try:
+                with open(p, encoding='utf-8') as f:
+                    user_cfg = json.load(f)
+                cfg = json.loads(json.dumps(_DEFAULT_CONFIG))
+                _deep_merge(cfg, user_cfg)
+                cfg['_path'] = str(p.resolve())
+                return cfg
+            except Exception:
+                pass
+    return dict(_DEFAULT_CONFIG)
+
+
+def _deep_merge(base, override):
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+
+
+def _save_config(cfg):
+    path = cfg.get('_path')
+    if not path:
+        for p in _CONFIG_CANDIDATES:
+            if p.parent.is_dir():
+                path = str(p.resolve())
+                break
+    if not path:
+        return
+    save_cfg = {k: v for k, v in cfg.items() if k != '_path'}
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(save_cfg, f, indent=4, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _qcolor(rgba):
+    if isinstance(rgba, (list, tuple)):
+        if len(rgba) >= 4:
+            return QColor(rgba[0], rgba[1], rgba[2], rgba[3])
+        return QColor(rgba[0], rgba[1], rgba[2])
+    return QColor(rgba)
+
+
+# ──────────────────────────────────────────────
+# 翻译表
+# ──────────────────────────────────────────────
 
 GUN_CN = {
     'm416': 'M416', 'akm': 'AKM', 'scar_l': 'SCAR-L', 'scar-l': 'SCAR-L',
@@ -92,13 +186,19 @@ def _attach_cn(name):
 
 
 MODE_MINIMAL, MODE_COMPACT, MODE_FULL = 0, 1, 2
+_MODE_NAMES = {MODE_MINIMAL: 'minimal', MODE_COMPACT: 'compact', MODE_FULL: 'full'}
 
 
 class _KeyListener(QThread):
-    """监听 Tab（临时隐藏）和 F9（切换模式）"""
+    """监听 Tab（临时隐藏）、F9（切换模式）、F10（切换拖动）"""
     sig_tab_press = pyqtSignal()
     sig_tab_release = pyqtSignal()
     sig_mode_switch = pyqtSignal()
+    sig_drag_toggle = pyqtSignal()
+
+    def __init__(self, mode_key='F9'):
+        super().__init__()
+        self._mode_key_name = mode_key.lower()
 
     def run(self):
         def _key_name(key):
@@ -111,8 +211,10 @@ class _KeyListener(QThread):
             k = _key_name(key)
             if k == 'tab':
                 self.sig_tab_press.emit()
-            elif key == Key.f9:
+            elif k and k.lower() == self._mode_key_name:
                 self.sig_mode_switch.emit()
+            elif k == 'f10':
+                self.sig_drag_toggle.emit()
 
         def on_release(key):
             k = _key_name(key)
@@ -125,56 +227,90 @@ class _KeyListener(QThread):
 
 
 class GameHUD(QWidget):
-    """三档游戏内 HUD
+    """三档游戏内 HUD — 可配置/可拖动
     Tab  = 临时隐藏/恢复（背包识别期间不挡视线）
     F9   = 极简 → 紧凑 → 完整 → 极简
+    F10  = 切换拖动模式（拖动改位置后自动保存到配置）
     """
-
-    _COL_BG = QColor(12, 12, 12, 220)
-    _COL_BORDER = QColor(255, 186, 8, 100)
-    _COL_GOLD = QColor(255, 186, 8)
-    _COL_GREEN = QColor(74, 229, 74)
-    _COL_RED = QColor(255, 68, 68)
-    _COL_YELLOW = QColor(255, 215, 0)
-    _COL_WHITE = QColor(255, 255, 255)
-    _COL_GRAY = QColor(140, 140, 140)
-    _COL_DIM = QColor(80, 80, 80)
 
     def __init__(self, pc, parent=None):
         super().__init__(parent)
         self._pc = pc
-        self._mode = MODE_MINIMAL
+        self._cfg = _load_config()
+        self._mode = {'minimal': MODE_MINIMAL, 'compact': MODE_COMPACT,
+                      'full': MODE_FULL}.get(self._cfg.get('default_mode', 'minimal'), MODE_MINIMAL)
         self._visible = True
         self._tab_hidden = False
+        self._drag_mode = False
+        self._drag_pos = None
+
+        self._load_colors()
+
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._apply_size()
-        self._position_right()
+        self._position_from_config()
 
-        self._key_t = _KeyListener()
+        mode_key = self._cfg.get('hotkey_mode_switch', 'F9')
+        self._key_t = _KeyListener(mode_key)
         self._key_t.sig_tab_press.connect(self._on_tab_press)
         self._key_t.sig_tab_release.connect(self._on_tab_release)
         self._key_t.sig_mode_switch.connect(self._on_mode_switch)
+        self._key_t.sig_drag_toggle.connect(self._on_drag_toggle)
         self._key_t.start()
 
+        refresh = max(50, self._cfg.get('refresh_ms', 250))
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
-        self._timer.start(250)
+        self._timer.start(refresh)
+
+    def _load_colors(self):
+        c = self._cfg.get('colors', {})
+        self._COL_BG = _qcolor(c.get('background', [12, 12, 12, 220]))
+        self._COL_BORDER = _qcolor(c.get('border', [255, 186, 8, 100]))
+        self._COL_GOLD = _qcolor(c.get('gold', [255, 186, 8, 255]))
+        self._COL_GREEN = _qcolor(c.get('green', [74, 229, 74, 255]))
+        self._COL_RED = _qcolor(c.get('red', [255, 68, 68, 255]))
+        self._COL_YELLOW = _qcolor(c.get('yellow', [255, 215, 0, 255]))
+        self._COL_WHITE = _qcolor(c.get('white', [255, 255, 255, 255]))
+        self._COL_GRAY = _qcolor(c.get('gray', [140, 140, 140, 255]))
+        self._COL_DIM = _qcolor(c.get('dim', [80, 80, 80, 255]))
+
+    def _font(self, key, weight=QFont.Normal):
+        family = self._cfg.get('font_family', 'Microsoft YaHei')
+        sizes = self._cfg.get('font_size', {})
+        size = sizes.get(key, 9)
+        return QFont(family, size, weight)
 
     def _apply_size(self):
-        if self._mode == MODE_MINIMAL:
-            self.setFixedSize(290, 30)
-        elif self._mode == MODE_COMPACT:
-            self.setFixedSize(260, 140)
-        else:
-            self.setFixedSize(300, 260)
+        sizes = self._cfg.get('size', {})
+        mode_name = _MODE_NAMES.get(self._mode, 'minimal')
+        sz = sizes.get(mode_name, [290, 30])
+        self.setFixedSize(sz[0], sz[1])
 
-    def _position_right(self):
+    def _position_from_config(self):
+        pos = self._cfg.get('position', {})
+        x = pos.get('x', -1)
+        y = pos.get('y', 20)
+
         scr = QApplication.primaryScreen()
-        if scr:
+        if scr and x < 0:
             g = scr.geometry()
-            self.move(g.width() - self.width() - 20, 20)
-        _make_click_through(int(self.winId()))
+            margin_r = pos.get('margin_right', 20)
+            x = g.width() - self.width() - margin_r
+
+        self.move(x, y)
+        if not self._drag_mode:
+            _make_click_through(int(self.winId()))
+
+    def _save_position(self):
+        p = self.pos()
+        self._cfg.setdefault('position', {})['x'] = p.x()
+        self._cfg['position']['y'] = p.y()
+        self._cfg['position']['anchor'] = 'custom'
+        _save_config(self._cfg)
+
+    # ── 按键处理 ──
 
     def _on_tab_press(self):
         if self._visible:
@@ -194,8 +330,46 @@ class GameHUD(QWidget):
             return
         self._mode = (self._mode + 1) % 3
         self._apply_size()
-        self._position_right()
+        pos = self._cfg.get('position', {})
+        if pos.get('anchor') == 'top-right':
+            scr = QApplication.primaryScreen()
+            if scr:
+                g = scr.geometry()
+                margin_r = pos.get('margin_right', 20)
+                self.move(g.width() - self.width() - margin_r, self.y())
         self.update()
+
+    def _on_drag_toggle(self):
+        self._drag_mode = not self._drag_mode
+        hwnd = int(self.winId())
+        if self._drag_mode:
+            _remove_click_through(hwnd)
+            self.setCursor(Qt.SizeAllCursor)
+        else:
+            _make_click_through(hwnd)
+            self.setCursor(Qt.ArrowCursor)
+            self._save_position()
+        self.update()
+
+    # ── 拖动 ──
+
+    def mousePressEvent(self, event):
+        if self._drag_mode and event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_mode and self._drag_pos is not None:
+            self.move(event.globalPos() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_mode:
+            self._drag_pos = None
+            self._save_position()
+            event.accept()
+
+    # ── 获取枪械信息 ──
 
     def _get_current_gun(self):
         pc = self._pc
@@ -210,6 +384,8 @@ class GameHUD(QWidget):
         elif results[1]:
             return results[1], 2
         return None, None
+
+    # ── 绘制 ──
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -227,10 +403,13 @@ class GameHUD(QWidget):
         w, h = self.width(), self.height()
 
         grad = QLinearGradient(0, 0, w, 0)
-        grad.setColorAt(0, QColor(12, 12, 12, 210))
-        grad.setColorAt(1, QColor(12, 12, 12, 160))
+        grad.setColorAt(0, QColor(self._COL_BG.red(), self._COL_BG.green(), self._COL_BG.blue(), 210))
+        grad.setColorAt(1, QColor(self._COL_BG.red(), self._COL_BG.green(), self._COL_BG.blue(), 160))
         p.setBrush(QBrush(grad))
-        p.setPen(QPen(self._COL_BORDER, 1))
+        border_pen = QPen(self._COL_BORDER, 1)
+        if self._drag_mode:
+            border_pen = QPen(QColor(255, 100, 100), 2)
+        p.setPen(border_pen)
         p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 4, 4)
 
         gun, slot = self._get_current_gun()
@@ -238,7 +417,7 @@ class GameHUD(QWidget):
         scope = _scope_cn(gun.get('Scope')) if gun else '—'
         posture = POSTURE_CN.get(pc.Current_posture, '站')
 
-        font = QFont('Microsoft YaHei', 10, QFont.Bold)
+        font = self._font('minimal', QFont.Bold)
         p.setFont(font)
         fm = QFontMetrics(font)
 
@@ -269,10 +448,11 @@ class GameHUD(QWidget):
         p.setPen(Qt.NoPen)
         p.drawEllipse(x, 10, 10, 10)
 
-        hint_font = QFont('Microsoft YaHei', 7)
+        hint_font = self._font('hint')
         p.setFont(hint_font)
         p.setPen(QPen(self._COL_DIM))
-        hint = 'F9切换'
+        mode_key = self._cfg.get('hotkey_mode_switch', 'F9')
+        hint = f'拖动中' if self._drag_mode else f'{mode_key}切换'
         p.drawText(w - QFontMetrics(hint_font).horizontalAdvance(hint) - 8, 20, hint)
 
     def _paint_compact(self, p):
@@ -280,14 +460,17 @@ class GameHUD(QWidget):
         w, h = self.width(), self.height()
 
         p.setBrush(QBrush(self._COL_BG))
-        p.setPen(QPen(self._COL_BORDER, 1))
+        border_pen = QPen(self._COL_BORDER, 1)
+        if self._drag_mode:
+            border_pen = QPen(QColor(255, 100, 100), 2)
+        p.setPen(border_pen)
         p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 6, 6)
 
         gun, slot = self._get_current_gun()
 
-        hf = QFont('Microsoft YaHei', 9, QFont.Bold)
-        bf = QFont('Microsoft YaHei', 9)
-        sf = QFont('Microsoft YaHei', 7)
+        hf = self._font('compact_header', QFont.Bold)
+        bf = self._font('compact_body')
+        sf = self._font('hint')
 
         p.setFont(hf)
         p.setPen(QPen(self._COL_GOLD))
@@ -336,19 +519,24 @@ class GameHUD(QWidget):
 
         p.setFont(sf)
         p.setPen(QPen(self._COL_DIM))
-        p.drawText(w - QFontMetrics(sf).horizontalAdvance('F9切换') - 8, h - 6, 'F9切换')
+        mode_key = self._cfg.get('hotkey_mode_switch', 'F9')
+        hint = f'拖动中(F10锁定)' if self._drag_mode else f'{mode_key}切换'
+        p.drawText(w - QFontMetrics(sf).horizontalAdvance(hint) - 8, h - 6, hint)
 
     def _paint_full(self, p):
         pc = self._pc
         w, h = self.width(), self.height()
 
         p.setBrush(QBrush(self._COL_BG))
-        p.setPen(QPen(self._COL_BORDER, 1))
+        border_pen = QPen(self._COL_BORDER, 1)
+        if self._drag_mode:
+            border_pen = QPen(QColor(255, 100, 100), 2)
+        p.setPen(border_pen)
         p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 6, 6)
 
-        hf = QFont('Microsoft YaHei', 9, QFont.Bold)
-        bf = QFont('Microsoft YaHei', 9)
-        sf = QFont('Microsoft YaHei', 7)
+        hf = self._font('full_header', QFont.Bold)
+        bf = self._font('full_body')
+        sf = self._font('hint')
 
         p.setFont(hf)
         p.setPen(QPen(self._COL_GOLD))
@@ -438,15 +626,19 @@ class GameHUD(QWidget):
 
         p.setFont(sf)
         p.setPen(QPen(self._COL_DIM))
-        p.drawText(w - QFontMetrics(sf).horizontalAdvance('F9切换') - 8, h - 6, 'F9切换')
+        mode_key = self._cfg.get('hotkey_mode_switch', 'F9')
+        hint = f'拖动中(F10锁定)' if self._drag_mode else f'{mode_key}切换 | F10拖动'
+        p.drawText(w - QFontMetrics(sf).horizontalAdvance(hint) - 8, h - 6, hint)
 
     # ── Public API（向后兼容）──
     def show_hud(self):
         self._visible = True
         self._tab_hidden = False
-        self._mode = MODE_MINIMAL
+        default_mode = self._cfg.get('default_mode', 'minimal')
+        self._mode = {'minimal': MODE_MINIMAL, 'compact': MODE_COMPACT,
+                      'full': MODE_FULL}.get(default_mode, MODE_MINIMAL)
         self._apply_size()
-        self._position_right()
+        self._position_from_config()
         self.show()
         self._timer.start()
 
@@ -461,6 +653,13 @@ class GameHUD(QWidget):
             self.hide_hud()
         else:
             self.show_hud()
+
+    def reload_config(self):
+        self._cfg = _load_config()
+        self._load_colors()
+        self._apply_size()
+        self._position_from_config()
+        self.update()
 
     def stop(self):
         self._timer.stop()

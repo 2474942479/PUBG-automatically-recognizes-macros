@@ -1,0 +1,37 @@
+{
+    "position": {
+        "x": -1,
+        "y": 20,
+        "anchor": "top-right",
+        "margin_right": 20
+    },
+    "default_mode": "minimal",
+    "font_family": "Microsoft YaHei",
+    "font_size": {
+        "minimal": 10,
+        "compact_header": 9,
+        "compact_body": 9,
+        "full_header": 9,
+        "full_body": 9,
+        "hint": 7
+    },
+    "colors": {
+        "background": [12, 12, 12, 220],
+        "border": [255, 186, 8, 100],
+        "gold": [255, 186, 8, 255],
+        "green": [74, 229, 74, 255],
+        "red": [255, 68, 68, 255],
+        "yellow": [255, 215, 0, 255],
+        "white": [255, 255, 255, 255],
+        "gray": [140, 140, 140, 255],
+        "dim": [80, 80, 80, 255]
+    },
+    "size": {
+        "minimal": [290, 30],
+        "compact": [260, 140],
+        "full": [300, 260]
+    },
+    "opacity": 0.9,
+    "refresh_ms": 250,
+    "hotkey_mode_switch": "F9"
+}

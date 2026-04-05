@@ -21,6 +21,20 @@ from pathlib import Path
 from datetime import datetime
 
 
+def _find_gun_data_dir():
+    """智能查找 GunData 目录，兼容从项目根目录或子目录运行"""
+    candidates = [
+        Path('./_internal/GunData'),
+        Path('../_internal/GunData'),
+        Path(__file__).resolve().parent.parent / '_internal' / 'GunData',
+        Path(__file__).resolve().parent / '_internal' / 'GunData',
+    ]
+    for p in candidates:
+        if p.is_dir():
+            return str(p.resolve())
+    return str(candidates[0])
+
+
 # ═══════════════════════════════════════════
 # 自适应检测参数
 # ═══════════════════════════════════════════
@@ -182,8 +196,8 @@ class BulletSorter:
 class BulletComparator:
     """与 GunData JSON 弹道数据对比，计算校准系数"""
 
-    def __init__(self, gun_data_dir="./_internal/GunData"):
-        self.gun_data_dir = Path(gun_data_dir)
+    def __init__(self, gun_data_dir=None):
+        self.gun_data_dir = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
 
     def compare(self, holes, gun_name, acc_code, scope_val, posture_val):
         """
@@ -524,8 +538,8 @@ def analyze_bullet_pattern(base_img, result_img, gun_name, acc_code,
 class ParameterCorrector:
     """根据校准结果生成修正后的压枪参数"""
 
-    def __init__(self, gun_data_dir="./_internal/GunData"):
-        self.gun_data_dir = Path(gun_data_dir)
+    def __init__(self, gun_data_dir=None):
+        self.gun_data_dir = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
 
     def correct(self, comparison_result, gun_name, acc_code):
         """
