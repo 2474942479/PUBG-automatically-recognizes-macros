@@ -77,8 +77,8 @@ class Logger:
 
 class GunRecognizer:
     """
-    按 Tab → 识别武器+配件 → 姿势 → 组装配件码
-    全程自动，不用手动输入
+    识别枪械信息 — 用户自己按 Tab 打开背包，程序只做截图识别
+    不自动按 Tab，不自动切界面，不识别姿势（姿势识别有 bug）
     """
     def __init__(self):
         self.PC = ProcessClass()
@@ -93,22 +93,25 @@ class GunRecognizer:
 
     def recognize(self):
         print("\n" + "=" * 60)
-        print("  步骤1：自动识别枪械信息")
+        print("  步骤1：识别枪械信息")
         print("=" * 60)
+        print("\n  1. 按 Tab 打开背包")
+        print("  2. 确认能看到枪名/倍镜/配件")
+        print("  3. 准备好后按回车（程序会自动按 Tab 关背包 + 识别）")
+        input("  按回车继续...")
 
+        # 识别武器和配件
         print("  📸 识别武器和配件...")
         self.PC.recognize_all_guns_info(lambda ev, data: None)
         time.sleep(0.3)
 
+        # 关闭背包
         print("  ➜ 关闭背包...")
         self._press_tab()
-        time.sleep(1.5)
+        time.sleep(0.5)
 
-        print("  📸 识别姿势...")
-        self.PC.recognize_zishi_info()
-        self.posture = self.PC.Current_posture.lower()
-        if self.posture not in ('none', 'c', 'z'):
-            self.posture = "none"
+        # 姿势识别（有 bug，跳过，默认站立）
+        print("  ⏭ 姿势识别跳过，默认站立（后期修复）")
 
         guns = self.PC.get_guns_info()
         raw = guns.get("Name", "m762") if guns else "m762"
@@ -138,10 +141,11 @@ class GunRecognizer:
             print(f"  ⚠ 读配置失败: {e}, 使用 1.0")
             self.scope_value = 1.0
 
+        # 默认用站系数
         gp = Path(f"./_internal/GunData/{self.gun_name}.json")
         if gp.exists():
             with open(gp, encoding='utf-8') as f:
-                self.posture_value = json.load(f).get(self.posture, 1)
+                self.posture_value = json.load(f).get('none', 1)
 
         print(f"\n  \u2501" * 50)
         print(f"  枪械: {self.gun_name}")
