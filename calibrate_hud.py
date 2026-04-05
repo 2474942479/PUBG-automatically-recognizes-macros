@@ -20,7 +20,7 @@ from ctypes import wintypes
 from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QComboBox, QPushButton, QFrame, QMessageBox
+    QComboBox, QPushButton, QFrame, QMessageBox, QSizePolicy
 )
 from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QFontDatabase, QBrush, QScreen
 
@@ -502,8 +502,7 @@ class CalibrateHUD(QWidget):
         )
         b.setFixedHeight(30)
         b.setMinimumWidth(0)
-        b.setSizePolicy(b.sizePolicy().HorizontalPolicy.Preferred,
-                        b.sizePolicy().HorizontalPolicy.Preferred)
+        b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         return b
 
     def _make_result_section(self):
