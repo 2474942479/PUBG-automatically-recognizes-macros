@@ -451,33 +451,91 @@ class BulletHoleAnalyzer:
         return None
 
     def run(self, gr):
-        """运行完整校准"""
-        # 步骤2：拍基线
+        """运行完整校准（快捷键模式）"""
         print("\n" + "="*60)
-        print("  步骤2：拍摄空白墙面基线")
+        print("  快捷键操作指南")
         print("="*60)
-        print("  1. 开镜，对准空白墙面")
-        print("  2. 确认画面干净")
-        input("  就绪后按回车...")
-        
-        self.base_image = self.capture_screen()
-        self.logger.save_image("base_wall", self.base_image)
-        print("  ✓ 基线已保存")
-        
-        # 步骤3：开火
-        print("\n" + "="*60)
-        print("  步骤3：开火 + 拍摄结果")
+        print("  F5  — 拍空白墙面（基线）")
+        print("  F6  — 拍打完后的墙面（结果）")
+        print("  F7  — 开始分析（检测弹痕 + 对比）")
+        print("  F8  — 退出")
         print("="*60)
-        shot_str = input("  打了几发？: ").strip()
-        try: self.shot_count = int(shot_str)
-        except: self.shot_count = 10
+        print("\n  流程：")
+        print("  1. 进训练场，开镜对准空白墙面，按 F5")
+        print("  2. 手动打 N 发（可分多次）")
+        print("  3. 按 F6 拍结果图")
+        print("  4. 按 F7 开始分析")
+        print("="*60)
         
-        print(f"\n  去打枪（可分多次），打完后回来按回车...")
-        input("  确认已打完，按回车拍摄结果图...")
+        import queue
+        key_queue = queue.Queue()
         
-        self.result_image = self.capture_screen()
-        self.logger.save_image("result_wall", self.result_image)
-        print("  ✓ 结果图已保存")
+        def on_key(event):
+            if event.name == 'f5':
+                key_queue.put('f5')
+            elif event.name == 'f6':
+                key_queue.put('f6')
+            elif event.name == 'f7':
+                key_queue.put('f7')
+            elif event.name == 'f8':
+                key_queue.put('f8')
+        
+        if HAS_KEYBOARD:
+            keyboard.on_press(on_key)
+        
+        base_done = False
+        result_done = False
+        shot_count = 10
+        
+        while True:
+            if not HAS_KEYBOARD:
+                cmd = input("\n输入命令 (f5=基线 / f6=结果 / f7=分析 / f8=退出): ").strip().lower()
+                key = cmd
+            else:
+                key = key_queue.get()
+            
+            if key == 'f5':
+                print("  📸 基线截图...")
+                self.base_image = self.capture_screen()
+                self.logger.save_image("base_wall", self.base_image)
+                print("  ✅ 基线已保存")
+                base_done = True
+                
+            elif key == 'f6':
+                if not base_done:
+                    print("  ⚠ 请先按 F5 拍基线")
+                    continue
+                shot_str = input("  告诉我总共打了几发: ").strip()
+                try: self.shot_count = int(shot_str)
+                except: self.shot_count = 10
+                print("  📸 结果截图...")
+                self.result_image = self.capture_screen()
+                self.logger.save_image("result_wall", self.result_image)
+                print("  ✅ 结果图已保存")
+                result_done = True
+                
+            elif key == 'f7':
+                if not base_done:
+                    print("  ⚠ 请先按 F5 拍基线")
+                    continue
+                if not result_done:
+                    shot_str = input("  先告诉我总共打了几发: ").strip()
+                    try: self.shot_count = int(shot_str)
+                    except: self.shot_count = 10
+                    print("  📸 拍结果图...")
+                    self.result_image = self.capture_screen()
+                    self.logger.save_image("result_wall", self.result_image)
+                    result_done = True
+                
+                # 开始分析
+                break
+                
+            elif key == 'f8':
+                print("  退出校准")
+                return None
+        
+        if HAS_KEYBOARD:
+            keyboard.unhook_all()
         
         # 步骤4：检测
         print("\n" + "="*60)
