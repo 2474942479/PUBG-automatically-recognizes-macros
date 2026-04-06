@@ -691,15 +691,14 @@ class MainWindow(QWidget):
         btn_layout = QGridLayout()
 
         self.btn_load = QPushButton("加载弹痕图")
-        self.btn_tmpl = QPushButton("加载模板")
-        self.btn_clear_tmpl = QPushButton("清除模板")
-        self.btn_analyze = QPushButton("分析")
-        self.btn_analyze.setStyleSheet("font-weight:bold; background:#2266aa; color:white; padding:6px;")
+        self.btn_detect = QPushButton("检测弹孔")
+        self.btn_detect.setStyleSheet("background:#2266aa; color:white; padding:6px;")
+        self.btn_analyze = QPushButton("分析参数")
+        self.btn_analyze.setStyleSheet("font-weight:bold; background:#22aa44; color:white; padding:6px;")
 
         btn_layout.addWidget(self.btn_load, 0, 0)
-        btn_layout.addWidget(self.btn_tmpl, 0, 1)
-        btn_layout.addWidget(self.btn_clear_tmpl, 0, 2)
-        btn_layout.addWidget(self.btn_analyze, 0, 3)
+        btn_layout.addWidget(self.btn_detect, 0, 1)
+        btn_layout.addWidget(self.btn_analyze, 0, 2)
 
         self.btn_save = QPushButton("保存项目")
         self.btn_load_proj = QPushButton("加载项目")
@@ -707,10 +706,10 @@ class MainWindow(QWidget):
         self.btn_iterate.setStyleSheet("background:#886622; color:white; padding:6px;")
         self.btn_debug = QPushButton("检测过程")
 
-        btn_layout.addWidget(self.btn_save, 1, 0)
-        btn_layout.addWidget(self.btn_load_proj, 1, 1)
-        btn_layout.addWidget(self.btn_iterate, 1, 2)
-        btn_layout.addWidget(self.btn_debug, 1, 3)
+        btn_layout.addWidget(self.btn_save, 0, 3)
+        btn_layout.addWidget(self.btn_load_proj, 1, 0)
+        btn_layout.addWidget(self.btn_iterate, 1, 1)
+        btn_layout.addWidget(self.btn_debug, 1, 2)
 
         right.addLayout(btn_layout)
 
@@ -783,9 +782,8 @@ class MainWindow(QWidget):
 
     def _connect_signals(self):
         self.btn_load.clicked.connect(self._pick_result)
-        self.btn_tmpl.clicked.connect(self._pick_template)
-        self.btn_clear_tmpl.clicked.connect(self._clear_template)
-        self.btn_analyze.clicked.connect(self._analyze)
+        self.btn_detect.clicked.connect(self._detect)
+        self.btn_analyze.clicked.connect(self._analyze_only)
         self.btn_save.clicked.connect(self._save_project)
         self.btn_load_proj.clicked.connect(self._load_project)
         self.btn_iterate.clicked.connect(self._iterate)
@@ -819,11 +817,7 @@ class MainWindow(QWidget):
         self._gun_name = self.c_gun.currentData() or ''
 
         self._scope_key = self.c_scope.currentData() or 'none'
-        val = self._sens_cfg.get(self._scope_key)
-        if val is not None:
-            self._scope_val = float(val)
-        else:
-            self._scope_val = 1.0
+        self._scope_val = 1.0
 
         mk = self.c_muzzle.currentData() or 'none'
         gk = self.c_grip.currentData() or 'none'
@@ -909,37 +903,30 @@ class MainWindow(QWidget):
         self.canvas.clear_roi()
         self.btn_roi.setChecked(False)
 
-    # ═══ 分析 ═══
+    # ═══ 检测弹孔 (仅检测, 不分析) ═══
 
-    def _analyze(self):
+    def _detect(self):
+        """在当前图片上自动检测弹孔位置, 不进行参数分析"""
         if self._result_img is None:
             QMessageBox.warning(self, "提示", "请先加载弹痕截图")
             return
 
-        self._read_config()
         sens = self._sensitivity_name()
         detector = BulletDetector(sens)
         roi = self.canvas.get_roi()
 
-        if self._template_img is not None:
-            holes = detector.detect_with_template(self._result_img, self._template_img, roi=roi)
-            mode = "模板匹配"
-        else:
-            holes = detector.detect_single(self._result_img, roi=roi)
-            mode = "单图自适应"
-
+        holes = detector.detect_single(self._result_img, roi=roi)
         self._last_detector = detector
 
         if not holes:
             self.canvas.set_data([], None)
-            self.info_lb.setText(f"{mode}: 未检测到弹痕! 建议: ①降低灵敏度 ②框选区域 ③使用模板 ④手工标注")
+            self.info_lb.setText("未检测到弹痕! 建议: ①调高灵敏度 ②框选弹痕区域 ③右键手动添加")
             self.result_text.setHtml(
                 '<p style="color:#ff6666;">未检测到弹痕</p>'
                 '<ul><li>检查灵敏度设置 (试试「高」)</li>'
                 '<li>使用「框选区域」限定检测范围</li>'
-                '<li>提供弹孔模板小图</li>'
                 '<li>右键手动添加弹孔</li></ul>'
-                '<p>点击「检测过程」查看中间步骤排查原因</p>')
+                '<p>点击「检测过程」查看中间步骤</p>')
             return
 
         BulletSorter.sort(holes)
@@ -948,9 +935,29 @@ class MainWindow(QWidget):
 
         n = len(holes)
         di = detector.debug_info
-        self.info_lb.setText(f"{mode} | 灵敏度:{sens} | 候选:{di.get('total_candidates', '?')} "
-                             f"NMS:{di.get('after_nms', '?')} 最终:{n}")
+        self.info_lb.setText(
+            f"检测完成 | 灵敏度:{sens} | "
+            f"暗点:{di.get('dark_count', 0)} Blob:{di.get('blob_count', 0)} "
+            f"中值:{di.get('median_count', 0)} → 最终:{n}个弹孔  "
+            f"(确认无误后点击「分析参数」)")
+
+    # ═══ 分析参数 (仅分析, 不检测) ═══
+
+    def _analyze_only(self):
+        """基于当前已标注的弹孔, 计算修正参数 (不重新检测)"""
+        holes = self.canvas.get_holes()
+        if not holes:
+            QMessageBox.warning(self, "提示", "无弹孔数据。请先「检测弹孔」或从已保存项目加载")
+            return
+        self._read_config()
+        if not self._gun_name:
+            QMessageBox.warning(self, "提示", "请先选择枪械")
+            return
         self._update_results()
+        self.info_lb.setText(
+            f"分析完成 | {self._gun_name} {self._acc_code} | "
+            f"scope={self._scope_val} posture={self._pose_val} | "
+            f"{len(holes)} 个弹孔")
 
     # ═══ 结果刷新 ═══
 
@@ -1030,9 +1037,6 @@ class MainWindow(QWidget):
         self._set_combo(self.c_stock, cfg.get('stock_key', 'none'))
         self._set_combo(self.c_pose, cfg.get('pose_key', 'none'))
         self._read_config()
-
-        if 'scope_val' in cfg:
-            self._scope_val = float(cfg['scope_val'])
 
         holes = data.get('holes', [])
         if not all('shot_num' in h for h in holes):
@@ -1122,8 +1126,6 @@ class MainWindow(QWidget):
         self._set_combo(self.c_stock, cfg.get('stock_key', 'none'))
         self._set_combo(self.c_pose, cfg.get('pose_key', 'none'))
         self._read_config()
-        if 'scope_val' in cfg:
-            self._scope_val = float(cfg['scope_val'])
 
         # Step 2: 选新弹痕截图 (开宏后)
         new_path, _ = QFileDialog.getOpenFileName(

@@ -211,7 +211,7 @@ class BulletDetector:
     # ═══ 策略1: 单图自适应 (推荐) ═══
 
     def detect_single(self, image, roi=None):
-        """单图检测: SimpleBlobDetector + 多尺度中值差分, 结果融合去重。
+        """单图检测: 暗点对比度 + SimpleBlobDetector + 中值差分, 三路融合去重。
 
         :param roi: 可选 (x, y, w, h) 元组, 只在该区域内检测
         """
@@ -229,20 +229,20 @@ class BulletDetector:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.copy()
         self.debug_images['01_gray'] = gray.copy()
 
-        # CLAHE 局部对比度增强
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        self.debug_images['02_clahe'] = enhanced.copy()
+        # 策略A: 暗点对比度检测 (主力 — 弹孔就是墙面上的暗色小点)
+        dark_holes = self._detect_dark_spots(gray, h, w)
+        log.debug("暗点检测: %d", len(dark_holes))
 
-        # 策略A: SimpleBlobDetector (主力)
-        blob_holes = self._detect_blobs(enhanced, h, w)
+        # 策略B: SimpleBlobDetector (补充)
+        blob_holes = self._detect_blobs(gray, h, w)
         log.debug("SimpleBlobDetector: %d", len(blob_holes))
 
-        # 策略B: 多尺度中值差分 (补充)
-        median_holes = self._detect_median_diff(enhanced, h, w)
+        # 策略C: 多尺度中值差分 (补充)
+        median_holes = self._detect_median_diff(gray, h, w)
         log.debug("中值差分: %d", len(median_holes))
 
-        all_holes = blob_holes + median_holes
+        all_holes = dark_holes + blob_holes + median_holes
+        self.debug_info['dark_count'] = len(dark_holes)
         self.debug_info['blob_count'] = len(blob_holes)
         self.debug_info['median_count'] = len(median_holes)
 
@@ -262,6 +262,85 @@ class BulletDetector:
                                after_nms=len(merged), final=len(filtered))
         log.info("检测完成: 候选%d NMS%d 最终%d", len(all_holes), len(merged), len(filtered))
         return filtered
+
+    # ═══ 暗点对比度检测 (PUBG 弹孔专用) ═══
+
+    def _detect_dark_spots(self, gray, img_h, img_w):
+        """弹孔 = 墙面上明显较暗的小斑点。
+        原理: 用大半径高斯模糊估算局部背景亮度, 原图减去背景得到暗点图。
+        """
+        p = self._preset()
+        short = min(img_h, img_w)
+
+        # 1. 轻微降噪, 保留弹孔边缘
+        denoised = cv2.GaussianBlur(gray, (3, 3), 0)
+
+        # 2. 估算局部背景 (大核高斯)
+        bg_k = max(51, int(short * 0.06) | 1)
+        local_bg = cv2.GaussianBlur(gray, (bg_k, bg_k), 0)
+        self.debug_images['dark_local_bg'] = local_bg.copy()
+
+        # 3. 暗点图 = 背景 - 原图 (暗点为正值)
+        diff = cv2.subtract(local_bg, denoised)
+        self.debug_images['dark_diff'] = diff.copy()
+
+        # 4. 自适应阈值: 暗点图中高于阈值的区域 = 弹孔候选
+        sens_thresholds = {'high': 8, 'medium': 15, 'low': 25}
+        dark_thresh = sens_thresholds.get(self.sensitivity, 15)
+        _, binary = cv2.threshold(diff, dark_thresh, 255, cv2.THRESH_BINARY)
+
+        # 形态学清理
+        ks = max(3, int(short * 0.003)) | 1
+        kernel = np.ones((ks, ks), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+        self.debug_images['dark_binary'] = binary.copy()
+
+        # 5. 找轮廓
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        px = img_h * img_w
+        min_area = max(8, px * 3e-6)
+        max_area = px * 5e-3
+        min_circ = 0.15 if self.sensitivity == 'high' else 0.2
+
+        holes = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if not (min_area < area < max_area):
+                continue
+            peri = cv2.arcLength(cnt, True)
+            if peri == 0:
+                continue
+            circ = 4 * np.pi * area / (peri * peri)
+            if circ < min_circ:
+                continue
+
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+
+            # 验证中心确实是暗点 (与局部背景的亮度差)
+            r = max(3, int(area ** 0.5 / 2))
+            y1, y2 = max(0, cy - r), min(img_h, cy + r)
+            x1, x2 = max(0, cx - r), min(img_w, cx + r)
+            center_val = float(np.mean(gray[y1:y2, x1:x2]))
+            bg_val = float(np.mean(local_bg[y1:y2, x1:x2]))
+            darkness = bg_val - center_val
+            if darkness < 5:
+                continue
+
+            holes.append({
+                'x': cx, 'y': cy,
+                'area': round(float(area), 1),
+                'circularity': round(circ, 3),
+                'color_diff': round(darkness, 1),
+                'confidence': round(min(100, darkness * circ * 3), 1),
+            })
+
+        return holes
 
     # ═══ 策略2: 模板匹配 ═══
 
