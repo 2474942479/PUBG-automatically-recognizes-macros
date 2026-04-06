@@ -448,12 +448,18 @@ def _build_result_html(comparison, correction):
         verdict = f'补偿基本准确 (±{diff_pct}%)'
         advice = '参数已接近最优, 可微调或保持不变'
 
+    chunk_info = f"chunk: {comparison.get('chunk_size_f', comparison.get('chunk_size', '?'))}"
+    mag_info = ""
+    mag = comparison.get('magazine_size', 0)
+    if mag > 0:
+        mag_info = f" | 弹夹: {mag}发"
+
     html = f"""
     <div style="margin:8px;">
       <h3 style="color:{verdict_color}; font-size:18px;">{verdict}</h3>
       <p>{advice}</p>
       <p>平均比值: <b>{avg:.4f}</b> | 偏差: {comparison.get('std_ratio', 0):.4f}</p>
-      <p>弹孔数: {comparison.get('shot_count', 0)} | 有效对比: {comparison.get('valid_pairs', 0)}</p>
+      <p>弹孔数: {comparison.get('shot_count', 0)} | 有效对比: {comparison.get('valid_pairs', 0)} | {chunk_info}{mag_info}</p>
     """
 
     # 水平漂移
@@ -857,9 +863,16 @@ class MainWindow(QWidget):
     # ═══ 图片加载 ═══
 
     def _pick_result(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择弹痕截图", "", "图片 (*.png *.jpg *.bmp)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择弹痕截图或项目文件", "",
+            "所有支持格式 (*.png *.jpg *.bmp *.calibration.json);;图片 (*.png *.jpg *.bmp);;项目文件 (*.calibration.json)")
         if not path:
             return
+
+        if path.endswith('.calibration.json') or path.endswith('.analysis.json'):
+            self._load_project_file(path)
+            return
+
         img = cv2.imread(path)
         if img is None:
             QMessageBox.warning(self, "错误", f"无法读取: {path}")
@@ -1004,7 +1017,6 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "加载失败", err)
             return
 
-        # 恢复配置到 combo (Phase 5: 完整恢复)
         cfg = data.get('config', {})
         self._set_combo(self.c_gun, cfg.get('gun_name', ''))
         self._set_combo(self.c_scope, cfg.get('scope_key', 'none'))
@@ -1014,11 +1026,9 @@ class MainWindow(QWidget):
         self._set_combo(self.c_pose, cfg.get('pose_key', 'none'))
         self._read_config()
 
-        # 如果保存了 scope_val, 使用保存的值
         if 'scope_val' in cfg:
             self._scope_val = float(cfg['scope_val'])
 
-        # 恢复弹孔
         holes = data.get('holes', [])
         if not all('shot_num' in h for h in holes):
             BulletSorter.sort(holes)
@@ -1041,21 +1051,34 @@ class MainWindow(QWidget):
                     self._result_path = found
                     pm = _cv2_to_pixmap(img)
 
-        self.canvas.set_data(holes, pm)
+        # 无图片时: 根据保存的 image_size 创建空白画布, 保证弹孔仍可见
+        if pm is None and holes:
+            img_size = data.get('image_size')
+            if img_size and len(img_size) == 2:
+                w, h = int(img_size[0]), int(img_size[1])
+            else:
+                xs = [hole['x'] for hole in holes]
+                ys = [hole['y'] for hole in holes]
+                w = max(xs) + 200
+                h = max(ys) + 200
+            blank = np.zeros((h, w, 3), dtype=np.uint8)
+            blank[:] = (40, 40, 40)
+            self._result_img = blank
+            self._result_path = None
+            pm = _cv2_to_pixmap(blank)
 
-        # 恢复缓存的分析结果
-        self._last_comparison = data.get('comparison')
-        self._last_correction = data.get('correction')
+        self.canvas.set_data(holes, pm)
         self._current_project_path = path
 
-        # 显示结果
-        if self._last_comparison:
-            html = _build_result_html(self._last_comparison, self._last_correction)
-            self.result_text.setHtml(html)
-        else:
-            self._update_results()
+        # 用当前 GunData 重新分析, 确保结果与最新数据一致
+        self._update_results()
 
-        self.info_lb.setText(f"已加载项目: {Path(path).name} ({len(holes)}个弹孔)")
+        status_parts = [f"已加载项目: {Path(path).name} ({len(holes)}个弹孔)"]
+        if self._result_path:
+            status_parts.append(f"图片: {Path(self._result_path).name}")
+        elif pm is not None:
+            status_parts.append("(无原图, 使用空白画布)")
+        self.info_lb.setText(" | ".join(status_parts))
 
     def _set_combo(self, combo, key):
         """安全设置 combo 选中项, 按 userData 匹配"""

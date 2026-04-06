@@ -78,6 +78,26 @@ _SEMI_AUTO_GUNS = frozenset([
     "qbu", "zidongzhuangtianbuqiang",
 ])
 
+# 枪械弹夹容量 (扩容弹夹): 用于正确计算每发子弹对应的数组元素数
+_GUN_MAGAZINE = {
+    "akm": 40, "m416": 40, "m762": 40, "scar-l": 40, "qbz": 40,
+    "g36c": 40, "ace32": 40, "k2": 40, "aug": 40, "mk47": 30,
+    "m16a4": 40, "groza": 30, "famas": 25, "mk14": 20,
+    "ump45": 35, "vector": 33, "mp5k": 40, "p90": 50, "pp19": 53,
+    "uzi": 35, "js9": 30, "tangmuxunchongfengqiang": 30,
+    "m249": 75, "dp28": 47, "mg3": 75,
+    "mini14": 30, "mk12": 30, "qbu": 30, "sks": 30, "vss": 20,
+    "delagongnuofu": 10, "zidongzhuangtianbuqiang": 20,
+}
+
+
+def _trim_trailing_zeros(arr):
+    """裁剪数组尾部连续零值, 返回有效长度"""
+    i = len(arr) - 1
+    while i >= 0 and arr[i] == 0:
+        i -= 1
+    return max(1, i + 1)
+
 
 # ═══════════════════════════════════════════
 # 弹痕检测 (Phase 1)
@@ -570,7 +590,6 @@ class BulletComparator:
         if len(holes) < 2:
             return None
 
-        # 容错: 如果没有 shot_num, 先排序
         if not all('shot_num' in h for h in holes):
             BulletSorter.sort(holes)
 
@@ -585,26 +604,28 @@ class BulletComparator:
             return None
 
         is_semi = gun_name.lower() in _SEMI_AUTO_GUNS
-
-        # chunk_size 由弹孔数反推, 不再用启发式
         n_intervals = len(s) - 1
+
         if is_semi:
-            chunk = 1
+            chunk_f = 1.0
         else:
-            chunk = max(1, len(raw) // max(1, n_intervals))
+            effective_len = _trim_trailing_zeros(raw)
+            mag_size = _GUN_MAGAZINE.get(gun_name.lower(), 0)
+            if mag_size >= 2:
+                total_intervals = mag_size - 1
+            else:
+                total_intervals = max(n_intervals, round(effective_len / 9.0))
+            chunk_f = effective_len / max(1, total_intervals)
 
-        max_intervals = max(1, len(raw) // max(1, chunk))
-        n_compare = min(n_intervals, max_intervals)
+        n_compare = min(n_intervals, int(len(raw) / max(0.5, chunk_f)))
 
-        # 实际间距 (px): 第i发Y - 第i+1发Y (正值=向上移动)
         actual_dy = [s[i - 1]['y'] - s[i]['y'] for i in range(1, len(s))]
         actual_dx = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
 
-        # 理论间距 (px): chunk 内所有 tick 值累加 * scope * posture
         theory_chunks = []
         for i in range(n_compare):
-            start = i * chunk
-            end = min(start + chunk, len(raw))
+            start = int(round(i * chunk_f))
+            end = min(int(round((i + 1) * chunk_f)), len(raw))
             theory_chunks.append(sum(raw[start:end]))
 
         details = []
@@ -638,19 +659,35 @@ class BulletComparator:
         if not ratios:
             return None
 
-        avg_ratio = float(np.mean(ratios))
+        # 用 IQR 去除离群值后计算平均 ratio
+        if len(ratios) >= 6:
+            q1, q3 = np.percentile(ratios, [25, 75])
+            iqr = q3 - q1
+            lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            clean_ratios = [r for r in ratios if lo <= r <= hi]
+            if len(clean_ratios) >= 3:
+                avg_ratio = float(np.mean(clean_ratios))
+            else:
+                avg_ratio = float(np.mean(ratios))
+        else:
+            avg_ratio = float(np.mean(ratios))
+
         std_ratio = float(np.std(ratios))
         avg_dx = float(np.mean(actual_dx)) if actual_dx else 0.0
         max_dx = float(max(abs(d) for d in actual_dx)) if actual_dx else 0.0
         std_dx = float(np.std(actual_dx)) if len(actual_dx) > 1 else 0.0
 
+        chunk_int = max(1, int(round(chunk_f)))
         return {
             'gun': gun_name, 'accessories_code': acc_code,
             'scope_val': scope_val, 'posture_val': posture_val,
             'suggested_scope': round(scope_val * avg_ratio, 3),
             'avg_ratio': round(avg_ratio, 4), 'std_ratio': round(std_ratio, 4),
             'shot_count': len(s), 'valid_pairs': len(ratios),
-            'chunk_size': chunk, 'is_semi_auto': is_semi,
+            'chunk_size': chunk_int, 'chunk_size_f': round(chunk_f, 2),
+            'is_semi_auto': is_semi,
+            'magazine_size': _GUN_MAGAZINE.get(gun_name.lower(), 0),
+            'effective_array_len': _trim_trailing_zeros(raw) if not is_semi else len(raw),
             'avg_horizontal_drift': round(avg_dx, 1),
             'max_horizontal_drift': round(max_dx, 1),
             'std_horizontal_drift': round(std_dx, 1),
@@ -741,7 +778,8 @@ class ParameterCorrector:
             return None
 
         avg_ratio = comparison_result['avg_ratio']
-        chunk = comparison_result.get('chunk_size', 12)
+        chunk_f = comparison_result.get('chunk_size_f',
+                                        float(comparison_result.get('chunk_size', 12)))
         details = comparison_result.get('details', [])
 
         def _r(v):
@@ -754,7 +792,8 @@ class ParameterCorrector:
             r = d.get('ratio')
             if r is None:
                 continue
-            start, end = i * chunk, min((i + 1) * chunk, len(per_shot))
+            start = int(round(i * chunk_f))
+            end = min(int(round((i + 1) * chunk_f)), len(per_shot))
             for j in range(start, end):
                 per_shot[j] = _r(original[j] * r) if original[j] != 0 else 0
 
@@ -767,7 +806,8 @@ class ParameterCorrector:
             'original_array': original,
             'corrected_uniform': corrected_uniform,
             'corrected_per_shot': per_shot,
-            'chunk_size': chunk,
+            'chunk_size': max(1, int(round(chunk_f))),
+            'chunk_size_f': round(chunk_f, 2),
         }
 
     @staticmethod
@@ -815,14 +855,15 @@ class IterativeCorrector:
         if not prev_params or len(residual_holes) < 2:
             return None
 
-        # 深拷贝, 防止修改原数据
         prev_params = list(prev_params)
-        chunk = prev_correction.get('chunk_size', 12)
+        chunk_f = prev_correction.get('chunk_size_f',
+                                      float(prev_correction.get('chunk_size', 12)))
         acc_code = prev_correction.get('acc_code', 'A0B0C0')
 
         s = sorted(residual_holes, key=lambda h: h.get('shot_num', 0))
         n_intervals = len(s) - 1
-        chunk = min(chunk, max(1, len(prev_params) // max(1, n_intervals)))
+        max_chunk = len(prev_params) / max(1, n_intervals)
+        chunk_f = min(chunk_f, max_chunk)
         factor = max(0.01, scope_val * posture_val)
 
         corrected = [float(v) for v in prev_params]
@@ -833,8 +874,8 @@ class IterativeCorrector:
             dx = s[i]['x'] - s[i - 1]['x']
             adjustment_raw = -dy / factor
 
-            start = (i - 1) * chunk
-            end = min(i * chunk, len(corrected))
+            start = int(round((i - 1) * chunk_f))
+            end = min(int(round(i * chunk_f)), len(corrected))
             chunk_sum = sum(abs(prev_params[j]) for j in range(start, min(end, len(prev_params))))
 
             if chunk_sum > 0:
@@ -842,7 +883,6 @@ class IterativeCorrector:
                     if prev_params[j] != 0:
                         corrected[j] = round(corrected[j] + adjustment_raw * abs(prev_params[j]) / chunk_sum, 1)
             elif end > start:
-                # chunk_sum == 0: 均匀分配
                 per_tick = round(adjustment_raw / max(1, end - start), 1)
                 for j in range(start, min(end, len(corrected))):
                     corrected[j] = round(corrected[j] + per_tick, 1)
@@ -852,14 +892,15 @@ class IterativeCorrector:
                 'adjustment_px': round(float(-dy), 1), 'adjustment_raw': round(float(adjustment_raw), 2),
             })
 
-        # 输出格式与 ParameterCorrector 对齐
+        chunk_int = max(1, int(round(chunk_f)))
         return {
             'gun_name': prev_correction.get('gun_name', ''),
             'acc_code': acc_code,
             'corrected_uniform': corrected,
             'original_array': prev_params,
             'avg_ratio': 1.0,
-            'chunk_size': chunk,
+            'chunk_size': chunk_int,
+            'chunk_size_f': round(chunk_f, 2),
             'scope_val': scope_val, 'posture_val': posture_val,
             'residuals': residuals,
             'avg_residual_dy': round(float(np.mean([r['dy'] for r in residuals])), 1),
@@ -977,20 +1018,24 @@ class MultiGroupAnalyzer:
         if not original:
             return None
 
-        chunk = self.groups[0]['result'].get('chunk_size', 12) if self.groups else 12
+        chunk_f = self.groups[0]['result'].get('chunk_size_f',
+                    float(self.groups[0]['result'].get('chunk_size', 12))) if self.groups else 12.0
         corrected = list(original)
         for i, stat in enumerate(analysis['interval_stats']):
             if stat is None:
                 continue
             r = stat['avg_ratio']
-            start, end = i * chunk, min((i + 1) * chunk, len(corrected))
+            start = int(round(i * chunk_f))
+            end = min(int(round((i + 1) * chunk_f)), len(corrected))
             for j in range(start, end):
                 corrected[j] = round(original[j] * r, 1) if original[j] != 0 else 0
 
+        chunk_int = max(1, int(round(chunk_f)))
         return {
             'gun_name': gun_name, 'acc_code': acc_code,
             'corrected_optimal': corrected, 'corrected_uniform': corrected,
-            'original_array': original, 'chunk_size': chunk,
+            'original_array': original,
+            'chunk_size': chunk_int, 'chunk_size_f': round(chunk_f, 2),
             'analysis': analysis,
         }
 
