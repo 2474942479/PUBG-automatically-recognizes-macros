@@ -449,17 +449,22 @@ def _build_result_html(comparison, correction):
         advice = '参数已接近最优, 可微调或保持不变'
 
     chunk_info = f"chunk: {comparison.get('chunk_size_f', comparison.get('chunk_size', '?'))}"
-    mag_info = ""
+    meta_parts = []
     mag = comparison.get('magazine_size', 0)
     if mag > 0:
-        mag_info = f" | 弹夹: {mag}发"
+        meta_parts.append(f"弹夹: {mag}发")
+    rpm = comparison.get('rpm')
+    fi_ms = comparison.get('fire_interval_ms')
+    if rpm:
+        meta_parts.append(f"射速: {rpm}RPM ({fi_ms}ms/发)")
+    meta_info = (" | " + " | ".join(meta_parts)) if meta_parts else ""
 
     html = f"""
     <div style="margin:8px;">
       <h3 style="color:{verdict_color}; font-size:18px;">{verdict}</h3>
       <p>{advice}</p>
       <p>平均比值: <b>{avg:.4f}</b> | 偏差: {comparison.get('std_ratio', 0):.4f}</p>
-      <p>弹孔数: {comparison.get('shot_count', 0)} | 有效对比: {comparison.get('valid_pairs', 0)} | {chunk_info}{mag_info}</p>
+      <p>弹孔数: {comparison.get('shot_count', 0)} | 有效对比: {comparison.get('valid_pairs', 0)} | {chunk_info}{meta_info}</p>
     """
 
     # 水平漂移

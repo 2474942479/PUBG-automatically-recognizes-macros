@@ -78,17 +78,60 @@ _SEMI_AUTO_GUNS = frozenset([
     "qbu", "zidongzhuangtianbuqiang",
 ])
 
-# 枪械弹夹容量 (扩容弹夹): 用于正确计算每发子弹对应的数组元素数
-_GUN_MAGAZINE = {
-    "akm": 40, "m416": 40, "m762": 40, "scar-l": 40, "qbz": 40,
-    "g36c": 40, "ace32": 40, "k2": 40, "aug": 40, "mk47": 30,
-    "m16a4": 40, "groza": 30, "famas": 25, "mk14": 20,
-    "ump45": 35, "vector": 33, "mp5k": 40, "p90": 50, "pp19": 53,
-    "uzi": 35, "js9": 30, "tangmuxunchongfengqiang": 30,
-    "m249": 75, "dp28": 47, "mg3": 75,
-    "mini14": 30, "mk12": 30, "qbu": 30, "sks": 30, "vss": 20,
-    "delagongnuofu": 10, "zidongzhuangtianbuqiang": 20,
+# 全自动 tick 间隔 (ms), 与 Process.FIRE 中的 sleep(9ms) 一致
+_TICK_MS = 9
+
+# 武器元数据 (来源: PUBG Resource v39.2 / PUBG Wiki 2026)
+#   fire_interval: 射击间隔 (秒), 用于精确计算 ticks_per_shot
+#   mag: 扩容弹夹容量, 仅在 fire_interval 不可用时回退使用
+_GUN_META = {
+    # === AR ===
+    "ace32":  {"fire_interval": 0.088235, "mag": 40},
+    "akm":    {"fire_interval": 0.100,    "mag": 40},
+    "aug":    {"fire_interval": 0.080,    "mag": 40},
+    "famas":  {"fire_interval": 0.06666,  "mag": 35},
+    "g36c":   {"fire_interval": 0.0857,   "mag": 40},
+    "groza":  {"fire_interval": 0.080,    "mag": 40},
+    "k2":     {"fire_interval": 0.0857,   "mag": 40},
+    "m16a4":  {"fire_interval": 0.075,    "mag": 40},
+    "m416":   {"fire_interval": 0.0857,   "mag": 40},
+    "m762":   {"fire_interval": 0.085714, "mag": 40},
+    "mk47":   {"fire_interval": 0.075,    "mag": 40},
+    "qbz":    {"fire_interval": 0.0923,   "mag": 40},
+    "scar-l": {"fire_interval": 0.096,    "mag": 40},
+    # === SMG ===
+    "js9":    {"fire_interval": 0.0667,   "mag": 40},
+    "mp5k":   {"fire_interval": 0.067,    "mag": 40},
+    "p90":    {"fire_interval": 0.060,    "mag": 50},
+    "pp19":   {"fire_interval": 0.086,    "mag": 53},
+    "tangmuxunchongfengqiang": {"fire_interval": 0.080, "mag": 50},
+    "ump45":  {"fire_interval": 0.090,    "mag": 35},
+    "uzi":    {"fire_interval": 0.048,    "mag": 35},
+    "vector": {"fire_interval": 0.0545,   "mag": 33},
+    # === LMG ===
+    "dp28":   {"fire_interval": 0.109,    "mag": 47},
+    "m249":   {"fire_interval": 0.075,    "mag": 75},
+    "mg3":    {"fire_interval": 0.085714, "mag": 75},
+    # === DMR / Sniper (半自动, chunk 固定为 1) ===
+    "delagongnuofu":         {"fire_interval": 0.100, "mag": 10},
+    "mini14":                {"fire_interval": 0.100, "mag": 30},
+    "mk12":                  {"fire_interval": 0.100, "mag": 30},
+    "mk14":                  {"fire_interval": 0.090, "mag": 20},
+    "qbu":                   {"fire_interval": 0.100, "mag": 20},
+    "sks":                   {"fire_interval": 0.100, "mag": 20},
+    "vss":                   {"fire_interval": 0.0856, "mag": 20},
+    "zidongzhuangtianbuqiang": {"fire_interval": 0.100, "mag": 20},
 }
+
+def _get_gun_magazine(gun_name):
+    """获取武器弹夹容量 (兼容旧接口)"""
+    meta = _GUN_META.get(gun_name.lower())
+    return meta["mag"] if meta else 0
+
+def _get_fire_interval(gun_name):
+    """获取武器射击间隔 (秒), 无数据则返回 None"""
+    meta = _GUN_META.get(gun_name.lower())
+    return meta["fire_interval"] if meta else None
 
 
 def _trim_trailing_zeros(arr):
@@ -578,9 +621,9 @@ class BulletComparator:
       每个数组元素执行一次 mouse_R(0, round(posture * (value * scope)))
       间隔 9ms (全自动) 或 100ms (半自动)
 
-    chunk_size 由检测到的弹孔数反推:
-      chunk = len(raw_array) / (n_holes - 1)
-    这比固定启发式 n/12 更准确。
+    chunk_f 计算优先级:
+      1. 射速优先: chunk_f = fire_interval_ms / tick_ms (最准确)
+      2. 弹夹回退: chunk_f = effective_array_len / (mag - 1)
     """
 
     def __init__(self, gun_data_dir=None):
@@ -609,13 +652,17 @@ class BulletComparator:
         if is_semi:
             chunk_f = 1.0
         else:
-            effective_len = _trim_trailing_zeros(raw)
-            mag_size = _GUN_MAGAZINE.get(gun_name.lower(), 0)
-            if mag_size >= 2:
-                total_intervals = mag_size - 1
+            fire_interval = _get_fire_interval(gun_name)
+            if fire_interval and fire_interval > 0:
+                chunk_f = fire_interval * 1000 / _TICK_MS
             else:
-                total_intervals = max(n_intervals, round(effective_len / 9.0))
-            chunk_f = effective_len / max(1, total_intervals)
+                effective_len = _trim_trailing_zeros(raw)
+                mag_size = _get_gun_magazine(gun_name)
+                if mag_size >= 2:
+                    total_intervals = mag_size - 1
+                else:
+                    total_intervals = max(n_intervals, round(effective_len / 9.0))
+                chunk_f = effective_len / max(1, total_intervals)
 
         n_compare = min(n_intervals, int(len(raw) / max(0.5, chunk_f)))
 
@@ -659,7 +706,7 @@ class BulletComparator:
         if not ratios:
             return None
 
-        # 用 IQR 去除离群值后计算平均 ratio
+        # IQR 去除离群值后计算平均 ratio
         if len(ratios) >= 6:
             q1, q3 = np.percentile(ratios, [25, 75])
             iqr = q3 - q1
@@ -677,6 +724,9 @@ class BulletComparator:
         max_dx = float(max(abs(d) for d in actual_dx)) if actual_dx else 0.0
         std_dx = float(np.std(actual_dx)) if len(actual_dx) > 1 else 0.0
 
+        fire_interval = _get_fire_interval(gun_name)
+        rpm = round(60 / fire_interval) if fire_interval else None
+
         chunk_int = max(1, int(round(chunk_f)))
         return {
             'gun': gun_name, 'accessories_code': acc_code,
@@ -686,7 +736,9 @@ class BulletComparator:
             'shot_count': len(s), 'valid_pairs': len(ratios),
             'chunk_size': chunk_int, 'chunk_size_f': round(chunk_f, 2),
             'is_semi_auto': is_semi,
-            'magazine_size': _GUN_MAGAZINE.get(gun_name.lower(), 0),
+            'fire_interval_ms': round(fire_interval * 1000, 2) if fire_interval else None,
+            'rpm': rpm,
+            'magazine_size': _get_gun_magazine(gun_name),
             'effective_array_len': _trim_trailing_zeros(raw) if not is_semi else len(raw),
             'avg_horizontal_drift': round(avg_dx, 1),
             'max_horizontal_drift': round(max_dx, 1),
