@@ -731,6 +731,11 @@ def _build_iteration_html(iter_result):
     residuals = iter_result.get('residuals', [])
     avg_dy = iter_result.get('avg_residual_dy', 0)
     max_dy = iter_result.get('max_residual_dy', 0)
+    avg_ratio = iter_result.get('avg_ratio', 1.0)
+    original = iter_result.get('original_array', [])
+    corrected = iter_result.get('corrected_uniform', [])
+    chunk_f = iter_result.get('chunk_size_f', iter_result.get('chunk_size', 10))
+    acc_code = iter_result.get('acc_code', 'A0B0C0')
 
     if abs(avg_dy) < 3:
         color = '#44cc44'
@@ -744,29 +749,82 @@ def _build_iteration_html(iter_result):
 
     html = f"""
     <div style="margin:8px;">
-      <h3 style="color:{color}; font-size:18px;">{verdict}</h3>
-      <p>平均残差: {avg_dy:.1f}px | 最大残差: {max_dy:.1f}px</p>
-      <table style="border-collapse:collapse; margin-top:8px; font-size:13px;" width="100%">
+      <h3 style="color:{color}; font-size:18px;">迭代修正结果 (比例修正)</h3>
+      <p>{verdict}</p>
+      <p>平均残差: {avg_dy:.2f}px | 最大残差: {max_dy:.2f}px | 平均修正比例: {avg_ratio:.4f}</p>
+      <p style="color:#aaa; font-size:12px;">
+        修正原理: ratio = chunk_sum / (chunk_sum + dy)<br/>
+        ratio &gt; 1 → 补偿不足, 需增大参数 | ratio &lt; 1 → 补偿过度, 需减小参数<br/>
+        此方法自动适配灵敏度/分辨率, 一次迭代即可收敛
+      </p>
+
+      <h4 style="margin-top:8px;">逐发残差分析:</h4>
+      <table style="border-collapse:collapse; font-size:13px;" width="100%">
         <tr style="background:#444; color:white;">
-          <th style="padding:4px;">发</th><th>Y残差(px)</th><th>X残差(px)</th><th>调整量</th>
+          <th style="padding:4px;">发</th>
+          <th>Y残差(px)</th>
+          <th>X残差(px)</th>
+          <th>chunk_sum</th>
+          <th>修正比例</th>
+          <th>判断</th>
         </tr>
     """
     for r in residuals:
+        dy = r['dy']
+        ratio = r.get('correction_ratio', 1.0)
+        if abs(dy) < 3:
+            judge = '<span style="color:#44cc44;">准确</span>'
+        elif dy < 0:
+            judge = '<span style="color:#ff4444;">没压住(上飘)</span>'
+        else:
+            judge = '<span style="color:#ff8800;">压过了(下沉)</span>'
+        ratio_color = '#44cc44' if 0.9 <= ratio <= 1.1 else '#ffcc00' if 0.7 <= ratio <= 1.3 else '#ff4444'
         html += f"""
         <tr>
           <td style="padding:3px; text-align:center;">{r['shot']}</td>
-          <td style="text-align:center;">{r['dy']:.1f}</td>
-          <td style="text-align:center;">{r['dx']:.1f}</td>
-          <td style="text-align:center;">{r['adjustment_raw']:.2f}</td>
+          <td style="text-align:center;">{dy:.2f}</td>
+          <td style="text-align:center;">{r['dx']:.2f}</td>
+          <td style="text-align:center;">{r.get('chunk_sum', 0):.2f}</td>
+          <td style="text-align:center; color:{ratio_color};"><b>×{ratio:.4f}</b></td>
+          <td style="text-align:center;">{judge}</td>
         </tr>"""
     html += "</table>"
 
-    patch = ParameterCorrector.generate_patch_json(iter_result, 'uniform')
-    if patch:
+    html += """
+      <h4 style="margin-top:12px;">逐发参数对比 (原值 × 比例 → 调整后):</h4>
+      <table style="border-collapse:collapse; font-size:13px;" width="100%">
+        <tr style="background:#444; color:white;">
+          <th style="padding:4px;">发</th>
+          <th>原值(chunk sum)</th>
+          <th>调整后(chunk sum)</th>
+          <th>比例</th>
+        </tr>
+    """
+    n_shots = len(residuals)
+    for i in range(n_shots):
+        start = int(round(i * chunk_f))
+        end = min(int(round((i + 1) * chunk_f)), len(original))
+        orig_sum = round(sum(original[start:end]), 2) if end <= len(original) else 0
+        corr_sum = round(sum(corrected[start:end]), 2) if end <= len(corrected) else 0
+        ratio = round(corr_sum / orig_sum, 4) if orig_sum != 0 else 1.0
+        ratio_color = '#44cc44' if 0.9 <= ratio <= 1.1 else '#ffcc00' if 0.7 <= ratio <= 1.3 else '#ff4444'
         html += f"""
-        <h3 style="margin-top:12px;">迭代修正参数</h3>
-        <pre style="background:#222; padding:8px; overflow-x:auto; font-size:11px; color:#8f8;">{patch}</pre>
+        <tr>
+          <td style="padding:3px; text-align:center;">{i + 1}</td>
+          <td style="text-align:center;">{orig_sum:.2f}</td>
+          <td style="text-align:center; color:#8f8;"><b>{corr_sum:.2f}</b></td>
+          <td style="text-align:center; color:{ratio_color};">×{ratio:.4f}</td>
+        </tr>"""
+    html += "</table>"
+
+    if corrected:
+        arr_json = BulletParamGenerator.format_array_for_json(corrected)
+        html += f"""
+        <h4 style="margin-top:12px;">调整后的完整压枪数据 (直接替换):</h4>
+        <p style="color:#aaa;">复制下方数据替换 GunData/{iter_result.get('gun_name', '')}.json 中的 "{acc_code}"</p>
+        <pre style="background:#222; padding:8px; overflow-x:auto; font-size:11px; color:#8f8;">"{acc_code}": {arr_json}</pre>
         """
+
     html += "</div>"
     return html
 

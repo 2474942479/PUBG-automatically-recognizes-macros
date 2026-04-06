@@ -1062,7 +1062,14 @@ class ParameterCorrector:
 # ═══════════════════════════════════════════
 
 class IterativeCorrector:
-    """迭代修正: 宏开启后弹痕 + 上一轮参数 → 微调
+    """迭代修正: 宏开启后弹痕 + 当前GunData参数 → 比例修正
+
+    核心原理 (比例修正, 非加法修正):
+      宏执行时: mouse_move = round(posture × (value × scope))
+      屏幕像素位移 = value × scope × posture × K  (K = 像素/鼠标单位, 取决于分辨率/灵敏度)
+      观测残差 dy = 补偿量 - 后坐力 = chunk_sum × C - R  (C = scope×posture×K)
+      修正比例 = chunk_sum / (chunk_sum + dy)  → 未知因子 C 自动抵消
+      一次迭代即可收敛到正确值, 无需多次迭代。
 
     输出格式与 ParameterCorrector 对齐:
       corrected_uniform, acc_code, chunk_size 等字段一致,
@@ -1071,10 +1078,6 @@ class IterativeCorrector:
 
     @staticmethod
     def correct(residual_holes, prev_correction, scope_val, posture_val):
-        """
-        :param prev_correction: 上轮修正结果 dict (包含 corrected_uniform, chunk_size, acc_code 等)
-        :return: dict 格式与 ParameterCorrector 输出一致
-        """
         prev_params = prev_correction.get('corrected_uniform') or \
                       prev_correction.get('corrected_per_shot') or \
                       prev_correction.get('corrected_optimal') or \
@@ -1091,41 +1094,45 @@ class IterativeCorrector:
         n_intervals = len(s) - 1
         max_chunk = len(prev_params) / max(1, n_intervals)
         chunk_f = min(chunk_f, max_chunk)
-        factor = max(0.01, scope_val * posture_val)
 
         corrected = [float(v) for v in prev_params]
         residuals = []
+        ratios = []
 
         for i in range(1, len(s)):
             dy = s[i]['y'] - s[i - 1]['y']
             dx = s[i]['x'] - s[i - 1]['x']
-            adjustment_raw = -dy / factor
 
             start = int(round((i - 1) * chunk_f))
             end = min(int(round(i * chunk_f)), len(corrected))
             chunk_sum = sum(abs(prev_params[j]) for j in range(start, min(end, len(prev_params))))
 
-            if chunk_sum > 0:
+            if chunk_sum > 0.01:
+                correction_ratio = chunk_sum / max(0.01, chunk_sum + dy)
+                correction_ratio = max(0.05, min(20.0, correction_ratio))
                 for j in range(start, min(end, len(corrected))):
-                    if prev_params[j] != 0:
-                        corrected[j] = round(corrected[j] + adjustment_raw * abs(prev_params[j]) / chunk_sum, 2)
+                    corrected[j] = round(prev_params[j] * correction_ratio, 2)
+                ratios.append(correction_ratio)
             elif end > start:
-                per_tick = round(adjustment_raw / max(1, end - start), 2)
+                per_tick = round(-dy / max(1, end - start), 2)
                 for j in range(start, min(end, len(corrected))):
                     corrected[j] = round(corrected[j] + per_tick, 2)
+                ratios.append(1.0)
 
             residuals.append({
                 'shot': i, 'dy': round(float(dy), 2), 'dx': round(float(dx), 2),
-                'adjustment_px': round(float(-dy), 2), 'adjustment_raw': round(float(adjustment_raw), 2),
+                'chunk_sum': round(float(chunk_sum), 2),
+                'correction_ratio': round(float(ratios[-1]) if ratios else 1.0, 4),
             })
 
         chunk_int = max(1, int(round(chunk_f)))
+        avg_ratio = round(float(np.mean(ratios)), 4) if ratios else 1.0
         return {
             'gun_name': prev_correction.get('gun_name', ''),
             'acc_code': acc_code,
             'corrected_uniform': corrected,
             'original_array': prev_params,
-            'avg_ratio': 1.0,
+            'avg_ratio': avg_ratio,
             'chunk_size': chunk_int,
             'chunk_size_f': round(chunk_f, 2),
             'scope_val': scope_val, 'posture_val': posture_val,
