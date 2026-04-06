@@ -4,12 +4,14 @@
 PUBG 弹痕分析统一模块
 ═══════════════════════
 核心类:
-  BulletDetector      - 基于图像差分检测弹痕
+  BulletDetector      - 弹痕检测 (单图自适应 / 模板匹配 / 双图差分)
   BulletSorter        - 按开枪顺序排序（先打的在下面）
   BulletComparator    - 与 GunData JSON 理论数据对比
   BulletVisualizer    - 绘制标注图和间距柱状图
   ResultSaver         - 保存分析结果（图片+JSON）
+  AnnotationData      - 标注数据持久化 (JSON sidecar)
   ParameterCorrector  - 根据校准结果生成修正后的压枪参数
+  IterativeCorrector  - 迭代修正（宏开启后弹痕→微调参数）
   MultiGroupAnalyzer  - 多组弹痕数据交叉比对
 """
 
@@ -98,18 +100,61 @@ def _scale_params(resolution):
 # ═══════════════════════════════════════════
 
 class BulletDetector:
-    """基于前后帧差分检测弹痕位置"""
+    """弹痕检测器，支持三种模式：双图差分 / 单图自适应 / 模板匹配"""
 
     def __init__(self, resolution="1920x1080"):
         self.params = _scale_params(resolution)
 
+    # ── 模式1: 双图差分（原始方式）──
+
     def detect(self, base, result):
+        """需要基线图和结果图"""
         if base.shape != result.shape:
             result = cv2.resize(result, (base.shape[1], base.shape[0]))
-
         bg = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
         rg = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
-        diff = cv2.absdiff(bg, rg)
+        return self._detect_from_diff(bg, rg)
+
+    # ── 模式2: 单图自适应（无需基线图）──
+
+    def detect_single(self, image):
+        """通过重度中值滤波生成虚拟基线，只需一张结果图。
+        原理：大核中值滤波能移除弹孔等小特征但保留墙面纹理，
+        滤波后的图 ≈ 没有弹痕的干净墙面 → 当作虚拟基线。
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        baseline = cv2.medianBlur(gray, 31)
+        return self._detect_from_diff(baseline, gray)
+
+    # ── 模式3: 模板匹配 ──
+
+    def detect_with_template(self, image, template, threshold=0.6):
+        """用弹孔模板图在结果图中匹配，支持多尺度。"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        tmpl = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) if template.ndim == 3 else template
+        th, tw = tmpl.shape[:2]
+
+        holes = []
+        for scale in np.arange(0.5, 1.8, 0.15):
+            st = cv2.resize(tmpl, None, fx=scale, fy=scale)
+            if st.shape[0] >= gray.shape[0] or st.shape[1] >= gray.shape[1]:
+                continue
+            result = cv2.matchTemplate(gray, st, cv2.TM_CCOEFF_NORMED)
+            locs = np.where(result >= threshold)
+            for pt in zip(*locs[::-1]):
+                cx = pt[0] + st.shape[1] // 2
+                cy = pt[1] + st.shape[0] // 2
+                conf = float(result[pt[1], pt[0]])
+                holes.append({'x': cx, 'y': cy, 'area': int(st.shape[0] * st.shape[1]),
+                              'circularity': 1.0, 'color_diff': 50, 'confidence': conf})
+
+        holes = self._nms(holes, min_dist=max(tw, th) // 2)
+        return self._filter_noise(holes)
+
+    # ── 公共方法 ──
+
+    def _detect_from_diff(self, bg_gray, result_gray):
+        diff = cv2.absdiff(bg_gray, result_gray)
         _, thresh = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         ks = self.params['morph_kernel']
@@ -142,9 +187,9 @@ class BulletDetector:
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"])
 
-            mask = np.zeros(bg.shape[:2], dtype=np.uint8)
+            mask = np.zeros(bg_gray.shape[:2], dtype=np.uint8)
             cv2.drawContours(mask, [cnt], -1, 255, -1)
-            color_diff = abs(cv2.mean(bg, mask=mask)[0] - cv2.mean(rg, mask=mask)[0])
+            color_diff = abs(cv2.mean(bg_gray, mask=mask)[0] - cv2.mean(result_gray, mask=mask)[0])
             if color_diff < color_th:
                 continue
 
@@ -155,6 +200,17 @@ class BulletDetector:
             })
 
         return self._filter_noise(holes)
+
+    @staticmethod
+    def _nms(holes, min_dist=15):
+        if not holes:
+            return holes
+        holes = sorted(holes, key=lambda h: h.get('confidence', h.get('color_diff', 0)), reverse=True)
+        keep = []
+        for h in holes:
+            if not any(abs(h['x'] - k['x']) < min_dist and abs(h['y'] - k['y']) < min_dist for k in keep):
+                keep.append(h)
+        return keep
 
     def _filter_noise(self, holes):
         if len(holes) < 4:
@@ -171,6 +227,131 @@ class BulletDetector:
                     best_group = group
             return best_group if len(best_group) >= 3 else holes
         return main_group
+
+
+# ═══════════════════════════════════════════
+# 标注数据持久化
+# ═══════════════════════════════════════════
+
+class AnnotationData:
+    """标注数据的保存和加载（JSON sidecar 文件）"""
+
+    @staticmethod
+    def save(image_path, holes, metadata=None):
+        """保存标注数据为 <文件名>.analysis.json"""
+        p = Path(image_path)
+        json_path = p.parent / f"{p.stem}.analysis.json"
+        data = {
+            'version': 2,
+            'holes': [{'x': h['x'], 'y': h['y'], 'shot_num': h.get('shot_num', 0),
+                        'area': h.get('area', 100), 'circularity': h.get('circularity', 1.0),
+                        'color_diff': h.get('color_diff', 50)} for h in holes],
+            'metadata': metadata or {},
+            'timestamp': datetime.now().isoformat(),
+        }
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return str(json_path)
+
+    @staticmethod
+    def load(path):
+        """加载标注数据。支持 .analysis.json 或图片文件（自动查找同名JSON）。
+        返回 (holes, metadata) 或 (None, None)
+        """
+        p = Path(path)
+        if p.suffix.lower() == '.json':
+            json_path = p
+        else:
+            json_path = p.parent / f"{p.stem}.analysis.json"
+
+        if not json_path.exists():
+            return None, None
+        try:
+            with open(json_path, encoding='utf-8') as f:
+                data = json.load(f)
+            return data.get('holes', []), data.get('metadata', {})
+        except Exception:
+            return None, None
+
+    @staticmethod
+    def find_image_for_json(json_path):
+        """根据 JSON 路径查找对应的原始图片"""
+        p = Path(json_path)
+        stem = p.stem.replace('.analysis', '')
+        for ext in ['.png', '.jpg', '.bmp', '.jpeg']:
+            img = p.parent / f"{stem}{ext}"
+            if img.exists():
+                return str(img)
+        return None
+
+    @staticmethod
+    def list_annotations(directory):
+        """列出目录下所有标注文件"""
+        d = Path(directory)
+        return sorted(d.glob("*.analysis.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+
+
+# ═══════════════════════════════════════════
+# 迭代修正
+# ═══════════════════════════════════════════
+
+class IterativeCorrector:
+    """迭代修正：加载「宏开启后的弹痕图」+「上一轮参数」→ 微调。
+
+    原理：
+      宏开启后射击，如果参数完美，所有弹孔应在同一位置。
+      残余偏移 = 每发弹孔相对前一发的位移。
+      dy > 0 → 弹孔偏下 → 过度补偿 → 减小参数
+      dy < 0 → 弹孔偏上 → 补偿不足 → 增大参数
+      将残差按比例分配到对应chunk的各个tick值上。
+    """
+
+    @staticmethod
+    def correct(residual_holes, prev_params, scope_val, posture_val, chunk_size=12):
+        if len(residual_holes) < 2 or not prev_params:
+            return None
+
+        s = sorted(residual_holes, key=lambda h: h.get('shot_num', 0))
+        n_intervals = len(s) - 1
+        chunk = min(chunk_size, max(1, len(prev_params) // max(1, n_intervals)))
+        factor = max(0.01, scope_val * posture_val)
+
+        corrected = [float(v) for v in prev_params]
+        residuals = []
+
+        for i in range(1, len(s)):
+            dy = s[i]['y'] - s[i - 1]['y']
+            dx = s[i]['x'] - s[i - 1]['x']
+
+            # 需要增减的补偿量（像素→原始值空间）
+            adjustment_raw = -dy / factor
+
+            start = (i - 1) * chunk
+            end = min(i * chunk, len(corrected))
+            chunk_sum = sum(abs(prev_params[j]) for j in range(start, min(end, len(prev_params))))
+
+            for j in range(start, min(end, len(corrected))):
+                if chunk_sum > 0 and prev_params[j] != 0:
+                    proportion = abs(prev_params[j]) / chunk_sum
+                    corrected[j] = round(corrected[j] + adjustment_raw * proportion, 1)
+
+            residuals.append({
+                'shot': i,
+                'dy': round(float(dy), 1),
+                'dx': round(float(dx), 1),
+                'adjustment_px': round(float(-dy), 1),
+                'adjustment_raw': round(float(adjustment_raw), 2),
+            })
+
+        return {
+            'previous_params': prev_params,
+            'corrected_params': corrected,
+            'residuals': residuals,
+            'scope_val': scope_val,
+            'posture_val': posture_val,
+            'avg_residual_dy': round(float(np.mean([r['dy'] for r in residuals])), 1),
+            'max_residual_dy': round(float(max(abs(r['dy']) for r in residuals)), 1),
+        }
 
 
 # ═══════════════════════════════════════════
@@ -739,14 +920,28 @@ class MultiGroupAnalyzer:
 # 一站式分析 API
 # ═══════════════════════════════════════════
 
-def analyze_bullet_pattern(base_img, result_img, gun_name, acc_code,
+def analyze_bullet_pattern(result_img, gun_name, acc_code,
                            scope_val=1.0, posture_val=1.0,
-                           resolution="1920x1080", save_results=True):
+                           resolution="1920x1080", save_results=True,
+                           base_img=None, template_img=None):
+    """一站式弹痕分析 API。
+
+    :param result_img: 弹痕截图 (BGR)
+    :param base_img: 基线图 (可选, 提供则用差分模式)
+    :param template_img: 弹孔模板 (可选, 提供则用模板匹配)
+    :return: dict 包含 holes, comparison, vis_image 等
+    """
     detector = BulletDetector(resolution)
     comparator = BulletComparator()
     visualizer = BulletVisualizer()
 
-    holes = detector.detect(base_img, result_img)
+    if template_img is not None:
+        holes = detector.detect_with_template(result_img, template_img)
+    elif base_img is not None:
+        holes = detector.detect(base_img, result_img)
+    else:
+        holes = detector.detect_single(result_img)
+
     if not holes:
         return {'holes': [], 'comparison': None, 'error': '未检测到弹痕'}
 
@@ -788,11 +983,12 @@ def _cli_main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="PUBG 弹痕分析工具 — 对比基线与结果截图，输出校准参数",
+        description="PUBG 弹痕分析工具 — 支持单图/模板/双图模式",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("base", help="空白墙面截图路径")
-    parser.add_argument("result", help="打完后的墙面截图路径")
+    parser.add_argument("result", help="射击后的墙面截图路径")
+    parser.add_argument("--base", default=None, help="基线图(可选, 不提供则用单图模式)")
+    parser.add_argument("--template", default=None, help="弹孔模板图(可选, 小图)")
     parser.add_argument("--gun", default="m762", help="枪械名（JSON 文件名，默认 m762）")
     parser.add_argument("--acc", default="A0B0C0", help="配件码（默认 A0B0C0）")
     parser.add_argument("--scope", type=float, default=None,
@@ -809,32 +1005,59 @@ def _cli_main():
         cfg = _load_sensitivity_config()
         scope = cfg.get('none', 1.0)
 
-    base = cv2.imread(args.base)
-    result = cv2.imread(args.result)
-    if base is None:
-        print(f"错误: 无法读取基线图 {args.base}")
-        return 1
-    if result is None:
+    result_img = cv2.imread(args.result)
+    if result_img is None:
         print(f"错误: 无法读取结果图 {args.result}")
         return 1
 
+    detector = BulletDetector(args.resolution)
+    if args.template:
+        tmpl = cv2.imread(args.template)
+        if tmpl is None:
+            print(f"错误: 无法读取模板图 {args.template}")
+            return 1
+        holes = detector.detect_with_template(result_img, tmpl)
+        mode = "模板匹配"
+    elif args.base:
+        base_img = cv2.imread(args.base)
+        if base_img is None:
+            print(f"错误: 无法读取基线图 {args.base}")
+            return 1
+        holes = detector.detect(base_img, result_img)
+        mode = "双图差分"
+    else:
+        holes = detector.detect_single(result_img)
+        mode = "单图自适应"
+
     print(f"\n{'='*55}")
-    print(f"  PUBG 弹痕分析")
+    print(f"  PUBG 弹痕分析 ({mode})")
     print(f"{'='*55}")
     print(f"  枪械: {args.gun}  配件码: {args.acc}")
     print(f"  倍镜系数: {scope}  姿态系数: {args.posture}")
     print(f"{'='*55}\n")
 
-    r = analyze_bullet_pattern(
-        base, result,
-        gun_name=args.gun, acc_code=args.acc,
-        scope_val=scope, posture_val=args.posture,
-        resolution=args.resolution, save_results=not args.no_save,
-    )
-
-    if not r['holes']:
-        print("  未检测到弹痕。请检查两张截图是否正确。")
+    if not holes:
+        print("  未检测到弹痕。")
         return 1
+
+    sorted_holes = BulletSorter.sort(holes)
+    comparator = BulletComparator()
+    comparison = comparator.compare(sorted_holes, args.gun, args.acc, scope, args.posture)
+
+    r = {
+        'holes': sorted_holes,
+        'comparison': comparison,
+        'shot_count': len(sorted_holes),
+    }
+
+    if not args.no_save:
+        visualizer = BulletVisualizer()
+        saver = ResultSaver()
+        vis = visualizer.draw_holes(result_img, sorted_holes)
+        saver.save_image("bullet_holes_marked", vis)
+        AnnotationData.save(args.result, sorted_holes, {
+            'gun': args.gun, 'acc': args.acc, 'scope': scope, 'posture': args.posture,
+        })
 
     print(f"  检测到 {r['shot_count']} 个弹痕\n")
 

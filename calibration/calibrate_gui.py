@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-弹痕分析工具 (GUI) — 交互式标注 + 多组比对 + 缩放
+弹痕分析工具 (GUI) — 单图/模板检测 + 交互式标注 + 多组比对 + 迭代修正
 用法: python -m calibration.calibrate_gui
 """
 
@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QPushButton, QFileDialog,
     QMessageBox, QTextEdit, QMenu, QSplitter,
-    QDialog, QDialogButtonBox, QListWidget, QListWidgetItem,
+    QDialog, QDialogButtonBox, QListWidget,
 )
 from PyQt5.QtGui import QPixmap, QImage, QFont, QPainter, QColor, QPen, QBrush
 
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.fire_data import KEY_DATA
 from calibration.bullet_analysis import (
     BulletDetector, BulletSorter, BulletComparator, BulletVisualizer,
-    ParameterCorrector, MultiGroupAnalyzer,
+    ParameterCorrector, MultiGroupAnalyzer, AnnotationData, IterativeCorrector,
     _find_gun_data_dir, _load_sensitivity_config,
 )
 
@@ -30,9 +30,7 @@ MUZZLE_CN = {
     'buqiangbuchang': '步枪补偿', 'buqiangxiaoyan': '步枪消焰', 'xiaoyin': '消音器',
     'chongfengqiangxiaoyan': '冲锋消焰', 'chongfengqiangbuchang': '冲锋补偿',
 }
-GRIP_CN = {
-    'none': '无', 'banjieshi': '半截式', 'muzhi': '拇指', 'zhijiao': '直角', 'chuizhi': '垂直',
-}
+GRIP_CN = {'none': '无', 'banjieshi': '半截式', 'muzhi': '拇指', 'zhijiao': '直角', 'chuizhi': '垂直'}
 STOCK_CN = {
     'none': '无', 'zhanshuqiangtuo': '战术枪托', 'zhongxinqiangtuo': '重型枪托',
     'tuosaiban': '托腮板', 'zidandai': '子弹袋', 'zhedieshiqiangtuo': '折叠枪托',
@@ -43,14 +41,12 @@ SAVE_DIR.mkdir(exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════
-# 交互式弹痕画布（带缩放平移）
+# 交互式弹痕画布
 # ══════════════════════════════════════════════════════════
 
 class BulletCanvas(QWidget):
     holesChanged = pyqtSignal()
-
-    HOLE_RADIUS = 12
-    HIT_RADIUS = 18
+    HOLE_RADIUS, HIT_RADIUS = 12, 18
     ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.2, 10.0, 1.15
 
     def __init__(self, parent=None):
@@ -76,218 +72,177 @@ class BulletCanvas(QWidget):
         fmt = QImage.Format_BGR888 if cv_img.ndim == 3 and cv_img.shape[2] == 3 else QImage.Format_Grayscale8
         qimg = QImage(cv_img.data, w, h, cv_img.strides[0], fmt)
         self._bg_pixmap = QPixmap.fromImage(qimg)
-        self._zoom = 1.0
-        self._pan = QPointF(0, 0)
+        self._zoom, self._pan = 1.0, QPointF(0, 0)
         self.update()
 
     def get_holes(self):
         return copy.deepcopy(self._holes)
 
     def reset_view(self):
-        self._zoom = 1.0
-        self._pan = QPointF(0, 0)
+        self._zoom, self._pan = 1.0, QPointF(0, 0)
         self.update()
 
     def save_annotation_image(self, path):
-        """保存标注图到文件（使用 OpenCV 全分辨率渲染）"""
         if self._bg_img is None or not self._holes:
             return False
         vis = BulletVisualizer.draw_holes(self._bg_img, self._holes)
         cv2.imwrite(str(path), vis)
+        AnnotationData.save(path, self._holes)
         return True
 
-    def _base_img_rect(self):
-        if self._bg_pixmap is None:
+    def _base_rect(self):
+        if not self._bg_pixmap:
             return QRectF()
         pw, ph = self._bg_pixmap.width(), self._bg_pixmap.height()
         ww, wh = self.width(), self.height()
-        scale = min(ww / pw, wh / ph)
-        return QRectF((ww - pw * scale) / 2, (wh - ph * scale) / 2, pw * scale, ph * scale)
+        s = min(ww / pw, wh / ph)
+        return QRectF((ww - pw * s) / 2, (wh - ph * s) / 2, pw * s, ph * s)
 
     def _img_rect(self):
-        base = self._base_img_rect()
-        if base.isEmpty():
-            return base
-        cx = base.center().x() + self._pan.x()
-        cy = base.center().y() + self._pan.y()
-        w, h = base.width() * self._zoom, base.height() * self._zoom
+        b = self._base_rect()
+        if b.isEmpty():
+            return b
+        cx, cy = b.center().x() + self._pan.x(), b.center().y() + self._pan.y()
+        w, h = b.width() * self._zoom, b.height() * self._zoom
         return QRectF(cx - w / 2, cy - h / 2, w, h)
 
-    def _img_to_widget(self, ix, iy):
+    def _i2w(self, ix, iy):
         r = self._img_rect()
         if r.isEmpty() or not self._bg_pixmap:
             return QPointF(ix, iy)
         pw, ph = self._bg_pixmap.width(), self._bg_pixmap.height()
         return QPointF(r.x() + ix / pw * r.width(), r.y() + iy / ph * r.height())
 
-    def _widget_to_img(self, wx, wy):
+    def _w2i(self, wx, wy):
         r = self._img_rect()
         if r.isEmpty() or not self._bg_pixmap:
             return (int(wx), int(wy))
         pw, ph = self._bg_pixmap.width(), self._bg_pixmap.height()
-        ix = (wx - r.x()) / r.width() * pw
-        iy = (wy - r.y()) / r.height() * ph
-        return (int(max(0, min(pw - 1, ix))), int(max(0, min(ph - 1, iy))))
+        return (int(max(0, min(pw - 1, (wx - r.x()) / r.width() * pw))),
+                int(max(0, min(ph - 1, (wy - r.y()) / r.height() * ph))))
 
     def _find_hole(self, pos):
         r = self._img_rect()
         if r.isEmpty():
             return -1
-        scale = r.width() / self._bg_pixmap.width() if self._bg_pixmap else 1
-        hit = self.HIT_RADIUS * max(1.0, scale)
+        sc = r.width() / self._bg_pixmap.width() if self._bg_pixmap else 1
+        hit = self.HIT_RADIUS * max(1.0, sc)
         for i, h in enumerate(self._holes):
-            wp = self._img_to_widget(h['x'], h['y'])
-            if (pos - wp).manhattanLength() < hit:
+            if (pos - self._i2w(h['x'], h['y'])).manhattanLength() < hit:
                 return i
         return -1
 
-    def paintEvent(self, event):
+    def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(20, 20, 20))
         r = self._img_rect()
         if self._bg_pixmap and not r.isEmpty():
             p.drawPixmap(r.toRect(), self._bg_pixmap)
-
         if not self._holes:
             if not self._bg_pixmap:
                 p.setPen(QPen(QColor(100, 100, 100)))
-                p.setFont(QFont('Microsoft YaHei', 12))
+                p.setFont(QFont('Microsoft YaHei', 11))
                 p.drawText(self.rect(), Qt.AlignCenter,
-                           '点击"开始分析"后弹痕显示在此\n\n'
-                           '滚轮缩放 | 中键/右键空白拖动 | 右键双击重置')
+                           '选择弹痕图 → 开始分析\n或 加载已有标注\n\n滚轮缩放 | 中键平移 | 右键双击重置')
             p.end()
             return
 
-        scale = r.width() / self._bg_pixmap.width() if self._bg_pixmap and r.width() > 0 else 1
-        rad = max(6, int(self.HOLE_RADIUS * scale))
-        font_size = max(8, int(10 * scale))
+        sc = r.width() / self._bg_pixmap.width() if self._bg_pixmap and r.width() > 0 else 1
+        rad = max(6, int(self.HOLE_RADIUS * sc))
+        fs = max(8, int(10 * sc))
         s = sorted(self._holes, key=lambda h: h.get('shot_num', 0))
 
         for i in range(len(s) - 1):
-            p1 = self._img_to_widget(s[i]['x'], s[i]['y'])
-            p2 = self._img_to_widget(s[i + 1]['x'], s[i + 1]['y'])
+            p1, p2 = self._i2w(s[i]['x'], s[i]['y']), self._i2w(s[i + 1]['x'], s[i + 1]['y'])
             p.setPen(QPen(QColor(100, 255, 100, 150), 2))
             p.drawLine(p1, p2)
-            dy = abs(s[i]['y'] - s[i + 1]['y'])
-            dx = s[i + 1]['x'] - s[i]['x']
+            dy, dx = abs(s[i]['y'] - s[i + 1]['y']), s[i + 1]['x'] - s[i]['x']
             mid = (p1 + p2) / 2
-            p.setFont(QFont('Microsoft YaHei', max(7, font_size - 2)))
+            p.setFont(QFont('Microsoft YaHei', max(7, fs - 2)))
             p.setPen(QPen(QColor(200, 200, 200, 180)))
             p.drawText(mid.x() + 8, mid.y(), f'↕{dy} →{dx:+d}')
 
         for i, hv in enumerate(s):
-            wp = self._img_to_widget(hv['x'], hv['y'])
+            wp = self._i2w(hv['x'], hv['y'])
             n = hv.get('shot_num', i + 1)
-            is_sel = (i == self._selected or
-                      (0 <= self._selected < len(self._holes) and self._holes[self._selected] is hv))
+            sel = (i == self._selected or (0 <= self._selected < len(self._holes) and self._holes[self._selected] is hv))
             col = QColor(255, 60, 60) if n <= 5 else QColor(255, 165, 0) if n <= 15 else QColor(80, 255, 80)
-            if is_sel:
-                p.setPen(QPen(QColor(255, 255, 0), 3))
-                p.setBrush(QBrush(col))
-                p.drawEllipse(wp, rad + 3, rad + 3)
+            if sel:
+                p.setPen(QPen(QColor(255, 255, 0), 3)); p.setBrush(QBrush(col)); p.drawEllipse(wp, rad + 3, rad + 3)
             else:
-                p.setPen(QPen(QColor(255, 255, 255, 200), 2))
-                p.setBrush(QBrush(col))
-                p.drawEllipse(wp, rad, rad)
-            p.setFont(QFont('Microsoft YaHei', font_size, QFont.Bold))
+                p.setPen(QPen(QColor(255, 255, 255, 200), 2)); p.setBrush(QBrush(col)); p.drawEllipse(wp, rad, rad)
+            p.setFont(QFont('Microsoft YaHei', fs, QFont.Bold))
             p.setPen(QPen(QColor(255, 255, 255)))
             p.drawText(int(wp.x() + rad + 4), int(wp.y() - rad + 2), str(n))
 
         p.setFont(QFont('Microsoft YaHei', 9))
         p.setPen(QPen(QColor(255, 186, 8)))
-        p.drawText(8, self.height() - 8,
-                   f'弹孔: {len(self._holes)} | 缩放: {int(self._zoom * 100)}%')
+        p.drawText(8, self.height() - 8, f'弹孔: {len(self._holes)} | 缩放: {int(self._zoom * 100)}%')
         p.end()
 
-    def wheelEvent(self, event):
+    def wheelEvent(self, e):
         if not self._bg_pixmap:
             return
-        delta = event.angleDelta().y()
-        if delta == 0:
+        d = e.angleDelta().y()
+        if d == 0:
             return
-        old_zoom = self._zoom
-        self._zoom = min(self.ZOOM_MAX, self._zoom * self.ZOOM_STEP) if delta > 0 \
-            else max(self.ZOOM_MIN, self._zoom / self.ZOOM_STEP)
-        mouse_pos = QPointF(event.pos())
-        base_center = self._base_img_rect().center()
-        center = base_center + self._pan
-        ratio = self._zoom / old_zoom
-        self._pan = mouse_pos - (mouse_pos - center) * ratio - base_center
+        oz = self._zoom
+        self._zoom = min(self.ZOOM_MAX, self._zoom * self.ZOOM_STEP) if d > 0 else max(self.ZOOM_MIN, self._zoom / self.ZOOM_STEP)
+        mp = QPointF(e.pos())
+        bc = self._base_rect().center()
+        self._pan = mp - (mp - bc - self._pan) * (self._zoom / oz) - bc
         self.update()
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MiddleButton:
-            self._panning = True
-            self._pan_start = QPointF(event.pos())
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MiddleButton:
+            self._panning, self._pan_start = True, QPointF(e.pos())
             self.setCursor(Qt.ClosedHandCursor)
             return
-        if event.button() == Qt.LeftButton:
-            idx = self._find_hole(QPointF(event.pos()))
+        if e.button() == Qt.LeftButton:
+            idx = self._find_hole(QPointF(e.pos()))
             if idx >= 0:
-                self._selected = idx
-                self._dragging = True
-                wp = self._img_to_widget(self._holes[idx]['x'], self._holes[idx]['y'])
-                self._drag_offset = QPointF(event.pos()) - wp
+                self._selected, self._dragging = idx, True
+                self._drag_offset = QPointF(e.pos()) - self._i2w(self._holes[idx]['x'], self._holes[idx]['y'])
             else:
                 self._selected = -1
             self.update()
-        elif event.button() == Qt.RightButton:
-            idx = self._find_hole(QPointF(event.pos()))
+        elif e.button() == Qt.RightButton:
+            idx = self._find_hole(QPointF(e.pos()))
             if idx >= 0:
                 menu = QMenu(self)
-                menu.setStyleSheet("QMenu{background:#2a2a2a;color:#FFF;border:1px solid #555;}"
-                                   "QMenu::item:selected{background:#FFBA08;color:#000;}")
-                del_act = menu.addAction(f"删除弹孔 #{self._holes[idx].get('shot_num', idx + 1)}")
-                if menu.exec_(event.globalPos()) == del_act:
-                    self._holes.pop(idx)
-                    self._selected = -1
-                    BulletSorter.sort(self._holes)
-                    self.update()
-                    self.holesChanged.emit()
+                menu.setStyleSheet("QMenu{background:#2a2a2a;color:#FFF;border:1px solid #555;}QMenu::item:selected{background:#FFBA08;color:#000;}")
+                da = menu.addAction(f"删除弹孔 #{self._holes[idx].get('shot_num', idx + 1)}")
+                if menu.exec_(e.globalPos()) == da:
+                    self._holes.pop(idx); self._selected = -1; BulletSorter.sort(self._holes); self.update(); self.holesChanged.emit()
             else:
-                self._panning = True
-                self._pan_start = QPointF(event.pos())
+                self._panning, self._pan_start = True, QPointF(e.pos())
                 self.setCursor(Qt.ClosedHandCursor)
 
-    def mouseMoveEvent(self, event):
+    def mouseMoveEvent(self, e):
         if self._panning:
-            delta = QPointF(event.pos()) - self._pan_start
-            self._pan += delta
-            self._pan_start = QPointF(event.pos())
-            self.update()
+            self._pan += QPointF(e.pos()) - self._pan_start; self._pan_start = QPointF(e.pos()); self.update()
         elif self._dragging and self._selected >= 0:
-            pos = QPointF(event.pos()) - self._drag_offset
-            ix, iy = self._widget_to_img(pos.x(), pos.y())
-            self._holes[self._selected]['x'] = ix
-            self._holes[self._selected]['y'] = iy
+            ix, iy = self._w2i(*(QPointF(e.pos()) - self._drag_offset).toTuple())
+            self._holes[self._selected]['x'], self._holes[self._selected]['y'] = ix, iy
             self.update()
 
-    def mouseReleaseEvent(self, event):
-        if event.button() in (Qt.MiddleButton, Qt.RightButton) and self._panning:
-            self._panning = False
-            self.setCursor(Qt.CrossCursor)
-            return
+    def mouseReleaseEvent(self, e):
+        if e.button() in (Qt.MiddleButton, Qt.RightButton) and self._panning:
+            self._panning = False; self.setCursor(Qt.CrossCursor); return
         if self._dragging:
-            self._dragging = False
-            BulletSorter.sort(self._holes)
-            self.update()
-            self.holesChanged.emit()
+            self._dragging = False; BulletSorter.sort(self._holes); self.update(); self.holesChanged.emit()
 
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.RightButton:
-            self.reset_view()
-            return
-        if event.button() == Qt.LeftButton:
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.RightButton:
+            self.reset_view(); return
+        if e.button() == Qt.LeftButton:
             r = self._img_rect()
-            pos = QPointF(event.pos())
+            pos = QPointF(e.pos())
             if r.contains(pos):
-                ix, iy = self._widget_to_img(pos.x(), pos.y())
+                ix, iy = self._w2i(pos.x(), pos.y())
                 self._holes.append({'x': ix, 'y': iy, 'area': 100, 'circularity': 1.0, 'color_diff': 50})
-                BulletSorter.sort(self._holes)
-                self._selected = -1
-                self.update()
-                self.holesChanged.emit()
+                BulletSorter.sort(self._holes); self._selected = -1; self.update(); self.holesChanged.emit()
 
 
 # ══════════════════════════════════════════════════════════
@@ -298,46 +253,37 @@ class HelpDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("使用说明")
-        self.setMinimumSize(600, 500)
+        self.setMinimumSize(620, 520)
         self.setStyleSheet("background:#1e1e1e;color:#EEE;font-family:'Microsoft YaHei';")
         layout = QVBoxLayout(self)
-        text = QTextEdit()
-        text.setReadOnly(True)
-        text.setStyleSheet("background:#111;border:1px solid #333;border-radius:6px;padding:12px;font-size:13px;")
-        text.setHtml("""
+        t = QTextEdit()
+        t.setReadOnly(True)
+        t.setStyleSheet("background:#111;border:1px solid #333;border-radius:6px;padding:12px;font-size:13px;")
+        t.setHtml("""
 <h2 style="color:#FFBA08">PUBG 弹痕分析工具</h2>
+<h3 style="color:#4AE54A">▎三种检测模式</h3>
+<table>
+<tr><td style="color:#FFBA08;padding:2px 8px">单图自适应</td><td>只需弹痕图，自动生成虚拟基线（推荐）</td></tr>
+<tr><td style="color:#FFBA08;padding:2px 8px">模板匹配</td><td>提供一个弹孔截图作为模板，多尺度匹配</td></tr>
+<tr><td style="color:#FFBA08;padding:2px 8px">加载标注</td><td>加载之前保存的标注文件(.analysis.json)</td></tr>
+</table>
 <h3 style="color:#4AE54A">▎使用步骤</h3>
-<ol>
-<li>游戏中找一面干净墙壁，<b>先截空白基线图</b>，然后<b>不开宏</b>对着墙射击，截结果图</li>
-<li>选择图片 → 设置枪械/配件/瞄具 → 开始分析</li>
-<li>画布上手动修正弹孔位置 → 结果实时刷新</li>
-<li>确认无误后复制修正参数到 GunData JSON 文件</li>
-</ol>
+<ol><li>游戏中找干净墙壁，<b>不开宏</b>射击一梭子，截图</li>
+<li>选择弹痕图 → 设置枪械/配件 → 开始分析</li>
+<li>画布上修正弹孔 → 实时刷新结果和修正参数</li>
+<li>保存标注图 → 下次可直接加载</li></ol>
+<h3 style="color:#4AE54A">▎迭代修正</h3>
+<p>第1轮：不开宏射击 → 分析 → 得到修正参数<br>
+第2轮：<b>开宏</b>用修正参数射击 → 加载新弹痕图 → 加载上一轮参数JSON → 迭代修正<br>
+原理：宏开启后弹孔应聚集，残余偏移=补偿误差 → 微调参数</p>
 <h3 style="color:#4AE54A">▎画布操作</h3>
-<table><tr><td style="color:#FFBA08;padding:2px 8px">左键拖拽</td><td>移动弹孔</td></tr>
-<tr><td style="color:#FFBA08;padding:2px 8px">双击空白</td><td>添加弹孔</td></tr>
-<tr><td style="color:#FFBA08;padding:2px 8px">右键弹孔</td><td>删除弹孔</td></tr>
-<tr><td style="color:#FFBA08;padding:2px 8px">滚轮</td><td>缩放</td></tr>
-<tr><td style="color:#FFBA08;padding:2px 8px">中键/右键空白拖动</td><td>平移</td></tr>
-<tr><td style="color:#FFBA08;padding:2px 8px">右键双击</td><td>重置视图</td></tr></table>
-<h3 style="color:#4AE54A">▎多组比对</h3>
-<p>多次射击取样 → 每次分析后点"添加到比对组" → 点"综合分析"获取最优参数（去除离群值）。</p>
-<h3 style="color:#4AE54A">▎数据说明</h3>
-<p><b>实际(px)</b>: 弹孔间像素距离<br>
-<b>理论(px)</b>: JSON数组分块求和 × 灵敏度 × 姿态 = 宏应补偿像素量<br>
-<b>原值</b>: JSON数组分块求和（不含灵敏度倍率）<br>
-<b>比值</b>: 实际/理论，≈1.0说明校准准确</p>
-<h3 style="color:#4AE54A">▎水平漂移</h3>
-<p>PUBG 水平后坐力含随机分量，无法完全通过固定值补偿。工具会分析：
-<br>• 如果均值大、标准差小 → 可添加X轴固定补偿
-<br>• 如果标准差大 → 随机性强，不建议固定补偿</p>
+<p>左键拖拽移动 | 双击添加 | 右键删除 | 滚轮缩放 | 中键/右键空白平移 | 右键双击重置</p>
 """)
-        layout.addWidget(text)
-        btn = QDialogButtonBox(QDialogButtonBox.Ok)
-        btn.setStyleSheet("QPushButton{background:#FFBA08;color:#000;border:none;border-radius:4px;"
-                          "padding:8px 24px;font-weight:bold;}")
-        btn.accepted.connect(self.accept)
-        layout.addWidget(btn)
+        layout.addWidget(t)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok)
+        bb.setStyleSheet("QPushButton{background:#FFBA08;color:#000;border:none;border-radius:4px;padding:8px 24px;font-weight:bold;}")
+        bb.accepted.connect(self.accept)
+        layout.addWidget(bb)
 
 
 # ══════════════════════════════════════════════════════════
@@ -349,8 +295,7 @@ def _cs():
 
 def _btn(text, color="#FFBA08", h=36):
     b = QPushButton(text)
-    b.setStyleSheet(f"color:#FFF;background:#1a1a1a;border:1px solid {color};"
-                    f"border-radius:6px;padding:6px 16px;font-size:13px;font-weight:bold;")
+    b.setStyleSheet(f"color:#FFF;background:#1a1a1a;border:1px solid {color};border-radius:6px;padding:6px 16px;font-size:13px;font-weight:bold;")
     b.setFixedHeight(h)
     return b
 
@@ -360,8 +305,8 @@ class MainWindow(QWidget):
         super().__init__()
         self.setWindowTitle("PUBG 弹痕分析 — 交互式标注")
         self.setStyleSheet("background:#1a1a1a;color:#FFF;font-family:'Microsoft YaHei';")
-        self.base_path = self.result_path = None
-        self._result_img = self._base_img = None
+        self.result_path = self._template_path = None
+        self._result_img = None
         self._gun_name = 'm762'
         self._acc_code = 'A0B0C0'
         self._scope_val = 1.0
@@ -369,50 +314,44 @@ class MainWindow(QWidget):
         self._gun_data_dir = _find_gun_data_dir()
         self._sensitivity_cfg = _load_sensitivity_config()
         self._multi = MultiGroupAnalyzer()
+        self._last_correction = None
         self._build()
 
     def _build(self):
         root = QVBoxLayout(self)
         root.setSpacing(6)
-
         splitter = QSplitter(Qt.Vertical)
         splitter.setStyleSheet("QSplitter::handle{background:#333;height:4px;}")
 
-        # ─── 顶部：图片+配置 ───
+        # ─── 顶部 ───
         top = QWidget()
         tl = QVBoxLayout(top)
         tl.setContentsMargins(8, 8, 8, 4)
         tl.setSpacing(5)
 
-        title_row = QHBoxLayout()
+        tr = QHBoxLayout()
         lb = QLabel("PUBG 弹痕分析工具")
         lb.setStyleSheet("color:#FFBA08;font-size:15px;font-weight:bold;")
-        title_row.addWidget(lb)
-        title_row.addStretch()
-        for text, color, cb in [
-            ("使用说明", "#4A90D9", self._show_help),
-            ("重置视图", "#888", lambda: self.canvas.reset_view()),
-        ]:
-            b = _btn(text, color, 26)
-            b.setFixedWidth(72)
-            b.clicked.connect(cb)
-            title_row.addWidget(b)
-        tl.addLayout(title_row)
+        tr.addWidget(lb); tr.addStretch()
+        for t, c, cb in [("使用说明", "#4A90D9", self._show_help), ("重置视图", "#888", lambda: self.canvas.reset_view())]:
+            b = _btn(t, c, 26); b.setFixedWidth(72); b.clicked.connect(cb); tr.addWidget(b)
+        tl.addLayout(tr)
 
-        img_row = QHBoxLayout()
-        self.base_lb = QLabel("基线: 未选择")
-        self.base_lb.setStyleSheet("color:#888;font-size:12px;")
-        b1 = _btn("选择基线图", "#4AE54A", 28)
-        b1.clicked.connect(self._pick_base)
-        self.result_lb = QLabel("结果: 未选择")
+        # 图片选择
+        ir = QHBoxLayout()
+        self.result_lb = QLabel("弹痕图: 未选择")
         self.result_lb.setStyleSheet("color:#888;font-size:12px;")
-        b2 = _btn("选择结果图", "#4AE54A", 28)
-        b2.clicked.connect(self._pick_result)
-        for w in [self.base_lb, b1, self.result_lb, b2]:
-            img_row.addWidget(w)
-        tl.addLayout(img_row)
+        b1 = _btn("选择弹痕图", "#4AE54A", 28); b1.clicked.connect(self._pick_result)
+        self.tmpl_lb = QLabel("模板: 无(可选)")
+        self.tmpl_lb.setStyleSheet("color:#666;font-size:11px;")
+        b2 = _btn("选模板", "#666", 26); b2.setFixedWidth(60); b2.clicked.connect(self._pick_template)
+        b2c = _btn("清除", "#444", 26); b2c.setFixedWidth(42); b2c.clicked.connect(self._clear_template)
+        ir.addWidget(self.result_lb); ir.addWidget(b1); ir.addSpacing(8)
+        ir.addWidget(self.tmpl_lb); ir.addWidget(b2); ir.addWidget(b2c)
+        tl.addLayout(ir)
 
-        cfg_row = QHBoxLayout()
+        # 枪械配置
+        cr = QHBoxLayout()
         self.c_gun = self._cbox({
             "m762": "M762", "akm": "AKM", "m416": "M416", "scar-l": "SCAR-L", "aug": "AUG",
             "groza": "Groza", "dp28": "DP28", "m249": "M249", "uzi": "UZI", "vector": "Vector",
@@ -427,41 +366,36 @@ class MainWindow(QWidget):
         self.c_grip = self._cbox(GRIP_CN)
         self.c_stk = self._cbox(STOCK_CN)
         self.c_pose = self._cbox({"none": "站立", "c": "蹲下", "z": "趴下"})
-        for label, combo in [("枪", self.c_gun), ("镜", self.c_scope), ("口", self.c_muzz),
-                             ("握", self.c_grip), ("托", self.c_stk), ("姿", self.c_pose)]:
-            cfg_row.addWidget(QLabel(label))
-            cfg_row.addWidget(combo)
-        tl.addLayout(cfg_row)
+        for l, c in [("枪", self.c_gun), ("镜", self.c_scope), ("口", self.c_muzz),
+                     ("握", self.c_grip), ("托", self.c_stk), ("姿", self.c_pose)]:
+            cr.addWidget(QLabel(l)); cr.addWidget(c)
+        tl.addLayout(cr)
 
-        info_row = QHBoxLayout()
+        inr = QHBoxLayout()
         self.acc_lb = QLabel("配件码: A0B0C0")
         self.acc_lb.setStyleSheet("color:#FFBA08;font-size:11px;")
         self.info_lb = QLabel("")
         self.info_lb.setStyleSheet("color:#888;font-size:11px;")
-        info_row.addWidget(self.acc_lb)
-        info_row.addStretch()
-        info_row.addWidget(self.info_lb)
-        tl.addLayout(info_row)
+        inr.addWidget(self.acc_lb); inr.addStretch(); inr.addWidget(self.info_lb)
+        tl.addLayout(inr)
 
-        act_row = QHBoxLayout()
-        self.btn_analyze = _btn("开始分析", "#FFBA08", 36)
-        self.btn_analyze.clicked.connect(self._analyze)
-        act_row.addWidget(self.btn_analyze)
-        self.btn_save_img = _btn("保存标注图", "#4A90D9", 36)
-        self.btn_save_img.clicked.connect(self._save_annotation)
-        self.btn_save_img.setEnabled(False)
-        act_row.addWidget(self.btn_save_img)
-        tl.addLayout(act_row)
-
+        # 操作按钮
+        ar = QHBoxLayout()
+        self.btn_analyze = _btn("开始分析", "#FFBA08", 34); self.btn_analyze.clicked.connect(self._analyze)
+        self.btn_load = _btn("加载标注", "#4A90D9", 34); self.btn_load.clicked.connect(self._load_annotation)
+        self.btn_iterate = _btn("迭代修正", "#FF8C00", 34); self.btn_iterate.clicked.connect(self._iterate)
+        self.btn_save = _btn("保存标注图", "#4AE54A", 34); self.btn_save.clicked.connect(self._save_annotation)
+        self.btn_save.setEnabled(False)
+        ar.addWidget(self.btn_analyze); ar.addWidget(self.btn_load)
+        ar.addWidget(self.btn_iterate); ar.addWidget(self.btn_save)
+        tl.addLayout(ar)
         splitter.addWidget(top)
 
         # ─── 中部：画布 ───
         mid = QWidget()
         ml = QVBoxLayout(mid)
         ml.setContentsMargins(8, 4, 8, 4)
-        lbl = QLabel("交互式弹痕标注  (左键拖拽 | 双击添加 | 右键删除 | 滚轮缩放 | 中键平移)")
-        lbl.setStyleSheet("color:#FFBA08;font-size:12px;font-weight:bold;")
-        ml.addWidget(lbl)
+        ml.addWidget(QLabel("交互式弹痕标注  (左键拖 | 双击加 | 右键删 | 滚轮缩放 | 中键移)"))
         self.canvas = BulletCanvas()
         self.canvas.holesChanged.connect(self._on_holes_changed)
         ml.addWidget(self.canvas, 1)
@@ -471,81 +405,53 @@ class MainWindow(QWidget):
         bot = QWidget()
         bl = QVBoxLayout(bot)
         bl.setContentsMargins(8, 4, 8, 8)
+        bs = QSplitter(Qt.Horizontal)
+        bs.setStyleSheet("QSplitter::handle{background:#333;width:4px;}")
 
-        bot_splitter = QSplitter(Qt.Horizontal)
-        bot_splitter.setStyleSheet("QSplitter::handle{background:#333;width:4px;}")
-
-        # 左：结果文本
-        result_w = QWidget()
-        rl = QVBoxLayout(result_w)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(4)
-        rl.addWidget(QLabel("分析结果 + 修正参数（标注修改后自动刷新）"))
+        rw = QWidget()
+        rl = QVBoxLayout(rw); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(4)
+        rl.addWidget(QLabel("分析结果 + 修正参数"))
         self.result_text = QTextEdit()
         self.result_text.setReadOnly(True)
-        self.result_text.setStyleSheet("background:#111;color:#4AE54A;border:1px solid #333;"
-                                       "border-radius:6px;font-size:12px;font-family:'Consolas','Microsoft YaHei';")
+        self.result_text.setStyleSheet("background:#111;color:#4AE54A;border:1px solid #333;border-radius:6px;font-size:12px;font-family:'Consolas','Microsoft YaHei';")
         rl.addWidget(self.result_text, 1)
-        copy_row = QHBoxLayout()
-        self.btn_copy = _btn("复制修正参数", "#4A90D9", 28)
-        self.btn_copy.clicked.connect(self._copy_output)
-        self.btn_copy.setEnabled(False)
-        copy_row.addStretch()
-        copy_row.addWidget(self.btn_copy)
-        rl.addLayout(copy_row)
-        bot_splitter.addWidget(result_w)
+        cpr = QHBoxLayout()
+        self.btn_copy = _btn("复制修正参数", "#4A90D9", 28); self.btn_copy.clicked.connect(self._copy_output); self.btn_copy.setEnabled(False)
+        cpr.addStretch(); cpr.addWidget(self.btn_copy)
+        rl.addLayout(cpr)
+        bs.addWidget(rw)
 
-        # 右：多组比对
-        group_w = QWidget()
-        gl = QVBoxLayout(group_w)
-        gl.setContentsMargins(0, 0, 0, 0)
-        gl.setSpacing(4)
+        gw = QWidget()
+        gl = QVBoxLayout(gw); gl.setContentsMargins(0, 0, 0, 0); gl.setSpacing(4)
         gl.addWidget(QLabel("多组比对"))
         self.group_list = QListWidget()
         self.group_list.setStyleSheet("background:#111;color:#FFF;border:1px solid #333;border-radius:4px;font-size:11px;")
-        self.group_list.setMaximumHeight(120)
+        self.group_list.setMaximumHeight(100)
         gl.addWidget(self.group_list)
         gr = QHBoxLayout()
-        self.btn_add_group = _btn("添加当前", "#4AE54A", 26)
-        self.btn_add_group.clicked.connect(self._add_to_group)
-        self.btn_add_group.setEnabled(False)
-        self.btn_del_group = _btn("删除", "#FF4444", 26)
-        self.btn_del_group.clicked.connect(self._del_group)
-        self.btn_cross = _btn("综合分析", "#FFBA08", 26)
-        self.btn_cross.clicked.connect(self._cross_compare)
-        self.btn_cross.setEnabled(False)
-        gr.addWidget(self.btn_add_group)
-        gr.addWidget(self.btn_del_group)
-        gr.addWidget(self.btn_cross)
+        self.btn_add_g = _btn("添加当前", "#4AE54A", 24); self.btn_add_g.clicked.connect(self._add_to_group); self.btn_add_g.setEnabled(False)
+        self.btn_del_g = _btn("删除", "#FF4444", 24); self.btn_del_g.clicked.connect(self._del_group)
+        self.btn_cross = _btn("综合分析", "#FFBA08", 24); self.btn_cross.clicked.connect(self._cross_compare); self.btn_cross.setEnabled(False)
+        self.btn_load_multi = _btn("批量加载", "#4A90D9", 24); self.btn_load_multi.clicked.connect(self._load_multi_annotations)
+        gr.addWidget(self.btn_add_g); gr.addWidget(self.btn_del_g); gr.addWidget(self.btn_cross); gr.addWidget(self.btn_load_multi)
         gl.addLayout(gr)
         self.cross_text = QTextEdit()
         self.cross_text.setReadOnly(True)
-        self.cross_text.setStyleSheet("background:#111;color:#FFBA08;border:1px solid #333;"
-                                      "border-radius:6px;font-size:11px;font-family:'Consolas','Microsoft YaHei';")
+        self.cross_text.setStyleSheet("background:#111;color:#FFBA08;border:1px solid #333;border-radius:6px;font-size:11px;font-family:'Consolas','Microsoft YaHei';")
         gl.addWidget(self.cross_text, 1)
-        bot_splitter.addWidget(group_w)
-
-        bot_splitter.setStretchFactor(0, 3)
-        bot_splitter.setStretchFactor(1, 2)
-        bl.addWidget(bot_splitter)
+        bs.addWidget(gw)
+        bs.setStretchFactor(0, 3); bs.setStretchFactor(1, 2)
+        bl.addWidget(bs)
         splitter.addWidget(bot)
-
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 3)
-        splitter.setStretchFactor(2, 3)
-
+        splitter.setStretchFactor(0, 0); splitter.setStretchFactor(1, 3); splitter.setStretchFactor(2, 3)
         root.addWidget(splitter)
-        self.resize(900, 1000)
-
-    # ── 工具方法 ──
+        self.resize(920, 1000)
 
     def _cbox(self, items):
         c = QComboBox()
         for k, v in items.items():
             c.addItem(v, userData=k)
-        c.setStyleSheet(_cs())
-        c.setFixedHeight(28)
-        return c
+        c.setStyleSheet(_cs()); c.setFixedHeight(28); return c
 
     def _ck(self, c):
         return c.itemData(c.currentIndex()) or c.currentText().lower()
@@ -559,76 +465,240 @@ class MainWindow(QWidget):
     def _show_help(self):
         HelpDialog(self).exec_()
 
-    # ── 图片选择 ──
-
-    def _pick_base(self):
-        f, _ = QFileDialog.getOpenFileName(self, "选择基线图", str(SAVE_DIR), "Images (*.png *.jpg *.bmp)")
-        if f:
-            self.base_path = f
-            self.base_lb.setText(f"基线: {os.path.basename(f)}")
-            self.base_lb.setStyleSheet("color:#4AE54A;font-size:12px;")
-
-    def _pick_result(self):
-        f, _ = QFileDialog.getOpenFileName(self, "选择结果图", str(SAVE_DIR), "Images (*.png *.jpg *.bmp)")
-        if f:
-            self.result_path = f
-            self.result_lb.setText(f"结果: {os.path.basename(f)}")
-            self.result_lb.setStyleSheet("color:#4AE54A;font-size:12px;")
-
-    # ── 分析 ──
-
-    def _analyze(self):
-        if not self.base_path or not self.result_path:
-            QMessageBox.warning(self, "错误", "请先选择基线图和结果图")
-            return
-        self._base_img = cv2.imread(self.base_path)
-        self._result_img = cv2.imread(self.result_path)
-        if self._base_img is None or self._result_img is None:
-            QMessageBox.warning(self, "错误", "图片加载失败")
-            return
-
+    def _read_config(self):
         self._gun_name = self._ck(self.c_gun)
         self._acc_code = self._acc()
         self.acc_lb.setText(f"配件码: {self._acc_code}")
-
-        scope_name = self._ck(self.c_scope)
-        pose = self._ck(self.c_pose)
-
-        # 从 config.json 读取灵敏度
-        self._scope_val = self._sensitivity_cfg.get(scope_name, 1.0)
-
-        # 从枪械 JSON 读取姿态系数
+        self._scope_val = self._sensitivity_cfg.get(self._ck(self.c_scope), 1.0)
         self._pose_val = 1.0
         gp = Path(self._gun_data_dir) / f"{self._gun_name}.json"
         if gp.exists():
             try:
                 with open(gp, encoding='utf-8') as f:
-                    self._pose_val = json.load(f).get(pose, 1)
+                    self._pose_val = json.load(f).get(self._ck(self.c_pose), 1)
             except Exception:
                 pass
-
         self.info_lb.setText(f"灵敏度={self._scope_val}  姿势={self._pose_val}")
 
+    # ── 图片选择 ──
+
+    def _pick_result(self):
+        f, _ = QFileDialog.getOpenFileName(self, "选择弹痕图", str(SAVE_DIR), "Images (*.png *.jpg *.bmp)")
+        if f:
+            self.result_path = f
+            self.result_lb.setText(f"弹痕图: {os.path.basename(f)}")
+            self.result_lb.setStyleSheet("color:#4AE54A;font-size:12px;")
+
+    def _pick_template(self):
+        f, _ = QFileDialog.getOpenFileName(self, "选择弹孔模板(小图)", str(SAVE_DIR), "Images (*.png *.jpg *.bmp)")
+        if f:
+            self._template_path = f
+            self.tmpl_lb.setText(f"模板: {os.path.basename(f)}")
+            self.tmpl_lb.setStyleSheet("color:#4AE54A;font-size:11px;")
+
+    def _clear_template(self):
+        self._template_path = None
+        self.tmpl_lb.setText("模板: 无(可选)")
+        self.tmpl_lb.setStyleSheet("color:#666;font-size:11px;")
+
+    # ── 分析 ──
+
+    def _analyze(self):
+        if not self.result_path:
+            QMessageBox.warning(self, "错误", "请先选择弹痕图")
+            return
+        self._result_img = cv2.imread(self.result_path)
+        if self._result_img is None:
+            QMessageBox.warning(self, "错误", "图片加载失败")
+            return
+
+        self._read_config()
         detector = BulletDetector()
-        holes = detector.detect(self._base_img, self._result_img)
+
+        if self._template_path:
+            tmpl = cv2.imread(self._template_path)
+            if tmpl is None:
+                QMessageBox.warning(self, "错误", "模板图加载失败")
+                return
+            holes = detector.detect_with_template(self._result_img, tmpl)
+            mode = "模板匹配"
+        else:
+            holes = detector.detect_single(self._result_img)
+            mode = "单图自适应"
+
         if not holes:
-            self.result_text.setStyleSheet("background:#111;color:#FF4444;border:1px solid #333;border-radius:6px;font-size:12px;")
-            self.result_text.setText("未检测到弹痕。\n请检查：两张图是否对准同一面墙、弹痕是否清晰。")
+            self.result_text.setText(f"未检测到弹痕 ({mode})\n\n可能原因：\n1. 墙面纹理太重\n2. 弹痕不够清晰\n3. 尝试提供弹孔模板图")
             return
 
         sorted_holes = BulletSorter.sort(holes)
         self.canvas.set_data(self._result_img, sorted_holes)
-        self.info_lb.setText(f"灵敏度={self._scope_val}  姿势={self._pose_val}  |  {len(sorted_holes)} 个弹痕")
-
+        self.info_lb.setText(f"灵敏度={self._scope_val}  姿势={self._pose_val}  |  {mode} 检测到 {len(sorted_holes)} 个弹痕")
         self._update_results()
-        self.btn_save_img.setEnabled(True)
-        self.btn_add_group.setEnabled(True)
+        self.btn_save.setEnabled(True)
+        self.btn_add_g.setEnabled(True)
+
+    # ── 加载已有标注 ──
+
+    def _load_annotation(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "加载标注文件", str(SAVE_DIR),
+            "标注文件 (*.analysis.json);;图片文件 (*.png *.jpg *.bmp);;所有 (*)")
+        if not f:
+            return
+
+        holes, meta = AnnotationData.load(f)
+        if holes is None:
+            QMessageBox.warning(self, "错误", "无法加载标注数据。\n请选择 .analysis.json 文件或对应的图片文件。")
+            return
+
+        # 查找对应图片
+        if f.endswith('.json'):
+            img_path = AnnotationData.find_image_for_json(f)
+        else:
+            img_path = f
+
+        if img_path and os.path.exists(img_path):
+            self._result_img = cv2.imread(img_path)
+            self.result_path = img_path
+            self.result_lb.setText(f"弹痕图: {os.path.basename(img_path)}")
+            self.result_lb.setStyleSheet("color:#4AE54A;font-size:12px;")
+        else:
+            QMessageBox.warning(self, "提示", "找不到对应的原始图片，仅加载弹孔数据")
+
+        # 恢复元数据中的配置
+        if meta:
+            for key, combo in [('gun', self.c_gun), ('scope', self.c_scope)]:
+                val = meta.get(key)
+                if val:
+                    for i in range(combo.count()):
+                        if combo.itemData(i) == val:
+                            combo.setCurrentIndex(i)
+                            break
+
+        self._read_config()
+        BulletSorter.sort(holes)
+        if self._result_img is not None:
+            self.canvas.set_data(self._result_img, holes)
+        else:
+            self.canvas._holes = copy.deepcopy(holes)
+            self.canvas.update()
+
+        self.info_lb.setText(f"加载了 {len(holes)} 个弹孔标注")
+        self._update_results()
+        self.btn_save.setEnabled(True)
+        self.btn_add_g.setEnabled(True)
+
+    # ── 批量加载多张标注 ──
+
+    def _load_multi_annotations(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "批量加载标注文件", str(SAVE_DIR),
+            "标注文件 (*.analysis.json);;所有 (*)")
+        if not files:
+            return
+
+        self._read_config()
+        loaded = 0
+        for f in files:
+            holes, meta = AnnotationData.load(f)
+            if holes is None or len(holes) < 2:
+                continue
+            BulletSorter.sort(holes)
+            comparator = BulletComparator(self._gun_data_dir)
+            comp = comparator.compare(holes, self._gun_name, self._acc_code,
+                                      self._scope_val, self._pose_val)
+            if comp:
+                label = f"#{self._multi.count + 1} {Path(f).stem} ({len(holes)}孔 r={comp['avg_ratio']:.3f})"
+                self._multi.add_group(comp, label)
+                self.group_list.addItem(label)
+                loaded += 1
+
+        self.btn_cross.setEnabled(self._multi.count >= 2)
+        self.info_lb.setText(f"批量加载了 {loaded}/{len(files)} 个标注文件到比对组")
+
+    # ── 迭代修正 ──
+
+    def _iterate(self):
+        # 步骤1: 加载新弹痕图
+        img_f, _ = QFileDialog.getOpenFileName(self, "选择宏开启后的弹痕图", str(SAVE_DIR), "Images (*.png *.jpg *.bmp)")
+        if not img_f:
+            return
+        img = cv2.imread(img_f)
+        if img is None:
+            QMessageBox.warning(self, "错误", "图片加载失败")
+            return
+
+        # 步骤2: 加载上一轮修正参数
+        param_f, _ = QFileDialog.getOpenFileName(self, "选择上一轮修正参数 (JSON)", str(SAVE_DIR), "JSON (*.json)")
+        if not param_f:
+            return
+        try:
+            with open(param_f, encoding='utf-8') as f:
+                prev_data = json.load(f)
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"JSON 加载失败: {e}")
+            return
+
+        prev_params = prev_data.get('corrected_uniform') or prev_data.get('corrected_per_shot') or prev_data.get('corrected_optimal')
+        if not prev_params:
+            QMessageBox.warning(self, "错误", "JSON 中找不到修正参数数组\n(需要 corrected_uniform / corrected_per_shot / corrected_optimal)")
+            return
+
+        self._read_config()
+
+        # 检测弹痕
+        detector = BulletDetector()
+        holes = detector.detect_single(img)
+        if not holes:
+            QMessageBox.warning(self, "提示", "未检测到弹痕，尝试使用模板匹配")
+            return
+
+        sorted_holes = BulletSorter.sort(holes)
+        self._result_img = img
+        self.result_path = img_f
+        self.canvas.set_data(img, sorted_holes)
+
+        # 迭代修正
+        chunk = prev_data.get('chunk_size', 12)
+        correction = IterativeCorrector.correct(
+            sorted_holes, prev_params, self._scope_val, self._pose_val, chunk)
+
+        if not correction:
+            self.result_text.setText("迭代修正失败：弹孔不足或参数无效")
+            return
+
+        text = f"{'═' * 55}\n"
+        text += f"  迭代修正结果  ({len(sorted_holes)} 个弹孔)\n"
+        text += f"{'═' * 55}\n"
+        text += f"  平均残差: {correction['avg_residual_dy']:.1f}px  最大: {correction['max_residual_dy']:.1f}px\n\n"
+
+        text += f"  {'发':>3} {'残差Y':>8} {'残差X':>8} {'调整px':>8} {'调整原值':>8}\n"
+        text += f"  {'─' * 48}\n"
+        for r in correction['residuals']:
+            text += f"  {r['shot']:>3} {r['dy']:>8.1f} {r['dx']:>8.1f} {r['adjustment_px']:>8.1f} {r['adjustment_raw']:>8.2f}\n"
+
+        text += f"\n  ═══ 迭代修正后参数 ═══\n\n"
+        arr = correction['corrected_params']
+        formatted = ParameterCorrector.format_array_for_json(arr)
+        acc = prev_data.get('acc_code', self._acc_code)
+        text += f'    "{acc}": {formatted}\n'
+
+        self.result_text.setText(text)
+        self._last_correction = {'corrected_uniform': arr, 'acc_code': acc, 'chunk_size': chunk}
+        self.btn_copy.setEnabled(True)
+        self.btn_save.setEnabled(True)
+
+        # 保存迭代修正结果
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        out = SAVE_DIR / f"{ts}_iteration.json"
+        with open(out, 'w', encoding='utf-8') as f:
+            json.dump(correction, f, indent=2, ensure_ascii=False)
+        self.info_lb.setText(f"迭代修正完成，结果保存到 {out.name}")
 
     def _on_holes_changed(self):
         self._update_results()
 
     def _update_results(self):
-        """统一更新分析结果 + 修正参数（合并展示）"""
         holes = self.canvas.get_holes()
         if len(holes) < 2:
             self.result_text.setText(f"弹孔不足（当前 {len(holes)} 个，至少 2 个）")
@@ -639,185 +709,122 @@ class MainWindow(QWidget):
         comp = comparator.compare(holes, self._gun_name, self._acc_code,
                                   self._scope_val, self._pose_val)
 
-        text = f"{'═' * 60}\n"
-        text += f"  弹痕分析 + 修正参数  ({len(holes)} 个弹孔)\n"
-        text += f"{'═' * 60}\n"
+        text = f"{'═' * 60}\n  弹痕分析 + 修正参数  ({len(holes)} 个弹孔)\n{'═' * 60}\n"
         text += f"  枪械: {self._gun_name}   配件码: {self._acc_code}\n"
         text += f"  灵敏度: {self._scope_val}   姿势系数: {self._pose_val}\n\n"
 
         if not comp:
             gp = Path(self._gun_data_dir) / f"{self._gun_name}.json"
-            text += f"  ⚠ 无法对比理论数据\n\n"
-            text += f"  数据目录: {self._gun_data_dir}\n"
-            text += f"  文件: {gp}\n"
-            text += f"  存在: {'✅' if gp.exists() else '❌'}\n"
+            text += f"  ⚠ 无法对比理论数据\n  文件: {gp} ({'存在' if gp.exists() else '不存在'})\n"
             if gp.exists():
                 try:
                     with open(gp, encoding='utf-8') as f:
                         data = json.load(f)
                     text += f"  可用配件码: {', '.join(k for k in data if k.startswith('A'))}\n"
-                except Exception as e:
-                    text += f"  读取失败: {e}\n"
+                except Exception:
+                    pass
             self.result_text.setText(text)
             self.btn_copy.setEnabled(False)
             return
 
-        # ── 对比表 ──
         text += f"  {'发':>3} {'实际px':>8} {'理论px':>8} {'原值':>6} {'比值':>8} {'X漂':>5} {'状态'}\n"
         text += f"  {'─' * 56}\n"
         for d in comp['details']:
-            r_str = f"{d['ratio']:.4f}" if d['ratio'] is not None else "  N/A"
-            text += (f"  {d['shot']:>3} {d['actual_dy']:>8.1f} {d['theory_dy']:>8.1f} "
-                     f"{d['raw_chunk_sum']:>6.1f} {r_str:>8} {d['x_drift']:>+5.0f}  {d['status']}\n")
+            r_s = f"{d['ratio']:.4f}" if d['ratio'] is not None else "  N/A"
+            text += f"  {d['shot']:>3} {d['actual_dy']:>8.1f} {d['theory_dy']:>8.1f} {d['raw_chunk_sum']:>6.1f} {r_s:>8} {d['x_drift']:>+5.0f}  {d['status']}\n"
         text += f"  {'─' * 56}\n"
         text += f"  平均比值: {comp['avg_ratio']:.4f}   标准差: {comp['std_ratio']:.4f}\n"
         text += f"  建议灵敏度: {comp['suggested_scope']}\n\n"
 
-        # ── 水平漂移 ──
-        text += f"  ─── 水平漂移分析 ───\n"
-        text += f"  均值: {comp['avg_horizontal_drift']:+.1f}px  "
-        text += f"标准差: {comp['std_horizontal_drift']:.1f}px  "
-        text += f"最大: {comp['max_horizontal_drift']:.1f}px\n"
-        std_dx = comp.get('std_horizontal_drift', 0)
-        avg_dx = abs(comp.get('avg_horizontal_drift', 0))
+        text += f"  ─── 水平漂移 ───\n"
+        text += f"  均值: {comp['avg_horizontal_drift']:+.1f}px  σ: {comp['std_horizontal_drift']:.1f}px  最大: {comp['max_horizontal_drift']:.1f}px\n"
+        std_dx, avg_dx = comp.get('std_horizontal_drift', 0), abs(comp.get('avg_horizontal_drift', 0))
         if std_dx > avg_dx * 1.5 and avg_dx < 3:
-            text += f"  结论: 水平漂移以随机分量为主(σ={std_dx:.1f})，无法通过固定值补偿\n"
-            text += f"  建议: 使用垂直握把/补偿器减少水平后坐力，或接受随机性\n"
+            text += f"  → 随机性为主(σ={std_dx:.1f})，不建议固定补偿\n\n"
         else:
-            text += f"  结论: 存在系统性水平偏移({comp['avg_horizontal_drift']:+.1f}px)，可添加X补偿\n"
-        text += "\n"
+            text += f"  → 系统性偏移({comp['avg_horizontal_drift']:+.1f}px)，可添加X补偿\n\n"
 
-        # ── 修正参数 ──
         corrector = ParameterCorrector(self._gun_data_dir)
         correction = corrector.correct(comp, self._gun_name, self._acc_code, use_float=True)
-
         if correction:
-            text += f"  ═══ 修正后压枪参数 (比值={correction['avg_ratio']:.4f}) ═══\n"
-            text += f"  复制下方内容替换到 {self._gun_name}.json 的 \"{correction['acc_code']}\" 字段:\n\n"
-
-            patch_uniform = corrector.generate_patch_json(correction, mode='uniform')
-            text += f"  方案一（均匀修正，所有值×{correction['avg_ratio']:.4f}）:\n"
-            text += patch_uniform + "\n\n"
-
-            patch_per = corrector.generate_patch_json(correction, mode='per_shot')
-            text += f"  方案二（逐发修正，每发用独立比值）:\n"
-            text += patch_per + "\n"
-
-            # X补偿建议
-            xc = correction.get('x_compensation')
-            if xc and xc['type'] == 'compensatable':
-                text += f"\n  ─── X轴补偿建议 ───\n"
-                text += f"  {xc['suggestion']}\n"
-                text += f"  注意: 需修改 Process.py 的 mouse_R(0, recoil) 为 mouse_R(x, recoil)\n"
-
+            text += f"  ═══ 修正参数 (r={correction['avg_ratio']:.4f}) ═══\n"
+            text += f"  替换到 {self._gun_name}.json 的 \"{correction['acc_code']}\":\n\n"
+            text += corrector.generate_patch_json(correction, 'uniform') + "\n"
             self._last_correction = correction
             self.btn_copy.setEnabled(True)
         else:
-            text += "  ⚠ 无法生成修正参数\n"
             self._last_correction = None
             self.btn_copy.setEnabled(False)
 
-        self.result_text.setStyleSheet("background:#111;color:#4AE54A;border:1px solid #333;"
-                                       "border-radius:6px;font-size:12px;font-family:'Consolas','Microsoft YaHei';")
+        self.result_text.setStyleSheet("background:#111;color:#4AE54A;border:1px solid #333;border-radius:6px;font-size:12px;font-family:'Consolas','Microsoft YaHei';")
         self.result_text.setText(text)
 
-    # ── 保存标注图 ──
-
     def _save_annotation(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "保存标注图", str(SAVE_DIR / "annotated.png"), "Images (*.png *.jpg *.bmp)")
+        path, _ = QFileDialog.getSaveFileName(self, "保存标注图", str(SAVE_DIR / "annotated.png"), "Images (*.png *.jpg)")
         if path:
+            meta = {'gun': self._gun_name, 'acc': self._acc_code,
+                    'scope': self._scope_val, 'posture': self._pose_val}
             if self.canvas.save_annotation_image(path):
-                self.info_lb.setText(f"标注图已保存: {os.path.basename(path)}")
-            else:
-                QMessageBox.warning(self, "错误", "保存失败，画布无数据")
-
-    # ── 复制参数 ──
+                AnnotationData.save(path, self.canvas.get_holes(), meta)
+                self.info_lb.setText(f"标注图+数据已保存: {os.path.basename(path)}")
 
     def _copy_output(self):
-        if hasattr(self, '_last_correction') and self._last_correction:
-            corrector = ParameterCorrector(self._gun_data_dir)
-            patch = corrector.generate_patch_json(self._last_correction, mode='uniform')
+        if self._last_correction:
+            patch = ParameterCorrector.generate_patch_json(self._last_correction, 'uniform')
             QApplication.clipboard().setText(patch)
-            self.info_lb.setText("均匀修正参数已复制到剪贴板")
-
-    # ── 多组比对 ──
+            self.info_lb.setText("修正参数已复制")
 
     def _add_to_group(self):
         holes = self.canvas.get_holes()
         if len(holes) < 2:
             return
-
         comparator = BulletComparator(self._gun_data_dir)
-        comp = comparator.compare(holes, self._gun_name, self._acc_code,
-                                  self._scope_val, self._pose_val)
+        comp = comparator.compare(holes, self._gun_name, self._acc_code, self._scope_val, self._pose_val)
         if not comp:
-            QMessageBox.warning(self, "提示", "当前无有效比对数据")
             return
-
         label = f"#{self._multi.count + 1} {self._gun_name} {self._acc_code} ({len(holes)}孔 r={comp['avg_ratio']:.3f})"
         self._multi.add_group(comp, label)
         self.group_list.addItem(label)
         self.btn_cross.setEnabled(self._multi.count >= 2)
-        self.info_lb.setText(f"已添加第 {self._multi.count} 组数据")
+        self.info_lb.setText(f"已添加第 {self._multi.count} 组")
 
     def _del_group(self):
         row = self.group_list.currentRow()
         if row >= 0:
-            self._multi.remove_group(row)
-            self.group_list.takeItem(row)
+            self._multi.remove_group(row); self.group_list.takeItem(row)
             self.btn_cross.setEnabled(self._multi.count >= 2)
 
     def _cross_compare(self):
         if self._multi.count < 2:
             return
-
         analysis = self._multi.analyze()
         if not analysis:
             return
 
-        text = f"{'═' * 50}\n"
-        text += f"  综合分析  ({analysis['n_groups']} 组数据)\n"
-        text += f"{'═' * 50}\n\n"
+        text = f"{'═' * 50}\n  综合分析  ({analysis['n_groups']} 组)\n{'═' * 50}\n\n"
+        text += f"  各组: " + "  ".join(f"{r:.4f}" for r in analysis['group_ratios']) + "\n"
+        text += f"  最优: {analysis['overall_avg_ratio']:.4f}  σ={analysis['overall_std_ratio']:.4f}  [{analysis['confidence']}]\n\n"
 
-        text += f"  各组比值: "
-        for i, (label, ratio) in enumerate(zip(analysis['group_labels'], analysis['group_ratios'])):
-            text += f"{ratio:.4f}  "
-        text += "\n\n"
-
-        text += f"  最优比值: {analysis['overall_avg_ratio']:.4f}  (去除{analysis['n_outliers_removed']}个离群值)\n"
-        text += f"  标准差: {analysis['overall_std_ratio']:.4f}\n"
-        text += f"  置信度: {analysis['confidence']}\n"
-        text += f"  水平漂移: 均值{analysis['overall_avg_x_drift']:+.1f}  σ={analysis['overall_std_x_drift']:.1f}\n\n"
-
-        text += f"  {'发':>3} {'N组':>4} {'均值':>8} {'σ':>8} {'最小':>8} {'最大':>8} {'X漂移':>7}\n"
-        text += f"  {'─' * 52}\n"
+        text += f"  {'发':>3} {'N':>3} {'均值':>8} {'σ':>8} {'X漂':>6}\n  {'─' * 36}\n"
         for s in analysis['interval_stats']:
-            if s is None:
-                continue
-            text += (f"  {s['interval']:>3} {s['n_groups']:>4} {s['avg_ratio']:>8.4f} "
-                     f"{s['std_ratio']:>8.4f} {s['min_ratio']:>8.4f} {s['max_ratio']:>8.4f} "
-                     f"{s['avg_x_drift']:>+6.1f}\n")
+            if s:
+                text += f"  {s['interval']:>3} {s['n_groups']:>3} {s['avg_ratio']:>8.4f} {s['std_ratio']:>8.4f} {s['avg_x_drift']:>+5.1f}\n"
 
-        # 生成最优修正参数
-        optimal = self._multi.generate_optimal_correction(
-            self._gun_name, self._acc_code, self._gun_data_dir)
+        optimal = self._multi.generate_optimal_correction(self._gun_name, self._acc_code, self._gun_data_dir)
         if optimal:
             arr = optimal['corrected_optimal']
-            key = optimal['acc_code']
             formatted = ParameterCorrector.format_array_for_json(arr)
-            text += f"\n  ═══ 最优修正参数（基于{analysis['n_groups']}组逐发平均）═══\n\n"
-            text += f'    "{key}": {formatted}\n'
+            text += f"\n  ═══ 最优参数 ═══\n\n    \"{optimal['acc_code']}\": {formatted}\n"
 
         self.cross_text.setText(text)
 
 
 if __name__ == '__main__':
     import traceback
-    def excepthook(etype, value, tb):
-        err = ''.join(traceback.format_exception(etype, value, tb))
+    def excepthook(t, v, tb):
+        err = ''.join(traceback.format_exception(t, v, tb))
         try:
-            QMessageBox.critical(None, '程序崩溃', f'出错了:\n\n{err}')
+            QMessageBox.critical(None, '崩溃', err)
         except Exception:
             print(err)
     sys.excepthook = excepthook
