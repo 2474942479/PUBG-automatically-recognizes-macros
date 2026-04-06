@@ -56,10 +56,13 @@ class BulletCanvas(QWidget):
     """可缩放/拖拽的弹孔标注画布
 
     操作说明:
-      滚轮  — 缩放
-      中键拖  — 平移画布
-      左键拖  — 移动弹孔 (标注模式) / 画 ROI 框 (选区模式)
-      右键   — 添加/删除弹孔 (标注模式) / 清除选区 (选区模式)
+      左键空白  — 添加弹孔
+      左键弹孔  — 选中并拖动
+      右键弹孔  — 删除弹孔
+      Shift+左键拖 — 框选批量删除
+      Delete键  — 删除选中弹孔
+      滚轮     — 缩放
+      中键拖   — 平移画布
     """
     holes_changed = pyqtSignal()
 
@@ -72,11 +75,16 @@ class BulletCanvas(QWidget):
         self._pan_start = None
         self._selected = -1
         self._drag_start = None
+        self._just_added = False
 
         # ROI 选区
         self._roi_mode = False
-        self._roi = None            # (x,y,w,h) in image coords
-        self._roi_draw_start = None  # in image coords
+        self._roi = None
+        self._roi_draw_start = None
+
+        # 框选删除
+        self._box_del_start = None
+        self._box_del_rect = None
 
         self.setMinimumSize(400, 400)
         self.setMouseTracking(True)
@@ -91,10 +99,15 @@ class BulletCanvas(QWidget):
         self.update()
 
     def set_data(self, holes, pixmap=None):
-        self._holes = holes or []
+        self._holes = list(holes) if holes else []
         self._selected = -1
-        if pixmap:
+        self._box_del_start = None
+        self._box_del_rect = None
+        if pixmap is not None:
             self._pixmap = pixmap
+            self._zoom = min(self.width() / max(1, pixmap.width()),
+                             self.height() / max(1, pixmap.height())) if pixmap.width() > 0 else 1.0
+            self._offset = QPointF(0, 0)
         self.update()
 
     def get_holes(self):
@@ -153,7 +166,10 @@ class BulletCanvas(QWidget):
         if self._pixmap is None:
             p.setPen(Qt.white)
             p.drawText(self.rect(), Qt.AlignCenter,
-                       "加载弹痕截图后在此标注\n右键: 添加弹孔    左键拖: 移动    滚轮: 缩放")
+                       "加载弹痕截图后在此标注\n"
+                       "左键: 添加弹孔    右键: 删除弹孔\n"
+                       "Shift+拖拽: 框选删除    Delete: 删除选中\n"
+                       "滚轮: 缩放    中键拖: 平移")
             return
 
         p.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -199,10 +215,23 @@ class BulletCanvas(QWidget):
             p.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
             p.drawRect(QRectF(tl, br))
 
+        # 绘制框选删除区域
+        if self._box_del_rect:
+            bx, by, bw, bh = self._box_del_rect
+            tl = self._to_widget(bx, by)
+            br = self._to_widget(bx + bw, by + bh)
+            p.setPen(QPen(QColor(255, 50, 50), 2, Qt.DashLine))
+            p.setBrush(QBrush(QColor(255, 0, 0, 40)))
+            p.drawRect(QRectF(tl, br))
+            p.setBrush(Qt.NoBrush)
+
         # 模式提示
         if self._roi_mode:
             p.setPen(QColor(0, 255, 0))
             p.drawText(10, 20, "选区模式: 左键拖画框, 右键取消")
+        elif self._box_del_start:
+            p.setPen(QColor(255, 50, 50))
+            p.drawText(10, 20, "框选删除: 松开鼠标删除框内弹孔")
 
     def wheelEvent(self, e):
         old_zoom = self._zoom
@@ -229,38 +258,49 @@ class BulletCanvas(QWidget):
             if self._roi_mode:
                 self._roi_draw_start = (int(ix), int(iy))
                 self._roi = None
+                return
+
+            if e.modifiers() & Qt.ShiftModifier:
+                self._box_del_start = (int(ix), int(iy))
+                self._box_del_rect = None
+                return
+
+            idx = self._find_hole_at(e.x(), e.y())
+            if idx >= 0:
+                self._selected = idx
+                self._drag_start = (e.x(), e.y())
+                self._just_added = False
             else:
-                idx = self._find_hole_at(e.x(), e.y())
-                if idx >= 0:
-                    self._selected = idx
-                    self._drag_start = (e.x(), e.y())
-                else:
-                    self._selected = -1
-                self.update()
+                self._holes.append({'x': int(ix), 'y': int(iy), 'area': 100,
+                                    'circularity': 1.0, 'color_diff': 50})
+                BulletSorter.sort(self._holes)
+                self._selected = -1
+                self._just_added = True
+                self.holes_changed.emit()
+            self.update()
 
         elif e.button() == Qt.RightButton:
             if self._roi_mode:
                 self._roi = None
                 self.update()
                 return
-            menu = QMenu(self)
-            add_act = menu.addAction("在此添加弹孔")
-            del_act = None
-            if self._selected >= 0:
-                del_act = menu.addAction("删除选中弹孔")
-            act = menu.exec_(e.globalPos())
-            if act == add_act:
-                self._holes.append({'x': int(ix), 'y': int(iy), 'area': 100,
-                                    'circularity': 1.0, 'color_diff': 50})
-                BulletSorter.sort(self._holes)
-                self.holes_changed.emit()
-                self.update()
-            elif del_act and act == del_act:
-                self._holes.pop(self._selected)
+
+            idx = self._find_hole_at(e.x(), e.y())
+            if idx >= 0:
+                self._holes.pop(idx)
                 self._selected = -1
                 BulletSorter.sort(self._holes)
                 self.holes_changed.emit()
                 self.update()
+            else:
+                menu = QMenu(self)
+                clear_act = menu.addAction("清除所有弹孔")
+                act = menu.exec_(e.globalPos())
+                if act == clear_act:
+                    self._holes.clear()
+                    self._selected = -1
+                    self.holes_changed.emit()
+                    self.update()
 
     def mouseMoveEvent(self, e):
         if self._pan_start:
@@ -278,6 +318,14 @@ class BulletCanvas(QWidget):
             self.update()
             return
 
+        if self._box_del_start:
+            ix, iy = self._to_image(e.x(), e.y())
+            sx, sy = self._box_del_start
+            self._box_del_rect = (min(sx, int(ix)), min(sy, int(iy)),
+                                  abs(int(ix) - sx), abs(int(iy) - sy))
+            self.update()
+            return
+
         if self._drag_start and self._selected >= 0:
             ix, iy = self._to_image(e.x(), e.y())
             self._holes[self._selected]['x'] = int(ix)
@@ -292,11 +340,31 @@ class BulletCanvas(QWidget):
                 self._roi_draw_start = None
                 self._roi_mode = False
                 self.update()
+            elif self._box_del_start:
+                if self._box_del_rect:
+                    bx, by, bw, bh = self._box_del_rect
+                    before = len(self._holes)
+                    self._holes = [h for h in self._holes
+                                   if not (bx <= h['x'] <= bx + bw and by <= h['y'] <= by + bh)]
+                    if len(self._holes) < before:
+                        BulletSorter.sort(self._holes)
+                        self.holes_changed.emit()
+                self._box_del_start = None
+                self._box_del_rect = None
+                self.update()
             elif self._drag_start and self._selected >= 0:
                 self._drag_start = None
                 BulletSorter.sort(self._holes)
                 self.holes_changed.emit()
                 self.update()
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self._selected >= 0:
+            self._holes.pop(self._selected)
+            self._selected = -1
+            BulletSorter.sort(self._holes)
+            self.holes_changed.emit()
+            self.update()
 
 
 # ═══════════════════════════════════════════
@@ -515,6 +583,43 @@ def _build_result_html(comparison, correction):
             </tr>"""
         html += "</table>"
 
+    # 计算公式展示
+    chunk_f = comparison.get('chunk_size_f', '?')
+    fi_ms = comparison.get('fire_interval_ms', '?')
+    scope_v = comparison.get('scope_val', 1.0)
+    pose_v = comparison.get('posture_val', 1.0)
+    d0 = details[0] if details else {}
+
+    html += f"""
+    <h3 style="margin-top:12px;">计算过程 (px ↔ GunData 映射)</h3>
+    <div style="background:#222; padding:8px; font-size:12px; color:#bbb; line-height:1.8;">
+      <p><b>核心公式</b>: mouse_move = round(posture × (GunData值 × scope))</p>
+      <p><b>宏运行方式</b>: 每 9ms 读取一个 GunData 数组元素, 移动鼠标</p>
+      <hr style="border-color:#444;">
+      <p>① <b>chunk_f</b> = 射击间隔 ÷ tick间隔 = {fi_ms}ms ÷ 9ms = <b>{chunk_f}</b> 个元素/发</p>
+      <p>② <b>theory_dy</b> = Σ GunData[i×{chunk_f} : (i+1)×{chunk_f}] × scope({scope_v}) × posture({pose_v})</p>
+      <p>③ <b>actual_dy</b> = 上一发弹孔.y − 下一发弹孔.y (像素, 正值=弹痕上移=后坐力)</p>
+      <p>④ <b>ratio</b> = actual_dy ÷ theory_dy</p>
+      <p style="margin-top:4px;">   ratio &gt; 1 → 实际后坐力 &gt; 宏的补偿量 → <span style="color:#ff4444;">补偿偏弱</span></p>
+      <p>   ratio &lt; 1 → 实际后坐力 &lt; 宏的补偿量 → <span style="color:#ff8800;">补偿偏强</span></p>
+      <p>⑤ <b>corrected[j]</b> = original[j] × avg_ratio({avg:.4f})</p>
+    """
+
+    if d0:
+        html += f"""
+      <hr style="border-color:#444;">
+      <p><b>第1发示例</b>: actual_dy={d0.get('actual_dy', '?')}px, """
+        html += f"raw_chunk_sum={d0.get('raw_chunk_sum', '?')}, "
+        html += f"theory_dy={d0.get('raw_chunk_sum', 0)}×{scope_v}×{pose_v}={d0.get('theory_dy', '?')}px, "
+        r0 = d0.get('ratio')
+        html += f"ratio={r0:.3f}</p>" if r0 else "ratio=N/A</p>"
+
+    html += f"""
+      <hr style="border-color:#444;">
+      <p style="color:#aaa;">scope=1.0 时, 修正后的 GunData 值已包含灵敏度因子, 可直接替换原始数据使用</p>
+    </div>
+    """
+
     # 修正参数
     if correction:
         patch = ParameterCorrector.generate_patch_json(correction, 'uniform')
@@ -608,6 +713,10 @@ class MainWindow(QWidget):
         self._last_detector = None
         self._current_project_path = None
 
+        # 多图管理: [{path, img, holes, comparison, correction}]
+        self._image_list = []
+        self._current_img_idx = -1
+
         # 多组比对
         self._multi = MultiGroupAnalyzer()
 
@@ -623,6 +732,19 @@ class MainWindow(QWidget):
         # ─── 左侧: 画布 ───
         left = QVBoxLayout()
 
+        # 图片切换栏
+        img_bar = QHBoxLayout()
+        img_bar.addWidget(QLabel("图片:"))
+        self.img_combo = QComboBox()
+        self.img_combo.setSizePolicy(self.img_combo.sizePolicy().horizontalPolicy(),
+                                     self.img_combo.sizePolicy().verticalPolicy())
+        self.img_combo.setMinimumWidth(200)
+        img_bar.addWidget(self.img_combo, 1)
+        self.btn_del_img = QPushButton("移除")
+        self.btn_del_img.setMaximumWidth(60)
+        img_bar.addWidget(self.btn_del_img)
+        left.addLayout(img_bar)
+
         # 画布
         self.canvas = BulletCanvas()
         left.addWidget(self.canvas, 1)
@@ -632,9 +754,12 @@ class MainWindow(QWidget):
         self.btn_roi = QPushButton("框选区域")
         self.btn_roi.setCheckable(True)
         self.btn_clear_roi = QPushButton("清除选区")
+        self.lbl_holes_count = QLabel("弹孔: 0")
+        self.lbl_holes_count.setStyleSheet("color: #aaa;")
         cv_bar.addWidget(self.btn_roi)
         cv_bar.addWidget(self.btn_clear_roi)
         cv_bar.addStretch()
+        cv_bar.addWidget(self.lbl_holes_count)
         left.addLayout(cv_bar)
 
         # ─── 右侧: 配置 + 结果 ───
@@ -696,9 +821,13 @@ class MainWindow(QWidget):
         self.btn_analyze = QPushButton("分析参数")
         self.btn_analyze.setStyleSheet("font-weight:bold; background:#22aa44; color:white; padding:6px;")
 
+        self.btn_analyze_all = QPushButton("分析全部")
+        self.btn_analyze_all.setStyleSheet("font-weight:bold; background:#22aa88; color:white; padding:6px;")
+
         btn_layout.addWidget(self.btn_load, 0, 0)
         btn_layout.addWidget(self.btn_detect, 0, 1)
         btn_layout.addWidget(self.btn_analyze, 0, 2)
+        btn_layout.addWidget(self.btn_analyze_all, 0, 3)
 
         self.btn_save = QPushButton("保存项目")
         self.btn_load_proj = QPushButton("加载项目")
@@ -706,10 +835,10 @@ class MainWindow(QWidget):
         self.btn_iterate.setStyleSheet("background:#886622; color:white; padding:6px;")
         self.btn_debug = QPushButton("检测过程")
 
-        btn_layout.addWidget(self.btn_save, 0, 3)
-        btn_layout.addWidget(self.btn_load_proj, 1, 0)
-        btn_layout.addWidget(self.btn_iterate, 1, 1)
-        btn_layout.addWidget(self.btn_debug, 1, 2)
+        btn_layout.addWidget(self.btn_save, 1, 0)
+        btn_layout.addWidget(self.btn_load_proj, 1, 1)
+        btn_layout.addWidget(self.btn_iterate, 1, 2)
+        btn_layout.addWidget(self.btn_debug, 1, 3)
 
         right.addLayout(btn_layout)
 
@@ -784,6 +913,7 @@ class MainWindow(QWidget):
         self.btn_load.clicked.connect(self._pick_result)
         self.btn_detect.clicked.connect(self._detect)
         self.btn_analyze.clicked.connect(self._analyze_only)
+        self.btn_analyze_all.clicked.connect(self._analyze_all_images)
         self.btn_save.clicked.connect(self._save_project)
         self.btn_load_proj.clicked.connect(self._load_project)
         self.btn_iterate.clicked.connect(self._iterate)
@@ -794,6 +924,9 @@ class MainWindow(QWidget):
         self.btn_roi.toggled.connect(self.canvas.set_roi_mode)
         self.btn_clear_roi.clicked.connect(self._clear_roi)
 
+        self.img_combo.currentIndexChanged.connect(self._switch_image)
+        self.btn_del_img.clicked.connect(self._remove_current_image)
+
         self.btn_add_group.clicked.connect(self._add_to_group)
         self.btn_load_multi.clicked.connect(self._load_multi)
         self.btn_del_group.clicked.connect(self._del_group)
@@ -802,7 +935,6 @@ class MainWindow(QWidget):
 
         self.canvas.holes_changed.connect(self._on_holes_changed)
 
-        # 配置 combo 变更 → 即时刷新 (Phase 5)
         for combo in [self.c_gun, self.c_scope, self.c_muzzle, self.c_grip, self.c_stock, self.c_pose]:
             combo.currentIndexChanged.connect(self._on_config_changed)
 
@@ -862,25 +994,81 @@ class MainWindow(QWidget):
     # ═══ 图片加载 ═══
 
     def _pick_result(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择弹痕截图或项目文件", "",
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择弹痕截图 (可多选) 或项目文件", "",
             "所有支持格式 (*.png *.jpg *.bmp *.calibration.json);;图片 (*.png *.jpg *.bmp);;项目文件 (*.calibration.json)")
-        if not path:
+        if not paths:
             return
 
-        if path.endswith('.calibration.json') or path.endswith('.analysis.json'):
-            self._load_project_file(path)
-            return
+        for path in paths:
+            if path.endswith('.calibration.json') or path.endswith('.analysis.json'):
+                self._load_project_file(path)
+                continue
 
-        img = cv2.imread(path)
-        if img is None:
-            QMessageBox.warning(self, "错误", f"无法读取: {path}")
+            img = cv2.imread(path)
+            if img is None:
+                self.info_lb.setText(f"无法读取: {path}")
+                continue
+
+            entry = {'path': path, 'img': img, 'holes': [],
+                     'comparison': None, 'correction': None}
+            self._image_list.append(entry)
+            self.img_combo.blockSignals(True)
+            self.img_combo.addItem(Path(path).name)
+            self.img_combo.blockSignals(False)
+
+        if self._image_list:
+            last_idx = len(self._image_list) - 1
+            self.img_combo.setCurrentIndex(last_idx)
+            self._activate_image(last_idx)
+
+    def _activate_image(self, idx):
+        """激活指定索引的图片到画布"""
+        if idx < 0 or idx >= len(self._image_list):
             return
-        self._result_img = img
-        self._result_path = path
-        pm = _cv2_to_pixmap(img)
-        self.canvas.set_image(pm)
-        self.info_lb.setText(f"已加载: {Path(path).name} ({img.shape[1]}x{img.shape[0]})")
+        self._save_current_holes()
+        self._current_img_idx = idx
+        entry = self._image_list[idx]
+        self._result_img = entry['img']
+        self._result_path = entry['path']
+        pm = _cv2_to_pixmap(entry['img'])
+        self.canvas.set_data(entry['holes'], pm)
+        self.lbl_holes_count.setText(f"弹孔: {len(entry['holes'])}")
+        h, w = entry['img'].shape[:2]
+        self.info_lb.setText(
+            f"[{idx + 1}/{len(self._image_list)}] {Path(entry['path']).name} "
+            f"({w}x{h}) | {len(entry['holes'])}个弹孔")
+
+    def _save_current_holes(self):
+        """保存当前画布弹孔到 image_list"""
+        if 0 <= self._current_img_idx < len(self._image_list):
+            self._image_list[self._current_img_idx]['holes'] = list(self.canvas.get_holes())
+
+    def _switch_image(self, idx):
+        """图片切换 combo 回调"""
+        if idx == self._current_img_idx or idx < 0:
+            return
+        self._activate_image(idx)
+
+    def _remove_current_image(self):
+        """移除当前图片"""
+        if self._current_img_idx < 0 or not self._image_list:
+            return
+        self._image_list.pop(self._current_img_idx)
+        self.img_combo.blockSignals(True)
+        self.img_combo.removeItem(self._current_img_idx)
+        self.img_combo.blockSignals(False)
+        if self._image_list:
+            new_idx = min(self._current_img_idx, len(self._image_list) - 1)
+            self._current_img_idx = -1
+            self.img_combo.setCurrentIndex(new_idx)
+            self._activate_image(new_idx)
+        else:
+            self._current_img_idx = -1
+            self._result_img = None
+            self._result_path = None
+            self.canvas.set_data([], None)
+            self.info_lb.setText("所有图片已移除")
 
     def _pick_template(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择弹孔模板", "", "图片 (*.png *.jpg *.bmp)")
@@ -947,21 +1135,68 @@ class MainWindow(QWidget):
         """基于当前已标注的弹孔, 计算修正参数 (不重新检测)"""
         holes = self.canvas.get_holes()
         if not holes:
-            QMessageBox.warning(self, "提示", "无弹孔数据。请先「检测弹孔」或从已保存项目加载")
+            QMessageBox.warning(self, "提示", "无弹孔数据。请先标注弹孔或从已保存项目加载")
             return
         self._read_config()
         if not self._gun_name:
             QMessageBox.warning(self, "提示", "请先选择枪械")
             return
         self._update_results()
+
+        if 0 <= self._current_img_idx < len(self._image_list):
+            self._image_list[self._current_img_idx]['comparison'] = self._last_comparison
+            self._image_list[self._current_img_idx]['correction'] = self._last_correction
+
         self.info_lb.setText(
             f"分析完成 | {self._gun_name} {self._acc_code} | "
             f"scope={self._scope_val} posture={self._pose_val} | "
             f"{len(holes)} 个弹孔")
 
+    def _analyze_all_images(self):
+        """分析所有已标注图片, 自动加入多组比对"""
+        if not self._image_list:
+            QMessageBox.warning(self, "提示", "无图片可分析")
+            return
+        self._read_config()
+        self._save_current_holes()
+
+        analyzed = 0
+        self._multi.clear()
+        self.group_list.clear()
+
+        for i, entry in enumerate(self._image_list):
+            if not entry['holes']:
+                continue
+            comp = BulletComparator(self._gun_data_dir).compare(
+                entry['holes'], self._gun_name, self._acc_code,
+                self._scope_val, self._pose_val)
+            if comp:
+                entry['comparison'] = comp
+                corr = ParameterCorrector(self._gun_data_dir).correct(
+                    comp, self._gun_name, self._acc_code)
+                entry['correction'] = corr
+                label = f"{Path(entry['path']).stem}"
+                self._multi.add_group(comp, label)
+                self.group_list.addItem(label)
+                analyzed += 1
+
+        if analyzed >= 2:
+            self._cross_compare()
+        elif analyzed == 1:
+            self._last_comparison = self._image_list[self._current_img_idx].get('comparison')
+            self._last_correction = self._image_list[self._current_img_idx].get('correction')
+            html = _build_result_html(self._last_comparison, self._last_correction)
+            self.result_text.setHtml(html)
+
+        self.info_lb.setText(f"已分析 {analyzed}/{len(self._image_list)} 张图片")
+
     # ═══ 结果刷新 ═══
 
     def _on_holes_changed(self):
+        holes = self.canvas.get_holes()
+        self.lbl_holes_count.setText(f"弹孔: {len(holes)}")
+        if self._current_img_idx >= 0 and self._current_img_idx < len(self._image_list):
+            self._image_list[self._current_img_idx]['holes'] = list(holes)
         self._update_results()
 
     def _update_results(self):
@@ -1076,10 +1311,25 @@ class MainWindow(QWidget):
             self._result_path = None
             pm = _cv2_to_pixmap(blank)
 
+        # 添加到多图管理
+        entry = {
+            'path': self._result_path or path,
+            'img': self._result_img if self._result_img is not None else np.zeros((600, 800, 3), dtype=np.uint8),
+            'holes': list(holes),
+            'comparison': None,
+            'correction': None,
+        }
+        self._image_list.append(entry)
+        self.img_combo.blockSignals(True)
+        self.img_combo.addItem(Path(path).stem)
+        self.img_combo.blockSignals(False)
+        self._current_img_idx = len(self._image_list) - 1
+        self.img_combo.setCurrentIndex(self._current_img_idx)
+
         self.canvas.set_data(holes, pm)
         self._current_project_path = path
+        self.lbl_holes_count.setText(f"弹孔: {len(holes)}")
 
-        # 用当前 GunData 重新分析, 确保结果与最新数据一致
         self._update_results()
 
         status_parts = [f"已加载项目: {Path(path).name} ({len(holes)}个弹孔)"]
