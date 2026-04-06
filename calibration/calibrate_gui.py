@@ -26,7 +26,7 @@ from data.fire_data import KEY_DATA
 from calibration.bullet_analysis import (
     BulletDetector, BulletSorter, BulletComparator, BulletVisualizer,
     ParameterCorrector, ProjectData, IterativeCorrector,
-    _find_gun_data_dir, _load_sensitivity_config,
+    BulletParamGenerator, _find_gun_data_dir, _load_sensitivity_config,
 )
 
 MUZZLE_CN = {
@@ -513,6 +513,77 @@ def _cv2_to_pixmap(img):
     return QPixmap.fromImage(QImage(rgb.data, w, h, w * c, QImage.Format_RGB888))
 
 
+def _build_generation_html(gen_result, acc_code='A0B0C0'):
+    """Round 1: 直接从弹痕生成压枪参数的结果展示"""
+    if not gen_result:
+        return "<p style='color:gray;'>无分析结果</p>"
+
+    g = gen_result
+    html = f"""
+    <div style="margin:8px;">
+      <h3 style="color:#44cc44; font-size:18px;">Round 1: 压枪参数生成</h3>
+      <p>枪械: <b>{g['gun_name']}</b> | 配件码: {acc_code}</p>
+      <p>弹孔: {g['n_shots']}个 → {g['n_intervals']}组间隔</p>
+      <p>射速: {g.get('rpm', '?')}RPM ({g.get('fire_interval_ms', '?')}ms/发) |
+         chunk_f: {g['chunk_f']} ({g['chunk_int']} ticks/发)</p>
+      <p>平均弹痕间距: <b>{g['avg_pixel_dy']}px</b> | 总位移: {g['total_pixel_dy']}px</p>
+    """
+
+    # 逐发明细
+    details = g.get('details', [])
+    if details:
+        html += """
+        <h4 style="margin-top:8px;">逐发数据:</h4>
+        <table style="border-collapse:collapse; font-size:13px;" width="100%">
+          <tr style="background:#444; color:white;">
+            <th style="padding:4px;">区间</th>
+            <th>像素距离</th>
+            <th>X漂移</th>
+            <th>每tick值</th>
+            <th>ticks</th>
+            <th>数组范围</th>
+          </tr>
+        """
+        for d in details:
+            html += f"""
+            <tr>
+              <td style="padding:3px; text-align:center;">{d['shot_from']}→{d['shot_to']}</td>
+              <td style="text-align:center;">{d['pixel_dy']:.2f}</td>
+              <td style="text-align:center;">{d['pixel_dx']:.2f}</td>
+              <td style="text-align:center; color:#8f8;"><b>{d['value_per_tick']}</b></td>
+              <td style="text-align:center;">{d['n_ticks']}</td>
+              <td style="text-align:center; color:#888;">{d['array_range']}</td>
+            </tr>"""
+        html += "</table>"
+
+    # 计算公式
+    html += f"""
+    <h4 style="margin-top:12px;">计算公式:</h4>
+    <div style="background:#222; padding:8px; font-size:12px; color:#bbb; line-height:1.8;">
+      <p>① pixel_dy = |上一发.y − 下一发.y| (弹痕像素间距)</p>
+      <p>② value_per_tick = pixel_dy ÷ chunk_f ÷ (scope × posture)</p>
+      <p>   = pixel_dy ÷ {g['chunk_f']} ÷ ({g['scope_val']} × {g['posture_val']})</p>
+      <p>③ 宏执行: 每 9ms 执行 mouse_R(0, round(posture × (value × scope)))</p>
+      <p>④ 一发子弹内: {g['chunk_int']} ticks × value ≈ pixel_dy → 刚好补偿后坐力</p>
+      <hr style="border-color:#444;">
+      <p style="color:#aaa;">首次生成可能不完全精确 (像素≠鼠标单位), 用"迭代修正"微调</p>
+    </div>
+    """
+
+    # 生成的数组
+    arr = g.get('generated_array', [])
+    if arr:
+        arr_json = BulletParamGenerator.format_array_for_json(arr)
+        html += f"""
+        <h4 style="margin-top:12px;">生成的压枪数据:</h4>
+        <p style="color:#aaa;">复制下方数据, 替换 GunData/{g['gun_name']}.json 中的 "{acc_code}" 数组</p>
+        <pre style="background:#222; padding:8px; overflow-x:auto; font-size:11px; color:#8f8;">"{acc_code}": {arr_json}</pre>
+        """
+
+    html += "</div>"
+    return html
+
+
 def _build_result_html(comparison, correction):
     """生成直观的 HTML 结果展示"""
     if not comparison:
@@ -728,6 +799,7 @@ class MainWindow(QWidget):
         # 分析结果缓存
         self._last_comparison = None
         self._last_correction = None
+        self._last_generation = None
         self._last_detector = None
         self._current_project_path = None
 
@@ -1069,77 +1141,83 @@ class MainWindow(QWidget):
         self.lbl_holes_count.setText(f"弹孔: {len(traj['holes'])}")
 
     def _analyze_all_trajectories(self):
-        """分析所有轨迹, 展示综合结果"""
+        """Round 1: 分析所有轨迹, 对各轨迹生成的逐发值取平均, 输出综合压枪数组"""
         self._save_current_traj_holes()
         self._read_config()
         if not self._gun_name:
             QMessageBox.warning(self, "提示", "请先选择枪械")
             return
 
-        results = []
+        gen_results = []
         for traj in self._trajectories:
-            if not traj['holes']:
+            if len(traj['holes']) < 2:
                 continue
-            comp = BulletComparator(self._gun_data_dir).compare(
-                traj['holes'], self._gun_name, self._acc_code,
-                self._scope_val, self._pose_val)
-            if comp:
-                traj['comparison'] = comp
-                corr = ParameterCorrector(self._gun_data_dir).correct(
-                    comp, self._gun_name, self._acc_code)
-                traj['correction'] = corr
-                results.append((traj['name'], comp, corr))
+            gen = BulletParamGenerator.generate(
+                traj['holes'], self._gun_name, self._scope_val, self._pose_val)
+            if gen:
+                gen_results.append((traj['name'], gen))
 
-        if not results:
-            QMessageBox.warning(self, "提示", "没有可分析的轨迹 (请先标注弹孔)")
+        if not gen_results:
+            QMessageBox.warning(self, "提示", "没有可分析的轨迹 (每条至少2个弹孔)")
             return
 
-        if len(results) == 1:
-            name, comp, corr = results[0]
-            self._last_comparison = comp
-            self._last_correction = corr
-            html = _build_result_html(comp, corr)
-            self.result_text.setHtml(html)
+        if len(gen_results) == 1:
+            name, gen = gen_results[0]
+            self._last_generation = gen
+            self._last_correction = {
+                'gun_name': self._gun_name, 'acc_code': self._acc_code,
+                'corrected_uniform': gen['generated_array'],
+                'original_array': gen['generated_array'],
+                'chunk_size': gen['chunk_int'], 'chunk_size_f': gen['chunk_f'],
+            }
+            self.result_text.setHtml(_build_generation_html(gen, self._acc_code))
         else:
-            all_ratios = []
-            html = "<h3>多轨迹综合分析</h3>"
-            for name, comp, corr in results:
-                avg = comp.get('avg_ratio', 1.0)
-                std = comp.get('std_ratio', 0)
-                n = comp.get('valid_pairs', 0)
-                all_ratios.append(avg)
-                html += f"<p><b>{name}</b>: avg_ratio={avg:.4f} std={std:.4f} ({n}对)</p>"
+            # 多轨迹: 对 pixel_dy 逐发取平均后重新生成
+            html = "<h3 style='color:#44cc44;'>多轨迹综合分析 (Round 1)</h3>"
+            all_dys = []
+            for name, gen in gen_results:
+                dys = [d['pixel_dy'] for d in gen['details']]
+                all_dys.append(dys)
+                html += f"<p><b>{name}</b>: {len(dys)}发, 平均间距 {gen['avg_pixel_dy']}px</p>"
 
-            overall_avg = sum(all_ratios) / len(all_ratios)
-            overall_std = float(np.std(all_ratios)) if len(all_ratios) > 1 else 0
-            html += f"<hr><p><b>综合比值: {overall_avg:.4f}</b> ± {overall_std:.4f}</p>"
+            min_len = min(len(d) for d in all_dys)
+            avg_dys = []
+            for j in range(min_len):
+                vals = [d[j] for d in all_dys if j < len(d)]
+                avg_dys.append(round(sum(vals) / len(vals), 2))
 
-            diff_pct = round(abs(overall_avg - 1.0) * 100, 1)
-            if overall_avg > 1.05:
-                html += f"<p style='color:#ff4444;'>补偿偏弱 {diff_pct}%</p>"
-            elif overall_avg < 0.95:
-                html += f"<p style='color:#ff8800;'>补偿偏强 {diff_pct}%</p>"
-            else:
-                html += f"<p style='color:#44cc44;'>补偿基本准确 (±{diff_pct}%)</p>"
+            chunk_f = gen_results[0][1]['chunk_f']
+            chunk_int = gen_results[0][1]['chunk_int']
+            factor = max(0.01, self._scope_val * self._pose_val)
 
-            # 用综合比值生成修正参数
-            last_comp = results[-1][1]
-            last_comp_copy = dict(last_comp)
-            last_comp_copy['avg_ratio'] = round(overall_avg, 4)
-            corr = ParameterCorrector(self._gun_data_dir).correct(
-                last_comp_copy, self._gun_name, self._acc_code)
-            if corr:
-                self._last_correction = corr
-                patch = ParameterCorrector.generate_patch_json(corr, 'uniform')
-                if patch:
-                    html += f"""
-                    <h3>修正参数 (综合)</h3>
-                    <pre style="background:#222; padding:8px; font-size:11px; color:#8f8;">{patch}</pre>
-                    """
-            self._last_comparison = last_comp
+            combined_array = []
+            html += "<h4>综合逐发数据 (多轨迹平均):</h4>"
+            html += "<table style='border-collapse:collapse; font-size:13px;' width='100%'>"
+            html += "<tr style='background:#444;color:white;'><th>发</th><th>平均间距</th><th>每tick值</th></tr>"
+            for j, dy in enumerate(avg_dys):
+                v = round(dy / chunk_f / factor, 2)
+                for _ in range(chunk_int):
+                    combined_array.append(v)
+                html += f"<tr><td style='text-align:center;'>{j+1}→{j+2}</td>"
+                html += f"<td style='text-align:center;'>{dy:.2f}px</td>"
+                html += f"<td style='text-align:center;color:#8f8;'><b>{v}</b></td></tr>"
+            html += "</table>"
+
+            arr_json = BulletParamGenerator.format_array_for_json(combined_array)
+            html += f"""
+            <h4 style="margin-top:12px;">综合压枪数据:</h4>
+            <pre style="background:#222; padding:8px; font-size:11px; color:#8f8;">"{self._acc_code}": {arr_json}</pre>
+            """
+
+            self._last_correction = {
+                'gun_name': self._gun_name, 'acc_code': self._acc_code,
+                'corrected_uniform': combined_array,
+                'original_array': combined_array,
+                'chunk_size': chunk_int, 'chunk_size_f': chunk_f,
+            }
             self.result_text.setHtml(html)
 
-        self.info_lb.setText(f"已分析 {len(results)} 条轨迹")
+        self.info_lb.setText(f"已分析 {len(gen_results)} 条轨迹")
 
     def _pick_template(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择弹孔模板", "", "图片 (*.png *.jpg *.bmp)")
@@ -1205,26 +1283,46 @@ class MainWindow(QWidget):
     # ═══ 分析参数 (仅分析, 不检测) ═══
 
     def _analyze_only(self):
-        """基于当前轨迹的弹孔, 计算修正参数 (不重新检测)"""
+        """Round 1: 从无压枪弹痕直接生成压枪数组 (不加载已有 GunData)"""
         holes = self.canvas.get_holes()
-        if not holes:
-            QMessageBox.warning(self, "提示", "无弹孔数据。请先标注弹孔或从已保存项目加载")
+        if len(holes) < 2:
+            QMessageBox.warning(self, "提示", "至少需要标注 2 个弹孔")
             return
         self._read_config()
         if not self._gun_name:
             QMessageBox.warning(self, "提示", "请先选择枪械")
             return
-        self._update_results()
+
+        gen_result = BulletParamGenerator.generate(
+            holes, self._gun_name, self._scope_val, self._pose_val)
+
+        if not gen_result:
+            self.result_text.setHtml("<p style='color:#ff6666;'>生成失败, 请检查弹孔标注</p>")
+            return
+
+        self._last_generation = gen_result
+        self._last_correction = {
+            'gun_name': self._gun_name,
+            'acc_code': self._acc_code,
+            'corrected_uniform': gen_result['generated_array'],
+            'original_array': gen_result['generated_array'],
+            'avg_ratio': 1.0,
+            'chunk_size': gen_result['chunk_int'],
+            'chunk_size_f': gen_result['chunk_f'],
+            'scope_val': self._scope_val,
+            'posture_val': self._pose_val,
+        }
+
+        html = _build_generation_html(gen_result, self._acc_code)
+        self.result_text.setHtml(html)
 
         if 0 <= self._current_traj_idx < len(self._trajectories):
-            self._trajectories[self._current_traj_idx]['comparison'] = self._last_comparison
             self._trajectories[self._current_traj_idx]['correction'] = self._last_correction
 
         traj_name = self._trajectories[self._current_traj_idx]['name'] if self._current_traj_idx >= 0 else ''
         self.info_lb.setText(
-            f"分析完成 [{traj_name}] | {self._gun_name} {self._acc_code} | "
-            f"scope={self._scope_val} posture={self._pose_val} | "
-            f"{len(holes)} 个弹孔")
+            f"Round 1 生成完成 [{traj_name}] | {self._gun_name} {self._acc_code} | "
+            f"{len(holes)}发 → {len(gen_result['generated_array'])}个数组元素")
 
     # ═══ 结果刷新 ═══
 
@@ -1236,24 +1334,16 @@ class MainWindow(QWidget):
         self._update_results()
 
     def _update_results(self):
+        """标注变化时更新弹孔计数, 不自动分析 (需手动点击分析/迭代)"""
         holes = self.canvas.get_holes()
-        if not holes or not self._gun_name:
-            self.result_text.setHtml("<p style='color:gray;'>配置枪械并添加弹孔后显示结果</p>")
-            return
-
-        comp = BulletComparator(self._gun_data_dir).compare(
-            holes, self._gun_name, self._acc_code,
-            self._scope_val, self._pose_val)
-        self._last_comparison = comp
-
-        corr = None
-        if comp:
-            corr = ParameterCorrector(self._gun_data_dir).correct(
-                comp, self._gun_name, self._acc_code)
-        self._last_correction = corr
-
-        html = _build_result_html(comp, corr)
-        self.result_text.setHtml(html)
+        n = len(holes)
+        if n < 2:
+            self.result_text.setHtml(
+                f"<p style='color:gray;'>已标注 {n} 个弹孔, 至少需要 2 个</p>"
+                "<p style='color:#888;'>标注完成后点击「分析参数」生成压枪数据</p>")
+        elif not self._gun_name:
+            self.result_text.setHtml(
+                f"<p style='color:gray;'>已标注 {n} 个弹孔, 请先选择枪械</p>")
 
     # ═══ 保存项目 ═══
 
@@ -1464,10 +1554,15 @@ class MainWindow(QWidget):
         if not corr:
             QMessageBox.information(self, "提示", "暂无修正参数")
             return
-        patch = ParameterCorrector.generate_patch_json(corr, 'uniform')
-        if patch:
-            QApplication.clipboard().setText(patch)
-            self.info_lb.setText("已复制到剪贴板")
+        arr = corr.get('corrected_uniform', [])
+        if not arr:
+            QMessageBox.information(self, "提示", "暂无可复制的数组")
+            return
+        acc_code = corr.get('acc_code', 'A0B0C0')
+        arr_json = BulletParamGenerator.format_array_for_json(arr)
+        text = f'    "{acc_code}": {arr_json}'
+        QApplication.clipboard().setText(text)
+        self.info_lb.setText(f"已复制到剪贴板 ({len(arr)}个元素)")
 
 
 

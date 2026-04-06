@@ -887,6 +887,94 @@ class ResultSaver:
 
 
 # ═══════════════════════════════════════════
+# Round 1: 直接从弹痕生成压枪数组
+# ═══════════════════════════════════════════
+
+class BulletParamGenerator:
+    """从无压枪弹痕直接生成 GunData 补偿数组 (Round 1)
+
+    不加载已有 GunData, 不做对比。
+    纯粹根据弹痕像素间距, 按射速拆分成每 tick 的补偿值。
+
+    公式:
+      pixel_dy = |shot[i].y - shot[i+1].y|  (相邻弹孔像素距离)
+      value_per_tick = pixel_dy / chunk_f / (scope × posture)
+      宏执行时: mouse_move = round(posture × (value × scope)) ≈ value
+      chunk_f ticks 后: 总补偿 ≈ chunk_f × value = pixel_dy
+    """
+
+    @staticmethod
+    def generate(holes, gun_name, scope_val=1.0, posture_val=1.0):
+        if len(holes) < 2:
+            return None
+
+        s = sorted(holes, key=lambda h: h['shot_num'])
+        n_intervals = len(s) - 1
+
+        fire_interval = _get_fire_interval(gun_name)
+        if fire_interval and fire_interval > 0:
+            chunk_f = fire_interval * 1000 / _TICK_MS
+        else:
+            chunk_f = 10.0
+
+        factor = max(0.01, scope_val * posture_val)
+        chunk_int = max(1, int(round(chunk_f)))
+
+        pixel_dys = [abs(s[i - 1]['y'] - s[i]['y']) for i in range(1, len(s))]
+        pixel_dxs = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
+
+        result_array = []
+        details = []
+
+        for i in range(n_intervals):
+            dy = pixel_dys[i]
+            dx = pixel_dxs[i] if i < len(pixel_dxs) else 0
+            value_per_tick = round(dy / chunk_f / factor, 2)
+            start_idx = len(result_array)
+
+            for _ in range(chunk_int):
+                result_array.append(value_per_tick)
+
+            details.append({
+                'shot_from': s[i].get('shot_num', i + 1),
+                'shot_to': s[i + 1].get('shot_num', i + 2),
+                'pixel_dy': round(dy, 2),
+                'pixel_dx': round(dx, 2),
+                'value_per_tick': value_per_tick,
+                'n_ticks': chunk_int,
+                'array_range': f"[{start_idx}:{start_idx + chunk_int}]",
+            })
+
+        fire_interval_ms = round(fire_interval * 1000, 2) if fire_interval else None
+        rpm = round(60 / fire_interval) if fire_interval else None
+
+        return {
+            'gun_name': gun_name,
+            'scope_val': scope_val,
+            'posture_val': posture_val,
+            'chunk_f': round(chunk_f, 2),
+            'chunk_int': chunk_int,
+            'fire_interval_ms': fire_interval_ms,
+            'rpm': rpm,
+            'n_shots': len(s),
+            'n_intervals': n_intervals,
+            'array_length': len(result_array),
+            'generated_array': result_array,
+            'details': details,
+            'avg_pixel_dy': round(sum(pixel_dys) / len(pixel_dys), 2) if pixel_dys else 0,
+            'total_pixel_dy': round(sum(pixel_dys), 2),
+        }
+
+    @staticmethod
+    def format_array_for_json(arr, items_per_line=36):
+        lines = []
+        for i in range(0, len(arr), items_per_line):
+            chunk = arr[i:i + items_per_line]
+            lines.append(", ".join(str(v) for v in chunk))
+        return "[\n        " + ",\n        ".join(lines) + "\n    ]"
+
+
+# ═══════════════════════════════════════════
 # 修正参数
 # ═══════════════════════════════════════════
 
