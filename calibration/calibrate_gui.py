@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.fire_data import KEY_DATA
 from calibration.bullet_analysis import (
     BulletDetector, BulletSorter, BulletComparator, BulletVisualizer,
-    ParameterCorrector, MultiGroupAnalyzer, ProjectData, IterativeCorrector,
+    ParameterCorrector, ProjectData, IterativeCorrector,
     _find_gun_data_dir, _load_sensitivity_config,
 )
 
@@ -731,12 +731,9 @@ class MainWindow(QWidget):
         self._last_detector = None
         self._current_project_path = None
 
-        # 多图管理: [{path, img, holes, comparison, correction}]
-        self._image_list = []
-        self._current_img_idx = -1
-
-        # 多组比对
-        self._multi = MultiGroupAnalyzer()
+        # 多轨迹管理: [{name, holes, comparison, correction}]
+        self._trajectories = [{'name': '轨迹1', 'holes': [], 'comparison': None, 'correction': None}]
+        self._current_traj_idx = 0
 
         self._init_ui()
         self._connect_signals()
@@ -750,18 +747,20 @@ class MainWindow(QWidget):
         # ─── 左侧: 画布 ───
         left = QVBoxLayout()
 
-        # 图片切换栏
-        img_bar = QHBoxLayout()
-        img_bar.addWidget(QLabel("图片:"))
-        self.img_combo = QComboBox()
-        self.img_combo.setSizePolicy(self.img_combo.sizePolicy().horizontalPolicy(),
-                                     self.img_combo.sizePolicy().verticalPolicy())
-        self.img_combo.setMinimumWidth(200)
-        img_bar.addWidget(self.img_combo, 1)
-        self.btn_del_img = QPushButton("移除")
-        self.btn_del_img.setMaximumWidth(60)
-        img_bar.addWidget(self.btn_del_img)
-        left.addLayout(img_bar)
+        # 轨迹管理栏
+        traj_bar = QHBoxLayout()
+        traj_bar.addWidget(QLabel("轨迹:"))
+        self.traj_combo = QComboBox()
+        self.traj_combo.setMinimumWidth(120)
+        self.traj_combo.addItem("轨迹1")
+        traj_bar.addWidget(self.traj_combo, 1)
+        self.btn_add_traj = QPushButton("+新建")
+        self.btn_add_traj.setMaximumWidth(60)
+        self.btn_del_traj = QPushButton("-删除")
+        self.btn_del_traj.setMaximumWidth(60)
+        traj_bar.addWidget(self.btn_add_traj)
+        traj_bar.addWidget(self.btn_del_traj)
+        left.addLayout(traj_bar)
 
         # 画布
         self.canvas = BulletCanvas()
@@ -845,7 +844,7 @@ class MainWindow(QWidget):
         self.btn_analyze = QPushButton("分析参数")
         self.btn_analyze.setStyleSheet("font-weight:bold; background:#22aa44; color:white; padding:6px;")
 
-        self.btn_analyze_all = QPushButton("分析全部")
+        self.btn_analyze_all = QPushButton("分析全部轨迹")
         self.btn_analyze_all.setStyleSheet("font-weight:bold; background:#22aa88; color:white; padding:6px;")
 
         btn_layout.addWidget(self.btn_load, 0, 0)
@@ -886,28 +885,6 @@ class MainWindow(QWidget):
         bot.addWidget(self.btn_help)
         right.addLayout(bot)
 
-        # 多组比对区
-        multi_group = QGroupBox("多组比对")
-        mg_layout = QVBoxLayout(multi_group)
-        self.group_list = QListWidget()
-        self.group_list.setMaximumHeight(120)
-        mg_layout.addWidget(self.group_list)
-
-        mg_btn = QHBoxLayout()
-        self.btn_add_group = QPushButton("添加到组")
-        self.btn_load_multi = QPushButton("批量加载")
-        self.btn_del_group = QPushButton("删除选中")
-        self.btn_clear_groups = QPushButton("清空")
-        self.btn_cross = QPushButton("交叉比对")
-        self.btn_cross.setStyleSheet("background:#228844; color:white;")
-        mg_btn.addWidget(self.btn_add_group)
-        mg_btn.addWidget(self.btn_load_multi)
-        mg_btn.addWidget(self.btn_del_group)
-        mg_btn.addWidget(self.btn_clear_groups)
-        mg_btn.addWidget(self.btn_cross)
-        mg_layout.addLayout(mg_btn)
-        right.addWidget(multi_group)
-
         # 组装
         splitter = QSplitter(Qt.Horizontal)
         lw = QWidget()
@@ -937,7 +914,7 @@ class MainWindow(QWidget):
         self.btn_load.clicked.connect(self._pick_result)
         self.btn_detect.clicked.connect(self._detect)
         self.btn_analyze.clicked.connect(self._analyze_only)
-        self.btn_analyze_all.clicked.connect(self._analyze_all_images)
+        self.btn_analyze_all.clicked.connect(self._analyze_all_trajectories)
         self.btn_save.clicked.connect(self._save_project)
         self.btn_load_proj.clicked.connect(self._load_project)
         self.btn_iterate.clicked.connect(self._iterate)
@@ -948,14 +925,9 @@ class MainWindow(QWidget):
         self.btn_roi.toggled.connect(self.canvas.set_roi_mode)
         self.btn_clear_roi.clicked.connect(self._clear_roi)
 
-        self.img_combo.currentIndexChanged.connect(self._switch_image)
-        self.btn_del_img.clicked.connect(self._remove_current_image)
-
-        self.btn_add_group.clicked.connect(self._add_to_group)
-        self.btn_load_multi.clicked.connect(self._load_multi)
-        self.btn_del_group.clicked.connect(self._del_group)
-        self.btn_clear_groups.clicked.connect(self._clear_groups)
-        self.btn_cross.clicked.connect(self._cross_compare)
+        self.traj_combo.currentIndexChanged.connect(self._switch_trajectory)
+        self.btn_add_traj.clicked.connect(self._add_trajectory)
+        self.btn_del_traj.clicked.connect(self._del_trajectory)
 
         self.canvas.holes_changed.connect(self._on_holes_changed)
 
@@ -1017,87 +989,157 @@ class MainWindow(QWidget):
         }
 
     def _sensitivity_name(self):
-        idx = self.c_sens.currentIndex()
-        return ['low', 'medium', 'high'][idx]
+        return 'medium'
 
     # ═══ 图片加载 ═══
 
     def _pick_result(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择弹痕截图 (可多选) 或项目文件", "",
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择弹痕截图或项目文件", "",
             "所有支持格式 (*.png *.jpg *.bmp *.calibration.json);;图片 (*.png *.jpg *.bmp);;项目文件 (*.calibration.json)")
-        if not paths:
+        if not path:
             return
 
-        for path in paths:
-            if path.endswith('.calibration.json') or path.endswith('.analysis.json'):
-                self._load_project_file(path)
+        if path.endswith('.calibration.json') or path.endswith('.analysis.json'):
+            self._load_project_file(path)
+            return
+
+        img = cv2.imread(path)
+        if img is None:
+            QMessageBox.warning(self, "错误", f"无法读取: {path}")
+            return
+        self._result_img = img
+        self._result_path = path
+        pm = _cv2_to_pixmap(img)
+        # 保留当前轨迹的弹孔
+        self.canvas.set_image(pm)
+        h, w = img.shape[:2]
+        self.info_lb.setText(f"已加载: {Path(path).name} ({w}x{h})")
+
+    # ═══ 轨迹管理 ═══
+
+    def _save_current_traj_holes(self):
+        if 0 <= self._current_traj_idx < len(self._trajectories):
+            self._trajectories[self._current_traj_idx]['holes'] = list(self.canvas.get_holes())
+
+    def _switch_trajectory(self, idx):
+        if idx == self._current_traj_idx or idx < 0 or idx >= len(self._trajectories):
+            return
+        self._save_current_traj_holes()
+        self._current_traj_idx = idx
+        traj = self._trajectories[idx]
+        self.canvas._holes = list(traj['holes'])
+        self.canvas._selected = -1
+        self.canvas.update()
+        self.lbl_holes_count.setText(f"弹孔: {len(traj['holes'])}")
+        self.info_lb.setText(f"切换到 {traj['name']} ({len(traj['holes'])}个弹孔)")
+
+    def _add_trajectory(self):
+        self._save_current_traj_holes()
+        n = len(self._trajectories) + 1
+        name = f"轨迹{n}"
+        self._trajectories.append({'name': name, 'holes': [], 'comparison': None, 'correction': None})
+        self.traj_combo.blockSignals(True)
+        self.traj_combo.addItem(name)
+        self.traj_combo.blockSignals(False)
+        new_idx = len(self._trajectories) - 1
+        self.traj_combo.setCurrentIndex(new_idx)
+        self._current_traj_idx = new_idx
+        self.canvas._holes = []
+        self.canvas._selected = -1
+        self.canvas.update()
+        self.lbl_holes_count.setText("弹孔: 0")
+        self.info_lb.setText(f"已新建 {name}, 在图片上左键标注弹孔")
+
+    def _del_trajectory(self):
+        if len(self._trajectories) <= 1:
+            QMessageBox.information(self, "提示", "至少保留一个轨迹")
+            return
+        self._trajectories.pop(self._current_traj_idx)
+        self.traj_combo.blockSignals(True)
+        self.traj_combo.removeItem(self._current_traj_idx)
+        self.traj_combo.blockSignals(False)
+        new_idx = min(self._current_traj_idx, len(self._trajectories) - 1)
+        self._current_traj_idx = new_idx
+        self.traj_combo.setCurrentIndex(new_idx)
+        traj = self._trajectories[new_idx]
+        self.canvas._holes = list(traj['holes'])
+        self.canvas._selected = -1
+        self.canvas.update()
+        self.lbl_holes_count.setText(f"弹孔: {len(traj['holes'])}")
+
+    def _analyze_all_trajectories(self):
+        """分析所有轨迹, 展示综合结果"""
+        self._save_current_traj_holes()
+        self._read_config()
+        if not self._gun_name:
+            QMessageBox.warning(self, "提示", "请先选择枪械")
+            return
+
+        results = []
+        for traj in self._trajectories:
+            if not traj['holes']:
                 continue
+            comp = BulletComparator(self._gun_data_dir).compare(
+                traj['holes'], self._gun_name, self._acc_code,
+                self._scope_val, self._pose_val)
+            if comp:
+                traj['comparison'] = comp
+                corr = ParameterCorrector(self._gun_data_dir).correct(
+                    comp, self._gun_name, self._acc_code)
+                traj['correction'] = corr
+                results.append((traj['name'], comp, corr))
 
-            img = cv2.imread(path)
-            if img is None:
-                self.info_lb.setText(f"无法读取: {path}")
-                continue
-
-            entry = {'path': path, 'img': img, 'holes': [],
-                     'comparison': None, 'correction': None}
-            self._image_list.append(entry)
-            self.img_combo.blockSignals(True)
-            self.img_combo.addItem(Path(path).name)
-            self.img_combo.blockSignals(False)
-
-        if self._image_list:
-            last_idx = len(self._image_list) - 1
-            self.img_combo.setCurrentIndex(last_idx)
-            self._activate_image(last_idx)
-
-    def _activate_image(self, idx):
-        """激活指定索引的图片到画布"""
-        if idx < 0 or idx >= len(self._image_list):
+        if not results:
+            QMessageBox.warning(self, "提示", "没有可分析的轨迹 (请先标注弹孔)")
             return
-        self._save_current_holes()
-        self._current_img_idx = idx
-        entry = self._image_list[idx]
-        self._result_img = entry['img']
-        self._result_path = entry['path']
-        pm = _cv2_to_pixmap(entry['img'])
-        self.canvas.set_data(entry['holes'], pm)
-        self.lbl_holes_count.setText(f"弹孔: {len(entry['holes'])}")
-        h, w = entry['img'].shape[:2]
-        self.info_lb.setText(
-            f"[{idx + 1}/{len(self._image_list)}] {Path(entry['path']).name} "
-            f"({w}x{h}) | {len(entry['holes'])}个弹孔")
 
-    def _save_current_holes(self):
-        """保存当前画布弹孔到 image_list"""
-        if 0 <= self._current_img_idx < len(self._image_list):
-            self._image_list[self._current_img_idx]['holes'] = list(self.canvas.get_holes())
-
-    def _switch_image(self, idx):
-        """图片切换 combo 回调"""
-        if idx == self._current_img_idx or idx < 0:
-            return
-        self._activate_image(idx)
-
-    def _remove_current_image(self):
-        """移除当前图片"""
-        if self._current_img_idx < 0 or not self._image_list:
-            return
-        self._image_list.pop(self._current_img_idx)
-        self.img_combo.blockSignals(True)
-        self.img_combo.removeItem(self._current_img_idx)
-        self.img_combo.blockSignals(False)
-        if self._image_list:
-            new_idx = min(self._current_img_idx, len(self._image_list) - 1)
-            self._current_img_idx = -1
-            self.img_combo.setCurrentIndex(new_idx)
-            self._activate_image(new_idx)
+        if len(results) == 1:
+            name, comp, corr = results[0]
+            self._last_comparison = comp
+            self._last_correction = corr
+            html = _build_result_html(comp, corr)
+            self.result_text.setHtml(html)
         else:
-            self._current_img_idx = -1
-            self._result_img = None
-            self._result_path = None
-            self.canvas.set_data([], None)
-            self.info_lb.setText("所有图片已移除")
+            all_ratios = []
+            html = "<h3>多轨迹综合分析</h3>"
+            for name, comp, corr in results:
+                avg = comp.get('avg_ratio', 1.0)
+                std = comp.get('std_ratio', 0)
+                n = comp.get('valid_pairs', 0)
+                all_ratios.append(avg)
+                html += f"<p><b>{name}</b>: avg_ratio={avg:.4f} std={std:.4f} ({n}对)</p>"
+
+            overall_avg = sum(all_ratios) / len(all_ratios)
+            overall_std = float(np.std(all_ratios)) if len(all_ratios) > 1 else 0
+            html += f"<hr><p><b>综合比值: {overall_avg:.4f}</b> ± {overall_std:.4f}</p>"
+
+            diff_pct = round(abs(overall_avg - 1.0) * 100, 1)
+            if overall_avg > 1.05:
+                html += f"<p style='color:#ff4444;'>补偿偏弱 {diff_pct}%</p>"
+            elif overall_avg < 0.95:
+                html += f"<p style='color:#ff8800;'>补偿偏强 {diff_pct}%</p>"
+            else:
+                html += f"<p style='color:#44cc44;'>补偿基本准确 (±{diff_pct}%)</p>"
+
+            # 用综合比值生成修正参数
+            last_comp = results[-1][1]
+            last_comp_copy = dict(last_comp)
+            last_comp_copy['avg_ratio'] = round(overall_avg, 4)
+            corr = ParameterCorrector(self._gun_data_dir).correct(
+                last_comp_copy, self._gun_name, self._acc_code)
+            if corr:
+                self._last_correction = corr
+                patch = ParameterCorrector.generate_patch_json(corr, 'uniform')
+                if patch:
+                    html += f"""
+                    <h3>修正参数 (综合)</h3>
+                    <pre style="background:#222; padding:8px; font-size:11px; color:#8f8;">{patch}</pre>
+                    """
+            self._last_comparison = last_comp
+            self.result_text.setHtml(html)
+
+        self.info_lb.setText(f"已分析 {len(results)} 条轨迹")
 
     def _pick_template(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择弹孔模板", "", "图片 (*.png *.jpg *.bmp)")
@@ -1163,7 +1205,7 @@ class MainWindow(QWidget):
     # ═══ 分析参数 (仅分析, 不检测) ═══
 
     def _analyze_only(self):
-        """基于当前已标注的弹孔, 计算修正参数 (不重新检测)"""
+        """基于当前轨迹的弹孔, 计算修正参数 (不重新检测)"""
         holes = self.canvas.get_holes()
         if not holes:
             QMessageBox.warning(self, "提示", "无弹孔数据。请先标注弹孔或从已保存项目加载")
@@ -1174,60 +1216,23 @@ class MainWindow(QWidget):
             return
         self._update_results()
 
-        if 0 <= self._current_img_idx < len(self._image_list):
-            self._image_list[self._current_img_idx]['comparison'] = self._last_comparison
-            self._image_list[self._current_img_idx]['correction'] = self._last_correction
+        if 0 <= self._current_traj_idx < len(self._trajectories):
+            self._trajectories[self._current_traj_idx]['comparison'] = self._last_comparison
+            self._trajectories[self._current_traj_idx]['correction'] = self._last_correction
 
+        traj_name = self._trajectories[self._current_traj_idx]['name'] if self._current_traj_idx >= 0 else ''
         self.info_lb.setText(
-            f"分析完成 | {self._gun_name} {self._acc_code} | "
+            f"分析完成 [{traj_name}] | {self._gun_name} {self._acc_code} | "
             f"scope={self._scope_val} posture={self._pose_val} | "
             f"{len(holes)} 个弹孔")
-
-    def _analyze_all_images(self):
-        """分析所有已标注图片, 自动加入多组比对"""
-        if not self._image_list:
-            QMessageBox.warning(self, "提示", "无图片可分析")
-            return
-        self._read_config()
-        self._save_current_holes()
-
-        analyzed = 0
-        self._multi.clear()
-        self.group_list.clear()
-
-        for i, entry in enumerate(self._image_list):
-            if not entry['holes']:
-                continue
-            comp = BulletComparator(self._gun_data_dir).compare(
-                entry['holes'], self._gun_name, self._acc_code,
-                self._scope_val, self._pose_val)
-            if comp:
-                entry['comparison'] = comp
-                corr = ParameterCorrector(self._gun_data_dir).correct(
-                    comp, self._gun_name, self._acc_code)
-                entry['correction'] = corr
-                label = f"{Path(entry['path']).stem}"
-                self._multi.add_group(comp, label)
-                self.group_list.addItem(label)
-                analyzed += 1
-
-        if analyzed >= 2:
-            self._cross_compare()
-        elif analyzed == 1:
-            self._last_comparison = self._image_list[self._current_img_idx].get('comparison')
-            self._last_correction = self._image_list[self._current_img_idx].get('correction')
-            html = _build_result_html(self._last_comparison, self._last_correction)
-            self.result_text.setHtml(html)
-
-        self.info_lb.setText(f"已分析 {analyzed}/{len(self._image_list)} 张图片")
 
     # ═══ 结果刷新 ═══
 
     def _on_holes_changed(self):
         holes = self.canvas.get_holes()
         self.lbl_holes_count.setText(f"弹孔: {len(holes)}")
-        if self._current_img_idx >= 0 and self._current_img_idx < len(self._image_list):
-            self._image_list[self._current_img_idx]['holes'] = list(holes)
+        if 0 <= self._current_traj_idx < len(self._trajectories):
+            self._trajectories[self._current_traj_idx]['holes'] = list(holes)
         self._update_results()
 
     def _update_results(self):
@@ -1344,20 +1349,9 @@ class MainWindow(QWidget):
             self._result_path = None
             pm = _cv2_to_pixmap(blank)
 
-        # 添加到多图管理
-        entry = {
-            'path': self._result_path or path,
-            'img': self._result_img if self._result_img is not None else np.zeros((600, 800, 3), dtype=np.uint8),
-            'holes': list(holes),
-            'comparison': None,
-            'correction': None,
-        }
-        self._image_list.append(entry)
-        self.img_combo.blockSignals(True)
-        self.img_combo.addItem(Path(path).stem)
-        self.img_combo.blockSignals(False)
-        self._current_img_idx = len(self._image_list) - 1
-        self.img_combo.setCurrentIndex(self._current_img_idx)
+        # 加载到当前轨迹
+        if 0 <= self._current_traj_idx < len(self._trajectories):
+            self._trajectories[self._current_traj_idx]['holes'] = list(holes)
 
         self.canvas.set_data(holes, pm)
         self._current_project_path = path
@@ -1382,72 +1376,53 @@ class MainWindow(QWidget):
     # ═══ 迭代修正 (Phase 3) ═══
 
     def _iterate(self):
-        """迭代修正: 加载上轮项目文件 + 新弹痕截图 → 微调参数"""
-        # Step 1: 选上轮项目文件
-        prev_path, _ = QFileDialog.getOpenFileName(
-            self, "选择上一轮项目文件", "",
-            "项目文件 (*.calibration.json *.json)")
-        if not prev_path:
+        """迭代修正: 基于当前画布标注 + 当前GunData实际参数 → 微调
+
+        与上一版的区别: 不再加载旧项目文件, 直接读取当前GunData JSON
+        中枪械实际使用的弹道数组作为基准进行比较。
+        """
+        holes = self.canvas.get_holes()
+        if len(holes) < 2:
+            QMessageBox.warning(self, "提示", "请先标注开宏后的弹痕 (至少2个)")
             return
 
-        prev_data, err = ProjectData.load(prev_path)
-        if err:
-            QMessageBox.warning(self, "加载失败", err)
-            return
-
-        prev_correction = prev_data.get('correction')
-        if not prev_correction:
-            QMessageBox.warning(self, "错误", "所选项目文件中没有修正参数, 请先完成 Round 1 分析")
-            return
-
-        # 恢复配置
-        cfg = prev_data.get('config', {})
-        self._set_combo(self.c_gun, cfg.get('gun_name', ''))
-        self._set_combo(self.c_scope, cfg.get('scope_key', 'none'))
-        self._set_combo(self.c_muzzle, cfg.get('muzzle_key', 'none'))
-        self._set_combo(self.c_grip, cfg.get('grip_key', 'none'))
-        self._set_combo(self.c_stock, cfg.get('stock_key', 'none'))
-        self._set_combo(self.c_pose, cfg.get('pose_key', 'none'))
         self._read_config()
-
-        # Step 2: 选新弹痕截图 (开宏后)
-        new_path, _ = QFileDialog.getOpenFileName(
-            self, "选择本轮弹痕截图 (开宏后)", "",
-            "图片 (*.png *.jpg *.bmp)")
-        if not new_path:
+        if not self._gun_name:
+            QMessageBox.warning(self, "提示", "请先选择枪械")
             return
 
-        new_img = cv2.imread(new_path)
-        if new_img is None:
-            QMessageBox.warning(self, "错误", f"无法读取: {new_path}")
+        # 读取当前 GunData 中实际使用的参数 (宏正在使用的)
+        gp = Path(self._gun_data_dir) / f"{self._gun_name}.json"
+        if not gp.exists():
+            QMessageBox.warning(self, "错误", f"枪械数据文件不存在: {gp}")
+            return
+        try:
+            with open(gp, encoding='utf-8') as f:
+                gun_data = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            QMessageBox.warning(self, "错误", f"读取枪械数据失败: {e}")
             return
 
-        self._result_img = new_img
-        self._result_path = new_path
+        current_array = gun_data.get(self._acc_code, gun_data.get("A0B0C0", []))
+        if not current_array:
+            QMessageBox.warning(self, "错误", f"未找到配件码 {self._acc_code} 的弹道数据")
+            return
 
-        # Step 3: 检测
-        sens = self._sensitivity_name()
-        detector = BulletDetector(sens)
-        roi = self.canvas.get_roi()
-        if self._template_img is not None:
-            holes = detector.detect_with_template(new_img, self._template_img, roi=roi)
+        from calibration.bullet_analysis import _get_fire_interval, _TICK_MS
+        fire_interval = _get_fire_interval(self._gun_name)
+        if fire_interval and fire_interval > 0:
+            chunk_f = fire_interval * 1000 / _TICK_MS
         else:
-            holes = detector.detect_single(new_img, roi=roi)
-        self._last_detector = detector
+            chunk_f = len(current_array) / max(1, len(holes) - 1)
 
-        if not holes:
-            pm = _cv2_to_pixmap(new_img)
-            self.canvas.set_data([], pm)
-            self.info_lb.setText("迭代检测: 未检测到弹痕, 请手动标注后结果会自动计算")
-            return
+        prev_correction = {
+            'corrected_uniform': list(current_array),
+            'chunk_size': max(1, int(round(chunk_f))),
+            'chunk_size_f': round(chunk_f, 2),
+            'acc_code': self._acc_code,
+            'gun_name': self._gun_name,
+        }
 
-        direction = self.c_direction.currentData() or 'bottom_up'
-        start_shot = self.c_start_shot.currentData() or 1
-        BulletSorter.sort(holes, direction, start_shot)
-        pm = _cv2_to_pixmap(new_img)
-        self.canvas.set_data(holes, pm)
-
-        # Step 4: 迭代计算
         iter_result = IterativeCorrector.correct(
             holes, prev_correction, self._scope_val, self._pose_val)
         if not iter_result:
@@ -1460,16 +1435,18 @@ class MainWindow(QWidget):
 
         # 自动保存
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        rd = prev_data.get('iteration_round', 1) + 1
-        save_name = f"{self._gun_name}_round{rd}_{ts}.calibration.json"
-        save_path = Path(prev_path).parent / save_name
+        save_name = f"{self._gun_name}_iter_{ts}.calibration.json"
+        save_dir = Path("calibration_project")
+        save_dir.mkdir(exist_ok=True)
+        save_path = save_dir / save_name
         ProjectData.save(
             str(save_path), holes, self._get_config_dict(),
-            correction=iter_result, iteration_round=rd,
-            parent_project=prev_path, image_path=new_path,
-            image_size=(new_img.shape[1], new_img.shape[0]))
+            correction=iter_result,
+            image_path=self._result_path,
+            image_size=(self._result_img.shape[1], self._result_img.shape[0]) if self._result_img is not None else None)
         self._current_project_path = str(save_path)
-        self.info_lb.setText(f"迭代 Round {rd} 完成, 已保存: {save_name}")
+        self.info_lb.setText(
+            f"迭代修正完成 | 基准: {self._gun_name}.json [{self._acc_code}] | 已保存: {save_name}")
 
     # ═══ Debug ═══
 
@@ -1492,89 +1469,6 @@ class MainWindow(QWidget):
             QApplication.clipboard().setText(patch)
             self.info_lb.setText("已复制到剪贴板")
 
-    # ═══ 多组比对 (Phase 4) ═══
-
-    def _add_to_group(self):
-        if not self._last_comparison:
-            QMessageBox.warning(self, "提示", "请先完成分析")
-            return
-        label = f"{self._gun_name}_{self._acc_code}_{self._multi.count + 1}"
-        self._multi.add_group(self._last_comparison, label)
-        self.group_list.addItem(label)
-
-    def _load_multi(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "批量加载项目文件", "",
-                                                  "项目文件 (*.calibration.json *.json)")
-        if not paths:
-            return
-        loaded = 0
-        for p in paths:
-            data, err = ProjectData.load(p)
-            if err or not data:
-                continue
-            comp = data.get('comparison')
-            if not comp:
-                continue
-            label = f"{comp.get('gun', '')}_{Path(p).stem}"
-            self._multi.add_group(comp, label)
-            self.group_list.addItem(label)
-            loaded += 1
-
-        ok, warn = self._multi.validate_consistency()
-        msg = f"加载了 {loaded} 组数据"
-        if not ok:
-            msg += f"\n⚠ {warn}"
-        self.info_lb.setText(msg)
-
-    def _del_group(self):
-        row = self.group_list.currentRow()
-        if row >= 0:
-            self._multi.remove_group(row)
-            self.group_list.takeItem(row)
-
-    def _clear_groups(self):
-        self._multi.clear()
-        self.group_list.clear()
-
-    def _cross_compare(self):
-        if self._multi.count < 2:
-            QMessageBox.warning(self, "提示", "至少需要 2 组数据")
-            return
-
-        ok, warn = self._multi.validate_consistency()
-        if not ok:
-            reply = QMessageBox.question(self, "警告", f"{warn}\n是否继续?",
-                                          QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.No:
-                return
-
-        analysis = self._multi.analyze()
-        if not analysis:
-            return
-
-        html = "<h3>多组交叉比对结果</h3>"
-        html += f"<p>组数: {analysis['n_groups']} | 置信度: {analysis['confidence']}</p>"
-        html += f"<p>综合比值: <b>{analysis['overall_avg_ratio']:.4f}</b> ± {analysis['overall_std_ratio']:.4f}</p>"
-
-        if analysis['n_outliers_removed'] > 0:
-            html += f"<p style='color:orange;'>已排除 {analysis['n_outliers_removed']} 个异常值</p>"
-
-        html += "<h4>各组比值:</h4><ul>"
-        for label, ratio in zip(analysis['group_labels'], analysis['group_ratios']):
-            html += f"<li>{label}: {ratio:.4f}</li>"
-        html += "</ul>"
-
-        # 生成最优修正
-        opt = self._multi.generate_optimal_correction(self._gun_name, self._acc_code, self._gun_data_dir)
-        if opt:
-            self._last_correction = opt
-            patch = ParameterCorrector.generate_patch_json(opt, 'uniform')
-            html += f"""
-            <h3>最优修正参数</h3>
-            <pre style="background:#222; padding:8px; overflow-x:auto; font-size:11px; color:#8f8;">{patch}</pre>
-            """
-
-        self.result_text.setHtml(html)
 
 
 # ═══════════════════════════════════════════
