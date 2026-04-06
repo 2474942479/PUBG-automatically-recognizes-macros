@@ -182,16 +182,14 @@ class ProcessClass:
 
     def calculate_the_recoil(self, recoil, posture, scope):
         """
-        计算最终后坐力参数
+        计算最终后坐力参数 (精确到2位小数)
         :param recoil: 压枪弹道数据
         :param posture: 姿态数据
         :param scope: 倍镜数据
-        :return:
+        :return: float, 2位小数精度
         """
-        # 最终弹道 = 姿态 * （基础弹道*倍镜）
-        recoil_value = (posture * (recoil * scope))
-
-        return np.round(recoil_value)  # 返回整数后坐力值
+        recoil_value = posture * (recoil * scope)
+        return round(float(recoil_value), 2)
 
     def get_guns_info(self):
         if self.Current_firearms == 1:
@@ -260,32 +258,36 @@ class ProcessClass:
         return latency / 1000
 
     def FIRE(self, posture, scope, ballistic, Emit):
-        recoil_list = []  # 创建一个空列表用于存储 recoil 数据
+        recoil_list = []
+        remainder = 0.0
         for i in ballistic:
             if not self.mouse_one:
                 break
             Emit('x', (True,))
             recoil = self.calculate_the_recoil(i, posture, scope)
-            # print(recoil, end=", ")  # 打印 recoil，并在末尾加上逗号和空格
-            recoil_list.append(recoil)  # 将每次迭代得到的 recoil 添加到列表中
-            self._gd.mouse_R(0, recoil)
-            # self.op.MoveR(0,recoil)
+            recoil_list.append(recoil)
+            exact = recoil + remainder
+            move = int(round(exact))
+            remainder = exact - move
+            self._gd.mouse_R(0, move)
             latency = self.Computation_latency(9)
             time.sleep(latency)
         Emit('x', (False,))
         return recoil_list
 
     def FIRE1(self, posture, scope, ballistic, Emit):
-        recoil_list = []  # 创建一个空列表用于存储 recoil 数据
+        recoil_list = []
+        remainder = 0.0
         for i in ballistic:
             if not self.mouse_one:
                 break
             Emit('x', (True,))
             recoil = self.calculate_the_recoil(i, posture, scope)
-            # print(recoil, end=", ")  # 打印 recoil，并在末尾加上逗号和空格
-            recoil_list.append(recoil)  # 将每次迭代得到的 recoil 添加到列表中
-            self._gd.mouse_R(0, recoil)
-            # self.op.MoveR(0, recoil)
+            recoil_list.append(recoil)
+            exact = recoil + remainder
+            move = int(round(exact))
+            remainder = exact - move
+            self._gd.mouse_R(0, move)
             latency = self.Computation_latency(100)
             time.sleep(latency)
         Emit('x', (False,))

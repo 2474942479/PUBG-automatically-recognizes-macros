@@ -676,16 +676,21 @@ class ProjectData:
 # ═══════════════════════════════════════════
 
 class BulletSorter:
-    """PUBG 后坐力使弹孔从下往上排列:
-    Y值最大 = 第1发, Y值最小 = 最后一发
+    """弹孔排序器
+
+    direction:
+      'bottom_up' — 后坐力模式, Y值最大=第1发 (默认)
+      'top_down'  — 反向模式, Y值最小=第1发
+    start_shot: 起始发数编号
     """
     @staticmethod
-    def sort(holes):
+    def sort(holes, direction='bottom_up', start_shot=1):
         if not holes:
             return holes
-        sorted_h = sorted(holes, key=lambda h: h['y'], reverse=True)
+        reverse = (direction != 'top_down')
+        sorted_h = sorted(holes, key=lambda h: h['y'], reverse=reverse)
         for i, h in enumerate(sorted_h):
-            h['shot_num'] = i + 1
+            h['shot_num'] = start_shot + i
         return sorted_h
 
 
@@ -745,14 +750,17 @@ class BulletComparator:
 
         n_compare = min(n_intervals, int(len(raw) / max(0.5, chunk_f)))
 
-        actual_dy = [s[i - 1]['y'] - s[i]['y'] for i in range(1, len(s))]
+        # actual_dy: 相邻弹孔Y轴距离 (取绝对值, 兼容上→下/下→上两种方向)
+        actual_dy = [abs(s[i - 1]['y'] - s[i]['y']) for i in range(1, len(s))]
         actual_dx = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
 
+        # 理论值: 与压枪算法完全一致 — 每个 tick 执行 round(posture*(value*scope), 2)
         theory_chunks = []
         for i in range(n_compare):
             start = int(round(i * chunk_f))
             end = min(int(round((i + 1) * chunk_f)), len(raw))
-            theory_chunks.append(sum(raw[start:end]))
+            chunk_sum = sum(round(posture_val * (v * scope_val), 2) for v in raw[start:end])
+            theory_chunks.append(round(chunk_sum, 2))
 
         details = []
         ratios = []
@@ -774,11 +782,11 @@ class BulletComparator:
 
             details.append({
                 'shot': i + 1,
-                'actual_dy': round(float(act), 1),
-                'theory_dy': round(float(theo), 1),
-                'raw_chunk_sum': round(float(raw_sum), 1),
+                'actual_dy': round(float(act), 2),
+                'theory_dy': round(float(theo), 2),
+                'raw_chunk_sum': round(float(raw_sum), 2),
                 'ratio': round(float(ratio), 4) if ratio is not None else None,
-                'x_drift': round(float(actual_dx[i]), 1) if i < len(actual_dx) else 0,
+                'x_drift': round(float(actual_dx[i]), 2) if i < len(actual_dx) else 0,
                 'status': status,
             })
 
@@ -819,10 +827,10 @@ class BulletComparator:
             'rpm': rpm,
             'magazine_size': _get_gun_magazine(gun_name),
             'effective_array_len': _trim_trailing_zeros(raw) if not is_semi else len(raw),
-            'avg_horizontal_drift': round(avg_dx, 1),
-            'max_horizontal_drift': round(max_dx, 1),
-            'std_horizontal_drift': round(std_dx, 1),
-            'horizontal_drifts': [round(d, 1) for d in actual_dx],
+            'avg_horizontal_drift': round(avg_dx, 2),
+            'max_horizontal_drift': round(max_dx, 2),
+            'std_horizontal_drift': round(std_dx, 2),
+            'horizontal_drifts': [round(d, 2) for d in actual_dx],
             'details': details,
         }
 
@@ -914,7 +922,7 @@ class ParameterCorrector:
         details = comparison_result.get('details', [])
 
         def _r(v):
-            return round(v, 1) if use_float else round(v)
+            return round(v, 2) if use_float else round(v)
 
         corrected_uniform = [_r(v * avg_ratio) if v != 0 else 0 for v in original]
 
@@ -1012,15 +1020,15 @@ class IterativeCorrector:
             if chunk_sum > 0:
                 for j in range(start, min(end, len(corrected))):
                     if prev_params[j] != 0:
-                        corrected[j] = round(corrected[j] + adjustment_raw * abs(prev_params[j]) / chunk_sum, 1)
+                        corrected[j] = round(corrected[j] + adjustment_raw * abs(prev_params[j]) / chunk_sum, 2)
             elif end > start:
-                per_tick = round(adjustment_raw / max(1, end - start), 1)
+                per_tick = round(adjustment_raw / max(1, end - start), 2)
                 for j in range(start, min(end, len(corrected))):
-                    corrected[j] = round(corrected[j] + per_tick, 1)
+                    corrected[j] = round(corrected[j] + per_tick, 2)
 
             residuals.append({
-                'shot': i, 'dy': round(float(dy), 1), 'dx': round(float(dx), 1),
-                'adjustment_px': round(float(-dy), 1), 'adjustment_raw': round(float(adjustment_raw), 2),
+                'shot': i, 'dy': round(float(dy), 2), 'dx': round(float(dx), 2),
+                'adjustment_px': round(float(-dy), 2), 'adjustment_raw': round(float(adjustment_raw), 2),
             })
 
         chunk_int = max(1, int(round(chunk_f)))
@@ -1034,8 +1042,8 @@ class IterativeCorrector:
             'chunk_size_f': round(chunk_f, 2),
             'scope_val': scope_val, 'posture_val': posture_val,
             'residuals': residuals,
-            'avg_residual_dy': round(float(np.mean([r['dy'] for r in residuals])), 1),
-            'max_residual_dy': round(float(max(abs(r['dy']) for r in residuals)), 1),
+            'avg_residual_dy': round(float(np.mean([r['dy'] for r in residuals])), 2),
+            'max_residual_dy': round(float(max(abs(r['dy']) for r in residuals)), 2),
             'is_iterative': True,
         }
 
@@ -1159,7 +1167,7 @@ class MultiGroupAnalyzer:
             start = int(round(i * chunk_f))
             end = min(int(round((i + 1) * chunk_f)), len(corrected))
             for j in range(start, end):
-                corrected[j] = round(original[j] * r, 1) if original[j] != 0 else 0
+                corrected[j] = round(original[j] * r, 2) if original[j] != 0 else 0
 
         chunk_int = max(1, int(round(chunk_f)))
         return {

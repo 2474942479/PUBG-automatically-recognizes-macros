@@ -86,6 +86,10 @@ class BulletCanvas(QWidget):
         self._box_del_start = None
         self._box_del_rect = None
 
+        # 标注参数
+        self._sort_direction = 'bottom_up'  # 'bottom_up' or 'top_down'
+        self._start_shot = 1
+
         self.setMinimumSize(400, 400)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)
@@ -113,6 +117,20 @@ class BulletCanvas(QWidget):
     def get_holes(self):
         return self._holes
 
+    def set_sort_direction(self, direction):
+        self._sort_direction = direction
+        if self._holes:
+            BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
+            self.holes_changed.emit()
+            self.update()
+
+    def set_start_shot(self, n):
+        self._start_shot = max(1, n)
+        if self._holes:
+            BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
+            self.holes_changed.emit()
+            self.update()
+
     def set_roi_mode(self, enabled):
         self._roi_mode = enabled
         self._roi_draw_start = None
@@ -133,13 +151,13 @@ class BulletCanvas(QWidget):
         for h in self._holes:
             n = h.get('shot_num', 0)
             col = QColor(255, 0, 0) if n <= 5 else QColor(255, 165, 0) if n <= 15 else QColor(0, 200, 0)
-            p.setPen(QPen(col, 3))
-            p.drawEllipse(QPointF(h['x'], h['y']), 10, 10)
-            p.setPen(QPen(Qt.white, 2))
+            p.setPen(QPen(col, 2))
+            p.drawEllipse(QPointF(h['x'], h['y']), 5, 5)
+            p.setPen(QPen(Qt.white, 1))
             fnt = p.font()
-            fnt.setPointSize(10)
+            fnt.setPointSize(8)
             p.setFont(fnt)
-            p.drawText(h['x'] + 14, h['y'] - 10, str(n))
+            p.drawText(h['x'] + 8, h['y'] - 6, str(n))
         p.end()
         return pm.save(str(path))
 
@@ -151,10 +169,10 @@ class BulletCanvas(QWidget):
     def _to_image(self, wx, wy):
         return ((wx - self._offset.x()) / self._zoom, (wy - self._offset.y()) / self._zoom)
 
-    def _find_hole_at(self, wx, wy, radius=15):
+    def _find_hole_at(self, wx, wy, radius=8):
         for i, h in enumerate(self._holes):
             wp = self._to_widget(h['x'], h['y'])
-            if (wp.x() - wx) ** 2 + (wp.y() - wy) ** 2 < (radius * self._zoom + 5) ** 2:
+            if (wp.x() - wx) ** 2 + (wp.y() - wy) ** 2 < (radius * self._zoom + 4) ** 2:
                 return i
         return -1
 
@@ -177,27 +195,27 @@ class BulletCanvas(QWidget):
                      self._pixmap.width() * self._zoom, self._pixmap.height() * self._zoom)
         p.drawPixmap(tgt, self._pixmap, QRectF(self._pixmap.rect()))
 
-        # 绘制弹孔
+        # 绘制弹孔 (小尺寸, 适合紧密标注)
         for i, h in enumerate(self._holes):
             wp = self._to_widget(h['x'], h['y'])
             n = h.get('shot_num', 0)
             col = QColor(255, 0, 0) if n <= 5 else QColor(255, 165, 0) if n <= 15 else QColor(0, 200, 0)
-            pen = QPen(col, 3 if i != self._selected else 4)
+            pen = QPen(col, 2 if i != self._selected else 3)
             p.setPen(pen)
-            r = 10 * self._zoom
+            r = 5 * self._zoom
             p.drawEllipse(wp, r, r)
             p.setBrush(col)
-            p.drawEllipse(wp, 3 * self._zoom, 3 * self._zoom)
+            p.drawEllipse(wp, 1.5 * self._zoom, 1.5 * self._zoom)
             p.setBrush(Qt.NoBrush)
 
             if i == self._selected:
-                p.setPen(QPen(QColor(255, 255, 0), 2, Qt.DashLine))
-                p.drawEllipse(wp, r + 4, r + 4)
+                p.setPen(QPen(QColor(255, 255, 0), 1, Qt.DashLine))
+                p.drawEllipse(wp, r + 3, r + 3)
 
-            p.setPen(QPen(Qt.white, 2))
-            fnt = QFont("Arial", max(8, int(10 * self._zoom)))
+            p.setPen(QPen(Qt.white, 1))
+            fnt = QFont("Arial", max(7, int(8 * self._zoom)))
             p.setFont(fnt)
-            p.drawText(int(wp.x() + 14 * self._zoom), int(wp.y() - 10 * self._zoom), str(n))
+            p.drawText(int(wp.x() + 8 * self._zoom), int(wp.y() - 6 * self._zoom), str(n))
 
         # 绘制连线
         if len(self._holes) >= 2:
@@ -273,7 +291,7 @@ class BulletCanvas(QWidget):
             else:
                 self._holes.append({'x': int(ix), 'y': int(iy), 'area': 100,
                                     'circularity': 1.0, 'color_diff': 50})
-                BulletSorter.sort(self._holes)
+                BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
                 self._selected = -1
                 self._just_added = True
                 self.holes_changed.emit()
@@ -289,7 +307,7 @@ class BulletCanvas(QWidget):
             if idx >= 0:
                 self._holes.pop(idx)
                 self._selected = -1
-                BulletSorter.sort(self._holes)
+                BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
                 self.holes_changed.emit()
                 self.update()
             else:
@@ -347,14 +365,14 @@ class BulletCanvas(QWidget):
                     self._holes = [h for h in self._holes
                                    if not (bx <= h['x'] <= bx + bw and by <= h['y'] <= by + bh)]
                     if len(self._holes) < before:
-                        BulletSorter.sort(self._holes)
+                        BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
                         self.holes_changed.emit()
                 self._box_del_start = None
                 self._box_del_rect = None
                 self.update()
             elif self._drag_start and self._selected >= 0:
                 self._drag_start = None
-                BulletSorter.sort(self._holes)
+                BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
                 self.holes_changed.emit()
                 self.update()
 
@@ -362,7 +380,7 @@ class BulletCanvas(QWidget):
         if e.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self._selected >= 0:
             self._holes.pop(self._selected)
             self._selected = -1
-            BulletSorter.sort(self._holes)
+            BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
             self.holes_changed.emit()
             self.update()
 
@@ -540,7 +558,7 @@ def _build_result_html(comparison, correction):
     max_dx = comparison.get('max_horizontal_drift', 0)
     std_dx = comparison.get('std_horizontal_drift', 0)
     html += f"""
-      <p style="color:#aaa;">水平漂移: 均值{avg_dx:.1f} 最大{max_dx:.1f} 标准差{std_dx:.1f}
+      <p style="color:#aaa;">水平漂移: 均值{avg_dx:.2f} 最大{max_dx:.2f} 标准差{std_dx:.2f}
         {'(偏移较大, 可能需要水平补偿)' if abs(avg_dx) > 5 else '(正常)'}</p>
     """
 
@@ -575,10 +593,10 @@ def _build_result_html(comparison, correction):
             html += f"""
             <tr style="background:{row_color};">
               <td style="padding:3px; text-align:center;">{d['shot']}</td>
-              <td style="text-align:center;">{d['actual_dy']:.0f}</td>
-              <td style="text-align:center;">{d['theory_dy']:.0f}</td>
+              <td style="text-align:center;">{d['actual_dy']:.2f}</td>
+              <td style="text-align:center;">{d['theory_dy']:.2f}</td>
               <td style="text-align:center;">{r_text}</td>
-              <td style="text-align:center;">{d.get('x_drift', 0):.0f}</td>
+              <td style="text-align:center;">{d.get('x_drift', 0):.2f}</td>
               <td style="text-align:center;">{d['status']}</td>
             </tr>"""
         html += "</table>"
@@ -804,11 +822,17 @@ class MainWindow(QWidget):
             self.c_pose.addItem(cn, k)
         cfg_layout.addWidget(self.c_pose, 2, 3)
 
-        cfg_layout.addWidget(QLabel("灵敏度:"), 3, 0)
-        self.c_sens = QComboBox()
-        self.c_sens.addItems(["低 (精准)", "中 (推荐)", "高 (灵敏)"])
-        self.c_sens.setCurrentIndex(1)
-        cfg_layout.addWidget(self.c_sens, 3, 1)
+        cfg_layout.addWidget(QLabel("标注方向:"), 3, 0)
+        self.c_direction = QComboBox()
+        self.c_direction.addItem("下→上 (后坐力)", "bottom_up")
+        self.c_direction.addItem("上→下 (反向)", "top_down")
+        cfg_layout.addWidget(self.c_direction, 3, 1)
+
+        cfg_layout.addWidget(QLabel("起始发数:"), 3, 2)
+        self.c_start_shot = QComboBox()
+        for i in range(1, 51):
+            self.c_start_shot.addItem(f"第{i}发", i)
+        cfg_layout.addWidget(self.c_start_shot, 3, 3)
 
         right.addWidget(cfg_group)
 
@@ -934,6 +958,11 @@ class MainWindow(QWidget):
         self.btn_cross.clicked.connect(self._cross_compare)
 
         self.canvas.holes_changed.connect(self._on_holes_changed)
+
+        self.c_direction.currentIndexChanged.connect(
+            lambda: self.canvas.set_sort_direction(self.c_direction.currentData()))
+        self.c_start_shot.currentIndexChanged.connect(
+            lambda: self.canvas.set_start_shot(self.c_start_shot.currentData()))
 
         for combo in [self.c_gun, self.c_scope, self.c_muzzle, self.c_grip, self.c_stock, self.c_pose]:
             combo.currentIndexChanged.connect(self._on_config_changed)
@@ -1117,7 +1146,9 @@ class MainWindow(QWidget):
                 '<p>点击「检测过程」查看中间步骤</p>')
             return
 
-        BulletSorter.sort(holes)
+        direction = self.c_direction.currentData() or 'bottom_up'
+        start_shot = self.c_start_shot.currentData() or 1
+        BulletSorter.sort(holes, direction, start_shot)
         pm = _cv2_to_pixmap(self._result_img)
         self.canvas.set_data(holes, pm)
 
@@ -1275,7 +1306,9 @@ class MainWindow(QWidget):
 
         holes = data.get('holes', [])
         if not all('shot_num' in h for h in holes):
-            BulletSorter.sort(holes)
+            direction = self.c_direction.currentData() or 'bottom_up'
+            start_shot = self.c_start_shot.currentData() or 1
+            BulletSorter.sort(holes, direction, start_shot)
 
         # 尝试加载原图
         img_path = data.get('image_path')
@@ -1408,7 +1441,9 @@ class MainWindow(QWidget):
             self.info_lb.setText("迭代检测: 未检测到弹痕, 请手动标注后结果会自动计算")
             return
 
-        BulletSorter.sort(holes)
+        direction = self.c_direction.currentData() or 'bottom_up'
+        start_shot = self.c_start_shot.currentData() or 1
+        BulletSorter.sort(holes, direction, start_shot)
         pm = _cv2_to_pixmap(new_img)
         self.canvas.set_data(holes, pm)
 
