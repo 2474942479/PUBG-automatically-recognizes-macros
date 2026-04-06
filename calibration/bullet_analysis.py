@@ -18,13 +18,24 @@ PUBG 弹痕分析统一模块
 import cv2
 import json
 import time
+import logging
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 
+# ── 日志配置 ──
+# 使用方法: 在外部设置 logging.basicConfig(level=logging.DEBUG) 即可看到检测细节
+log = logging.getLogger("bullet_analysis")
+
+
+# ═══════════════════════════════════════════
+# 工具函数
+# ═══════════════════════════════════════════
 
 def _find_gun_data_dir():
-    """智能查找 GunData 目录"""
+    """从多个候选路径中查找 GunData 目录。
+    优先级: 当前目录 > 上一级 > 脚本同级 > 脚本上一级
+    """
     candidates = [
         Path('./_internal/GunData'),
         Path('../_internal/GunData'),
@@ -38,7 +49,7 @@ def _find_gun_data_dir():
 
 
 def _load_sensitivity_config():
-    """直接从配置文件读取灵敏度设置，不依赖 ProcessClass"""
+    """从 Config/config.json 读取灵敏度配置，不依赖 ProcessClass"""
     candidates = [
         Path('./Config/config.json'),
         Path('../Config/config.json'),
@@ -54,109 +65,326 @@ def _load_sensitivity_config():
     return {}
 
 
-# FIRE1 (半自动枪械)：每个数组元素 = 一发子弹，tick间隔100ms
+# ── 枪械分类常量 ──
+
+# 半自动枪械列表 (FIRE1模式): 每个数组元素 = 一发子弹
 _SEMI_AUTO_GUNS = frozenset([
     "sks", "mini14", "delagongnuofu", "m16a4", "mk12", "mk47",
     "qbu", "zidongzhuangtianbuqiang",
 ])
 
-# 全自动枪械：9ms/tick，每发子弹约10-15个tick
+# 全自动枪械的tick间隔(ms)
 _AUTO_TICK_MS = 9
 
 
 # ═══════════════════════════════════════════
-# 自适应检测参数
+# 检测灵敏度预设
 # ═══════════════════════════════════════════
+#
+# 为什么需要灵敏度预设？
+# ───────────────────
+# PUBG 弹痕在截图中的表现差异很大:
+#   - 墙面颜色/纹理影响对比度
+#   - 截图分辨率影响弹痕像素大小
+#   - 远距离射击时弹痕更小
+#   - JPEG压缩会模糊边缘
+#
+# 三档灵敏度从"宽松"到"严格":
+#   高敏: 尽可能多检测，可能有假阳性（建议搭配手工修正）
+#   标准: 平衡精度和召回率
+#   低敏: 只保留最确定的弹痕，漏检多但误检少
 
-_DEFAULT_PARAMS = {
-    'min_area': 20, 'max_area': 800,
-    'min_circularity': 0.20, 'color_threshold': 12,
-    'morph_kernel': 5, 'dilate_iterations': 1,
-    'close_iterations': 2, 'max_lateral_deviation': 50,
+_SENSITIVITY_PRESETS = {
+    'high': {
+        'min_area': 3,            # 极小弹痕也检测（远距离/小分辨率）
+        'max_area': 3000,
+        'min_circularity': 0.08,  # 几乎不限制形状
+        'color_threshold': 2,     # 极低对比度也检测
+        'morph_kernel': 3,
+        'dilate_iterations': 2,
+        'close_iterations': 3,
+        'max_lateral_deviation': 80,
+        'median_kernels': [7, 11, 15, 21, 31],  # 更多尺度
+    },
+    'medium': {
+        'min_area': 8,
+        'max_area': 2000,
+        'min_circularity': 0.12,
+        'color_threshold': 5,
+        'morph_kernel': 5,
+        'dilate_iterations': 1,
+        'close_iterations': 2,
+        'max_lateral_deviation': 60,
+        'median_kernels': [11, 21, 31],
+    },
+    'low': {
+        'min_area': 30,
+        'max_area': 1000,
+        'min_circularity': 0.30,
+        'color_threshold': 15,
+        'morph_kernel': 5,
+        'dilate_iterations': 1,
+        'close_iterations': 2,
+        'max_lateral_deviation': 40,
+        'median_kernels': [21, 31],
+    },
 }
 
 
-def _scale_params(resolution):
+def _get_params(sensitivity='medium', resolution="1920x1080"):
+    """根据灵敏度和分辨率生成检测参数"""
+    base = _SENSITIVITY_PRESETS.get(sensitivity, _SENSITIVITY_PRESETS['medium']).copy()
+
+    # 按分辨率缩放面积相关参数
     try:
-        w, h = map(int, resolution.split('x'))
+        _, h = map(int, resolution.split('x'))
     except (ValueError, AttributeError):
         h = 1080
     scale = h / 1080.0
     area_scale = scale * scale
-    return {
-        'min_area': max(10, int(_DEFAULT_PARAMS['min_area'] * area_scale)),
-        'max_area': int(_DEFAULT_PARAMS['max_area'] * area_scale),
-        'min_circularity': _DEFAULT_PARAMS['min_circularity'],
-        'color_threshold': _DEFAULT_PARAMS['color_threshold'],
-        'morph_kernel': max(3, int(_DEFAULT_PARAMS['morph_kernel'] * scale)),
-        'dilate_iterations': _DEFAULT_PARAMS['dilate_iterations'],
-        'close_iterations': _DEFAULT_PARAMS['close_iterations'],
-        'max_lateral_deviation': int(_DEFAULT_PARAMS['max_lateral_deviation'] * scale),
-    }
+    base['min_area'] = max(2, int(base['min_area'] * area_scale))
+    base['max_area'] = int(base['max_area'] * area_scale)
+    base['morph_kernel'] = max(3, int(base['morph_kernel'] * scale)) | 1  # 保证奇数
+    base['max_lateral_deviation'] = int(base['max_lateral_deviation'] * scale)
+    return base
 
 
 # ═══════════════════════════════════════════
-# 弹痕检测
+# 弹痕检测（核心）
 # ═══════════════════════════════════════════
 
 class BulletDetector:
-    """弹痕检测器，支持三种模式：双图差分 / 单图自适应 / 模板匹配"""
+    """弹痕检测器
 
-    def __init__(self, resolution="1920x1080"):
-        self.params = _scale_params(resolution)
+    支持三种检测模式:
+      1. detect_single(image)           — 单图自适应（推荐，无需基线图）
+      2. detect_with_template(img,tmpl) — 模板匹配（你提供一个弹孔的小截图）
+      3. detect(base, result)           — 双图差分（需要基线图，最准但麻烦）
 
-    # ── 模式1: 双图差分（原始方式）──
+    所有模式都返回 list[dict]，每个 dict 包含 x, y, area, circularity 等字段。
 
-    def detect(self, base, result):
-        """需要基线图和结果图"""
-        if base.shape != result.shape:
-            result = cv2.resize(result, (base.shape[1], base.shape[0]))
-        bg = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
-        rg = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
-        return self._detect_from_diff(bg, rg)
+    检测过程中产生的调试信息保存在 self.debug_info 中，
+    调试图像保存在 self.debug_images 中，供 GUI 展示。
+    """
 
-    # ── 模式2: 单图自适应（无需基线图）──
+    def __init__(self, resolution="1920x1080", sensitivity='medium'):
+        """
+        :param resolution: 截图分辨率，如 "1920x1080"
+        :param sensitivity: 灵敏度 'low'(严格) / 'medium'(标准) / 'high'(宽松)
+        """
+        self.sensitivity = sensitivity
+        self.params = _get_params(sensitivity, resolution)
+
+        # ── debug 容器（每次检测前清空）──
+        self.debug_info = {}     # 文本信息: 各步骤候选数、过滤原因等
+        self.debug_images = {}   # 中间图像: diff, threshold, contours 等
+
+    # ═══ 模式1: 单图自适应 ═══
 
     def detect_single(self, image):
-        """通过重度中值滤波生成虚拟基线，只需一张结果图。
-        原理：大核中值滤波能移除弹孔等小特征但保留墙面纹理，
-        滤波后的图 ≈ 没有弹痕的干净墙面 → 当作虚拟基线。
+        """【推荐】只需一张弹痕截图，自动检测弹孔。
+
+        原理:
+          1. CLAHE 增强对比度（让暗弹痕更明显）
+          2. 多尺度中值滤波生成虚拟基线（不同kernel捕获不同大小的弹痕）
+             - 小kernel(11): 只模糊小特征，适合检测较大弹痕
+             - 大kernel(31): 模糊大特征，适合检测较小弹痕
+          3. 对每个尺度做 差分→阈值→轮廓检测
+          4. 合并所有尺度的结果，NMS 去重
+          5. 噪声过滤（移除偏离主弹道的散点）
+
+        如果检测不到:
+          - 尝试 sensitivity='high'
+          - 或改用 detect_with_template() 模板匹配
         """
+        self._reset_debug()
+        log.info("开始单图自适应检测, 灵敏度=%s", self.sensitivity)
+
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        baseline = cv2.medianBlur(gray, 31)
-        return self._detect_from_diff(baseline, gray)
+        self.debug_images['01_gray'] = gray.copy()
 
-    # ── 模式3: 模板匹配 ──
+        # Step 1: CLAHE 对比度增强
+        # 为什么用 CLAHE? 弹痕是深色小区域，在浅色墙面上可能对比度很低
+        # CLAHE (Contrast Limited Adaptive Histogram Equalization) 局部增强对比度
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        self.debug_images['02_clahe'] = enhanced.copy()
+        log.debug("CLAHE 增强完成")
 
-    def detect_with_template(self, image, template, threshold=0.6):
-        """用弹孔模板图在结果图中匹配，支持多尺度。"""
+        # Step 2: 多尺度中值滤波 → 差分检测
+        all_holes = []
+        kernels = self.params.get('median_kernels', [11, 21, 31])
+        log.debug("使用中值滤波核: %s", kernels)
+
+        for ks in kernels:
+            # 中值滤波: 用半径为 ks//2 的邻域中值替代每个像素
+            # 效果: 移除小于半径的特征（如弹痕），保留大面积区域（如墙面）
+            baseline = cv2.medianBlur(enhanced, ks)
+            self.debug_images[f'03_baseline_k{ks}'] = baseline.copy()
+
+            holes = self._detect_from_diff(baseline, enhanced, tag=f'median_k{ks}')
+            log.debug("  核%d: 检测到 %d 个候选", ks, len(holes))
+            all_holes.extend(holes)
+
+        # Step 3: 自适应阈值策略（补充检测暗色斑点）
+        # 为什么需要这个? 中值滤波可能miss掉与背景色差很小的弹痕
+        adaptive_holes = self._detect_adaptive(enhanced, tag='adaptive')
+        log.debug("自适应阈值: 检测到 %d 个候选", len(adaptive_holes))
+        all_holes.extend(adaptive_holes)
+
+        # Step 4: NMS 去重（多策略可能检测到同一个弹痕多次）
+        before_nms = len(all_holes)
+        merged = self._nms(all_holes, min_dist=12)
+        log.debug("NMS 去重: %d → %d", before_nms, len(merged))
+
+        # Step 5: 噪声过滤
+        filtered = self._filter_noise(merged)
+        log.info("最终结果: %d 个弹痕 (候选%d, NMS后%d)", len(filtered), before_nms, len(merged))
+
+        self.debug_info['total_candidates'] = before_nms
+        self.debug_info['after_nms'] = len(merged)
+        self.debug_info['final'] = len(filtered)
+        self.debug_info['mode'] = '单图自适应'
+        self.debug_info['sensitivity'] = self.sensitivity
+        self.debug_info['params'] = {k: v for k, v in self.params.items() if k != 'median_kernels'}
+
+        return filtered
+
+    # ═══ 模式2: 模板匹配 ═══
+
+    def detect_with_template(self, image, template, threshold=0.55):
+        """用弹孔模板在图中匹配。
+
+        模板要求（重要!）:
+          - 截取图中一个弹孔，紧贴边缘裁剪
+          - 尺寸建议 15x15 ~ 50x50 像素
+          - 背景色应与目标墙面一致
+          - 可以直接从弹痕截图中 截取一个弹孔 作为模板
+
+        原理:
+          1. 多尺度匹配: 模板缩放 0.5x~1.8x，因为弹痕大小不完全一致
+          2. 归一化相关系数匹配 (TM_CCOEFF_NORMED): 对亮度变化鲁棒
+          3. 超过阈值的位置 → 候选弹痕
+          4. NMS 去除重叠检测
+
+        :param template: 弹孔模板图 (BGR 或灰度，15~50px 的小图)
+        :param threshold: 匹配置信度阈值 (0~1, 越低越宽松, 默认0.55)
+        """
+        self._reset_debug()
+        log.info("开始模板匹配检测, threshold=%.2f", threshold)
+
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         tmpl = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) if template.ndim == 3 else template
         th, tw = tmpl.shape[:2]
+        log.debug("模板尺寸: %dx%d", tw, th)
+
+        self.debug_images['01_image'] = gray.copy()
+        self.debug_images['02_template'] = tmpl.copy()
+
+        # CLAHE 增强（让弹痕更清晰）
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray_e = clahe.apply(gray)
+        tmpl_e = clahe.apply(tmpl)
 
         holes = []
-        for scale in np.arange(0.5, 1.8, 0.15):
-            st = cv2.resize(tmpl, None, fx=scale, fy=scale)
-            if st.shape[0] >= gray.shape[0] or st.shape[1] >= gray.shape[1]:
+        # 多尺度: 弹痕在图中可能比模板稍大或稍小
+        for scale in np.arange(0.5, 1.9, 0.1):
+            st = cv2.resize(tmpl_e, None, fx=scale, fy=scale)
+            if st.shape[0] >= gray_e.shape[0] or st.shape[1] >= gray_e.shape[1]:
                 continue
-            result = cv2.matchTemplate(gray, st, cv2.TM_CCOEFF_NORMED)
+
+            # TM_CCOEFF_NORMED: 值范围 -1~1, 越接近1越匹配
+            result = cv2.matchTemplate(gray_e, st, cv2.TM_CCOEFF_NORMED)
             locs = np.where(result >= threshold)
+
             for pt in zip(*locs[::-1]):
                 cx = pt[0] + st.shape[1] // 2
                 cy = pt[1] + st.shape[0] // 2
                 conf = float(result[pt[1], pt[0]])
-                holes.append({'x': cx, 'y': cy, 'area': int(st.shape[0] * st.shape[1]),
-                              'circularity': 1.0, 'color_diff': 50, 'confidence': conf})
+                holes.append({
+                    'x': cx, 'y': cy,
+                    'area': int(st.shape[0] * st.shape[1]),
+                    'circularity': 1.0,
+                    'color_diff': 50,
+                    'confidence': conf,
+                })
 
-        holes = self._nms(holes, min_dist=max(tw, th) // 2)
-        return self._filter_noise(holes)
+            if locs[0].size > 0:
+                log.debug("  scale=%.2f: 找到 %d 个匹配", scale, locs[0].size)
 
-    # ── 公共方法 ──
+        before_nms = len(holes)
+        # NMS 距离 = 模板尺寸的一半（避免重叠检测）
+        holes = self._nms(holes, min_dist=max(8, max(tw, th) // 2))
+        filtered = self._filter_noise(holes)
 
-    def _detect_from_diff(self, bg_gray, result_gray):
+        log.info("模板匹配完成: 候选%d, NMS后%d, 最终%d", before_nms, len(holes), len(filtered))
+
+        self.debug_info['total_candidates'] = before_nms
+        self.debug_info['after_nms'] = len(holes)
+        self.debug_info['final'] = len(filtered)
+        self.debug_info['mode'] = '模板匹配'
+        self.debug_info['template_size'] = f'{tw}x{th}'
+        self.debug_info['threshold'] = threshold
+
+        return filtered
+
+    # ═══ 模式3: 双图差分 ═══
+
+    def detect(self, base, result):
+        """传统模式: 基线图(空墙) vs 结果图(弹痕)
+
+        :param base: 空墙面截图 (BGR)
+        :param result: 打完后的截图 (BGR)
+        """
+        self._reset_debug()
+        log.info("开始双图差分检测")
+
+        if base.shape != result.shape:
+            result = cv2.resize(result, (base.shape[1], base.shape[0]))
+        bg = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
+        rg = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+
+        self.debug_images['01_base'] = bg.copy()
+        self.debug_images['02_result'] = rg.copy()
+
+        holes = self._detect_from_diff(bg, rg, tag='dual_diff')
+
+        self.debug_info['total_candidates'] = len(holes)
+        self.debug_info['final'] = len(holes)
+        self.debug_info['mode'] = '双图差分'
+
+        return holes
+
+    # ═══ 核心检测引擎 ═══
+
+    def _detect_from_diff(self, bg_gray, result_gray, tag=''):
+        """差分检测核心流程:
+          1. 计算两张灰度图的绝对差 → diff
+          2. OTSU 自动阈值 → 二值化 (如果OTSU效果不好则用固定阈值回退)
+          3. 形态学操作(闭运算+膨胀) → 填充弹痕内部空洞
+          4. 轮廓检测 → 候选区域
+          5. 过滤: 面积、圆形度、颜色差异
+
+        :param tag: 调试标签，用于区分不同策略
+        """
         diff = cv2.absdiff(bg_gray, result_gray)
-        _, thresh = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        self.debug_images[f'{tag}_diff'] = diff.copy()
 
+        # OTSU 阈值: 自动寻找最佳分割点
+        # 如果图像大部分没变化（弹痕占比很小），OTSU 可能选错阈值
+        otsu_val, thresh = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        white_ratio = np.sum(thresh > 0) / max(1, thresh.size)
+        log.debug("  [%s] OTSU阈值=%d, 白色像素占比=%.4f", tag, otsu_val, white_ratio)
+
+        # 如果 OTSU 效果异常（白色太多或太少），用固定低阈值回退
+        if white_ratio > 0.20 or white_ratio < 0.0001:
+            fallback_th = max(8, int(otsu_val * 0.4)) if otsu_val > 20 else 10
+            _, thresh = cv2.threshold(diff, fallback_th, 255, cv2.THRESH_BINARY)
+            log.debug("  [%s] OTSU 异常, 回退固定阈值=%d", tag, fallback_th)
+
+        self.debug_images[f'{tag}_thresh'] = thresh.copy()
+
+        # 形态学: 闭运算填充小孔洞 → 膨胀扩大轮廓使碎片连通
         ks = self.params['morph_kernel']
         k = np.ones((ks, ks), np.uint8)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, k,
@@ -165,11 +393,92 @@ class BulletDetector:
                             iterations=self.params['dilate_iterations'])
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        log.debug("  [%s] 轮廓数=%d", tag, len(contours))
 
         holes = []
-        min_a, max_a = self.params['min_area'], self.params['max_area']
+        min_a = self.params['min_area']
+        max_a = self.params['max_area']
         min_c = self.params['min_circularity']
         color_th = self.params['color_threshold']
+        rejected = {'area_small': 0, 'area_big': 0, 'shape': 0, 'color': 0}
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_a:
+                rejected['area_small'] += 1
+                continue
+            if area > max_a:
+                rejected['area_big'] += 1
+                continue
+
+            # 圆形度 = 4π·面积/周长² , 圆=1.0, 方形=π/4≈0.785, 长条<0.5
+            peri = cv2.arcLength(cnt, True)
+            if peri == 0:
+                continue
+            circularity = 4 * np.pi * (area / (peri * peri))
+            if circularity < min_c:
+                rejected['shape'] += 1
+                continue
+
+            # 质心坐标
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+
+            # 颜色差异: 背景和结果在该区域的平均亮度之差
+            mask = np.zeros(bg_gray.shape[:2], dtype=np.uint8)
+            cv2.drawContours(mask, [cnt], -1, 255, -1)
+            color_diff = abs(cv2.mean(bg_gray, mask=mask)[0] - cv2.mean(result_gray, mask=mask)[0])
+            if color_diff < color_th:
+                rejected['color'] += 1
+                continue
+
+            holes.append({
+                'x': cx, 'y': cy,
+                'area': round(float(area), 1),
+                'circularity': round(circularity, 3),
+                'color_diff': round(color_diff, 1),
+            })
+
+        log.debug("  [%s] 通过=%d, 拒绝: 面积小=%d 面积大=%d 形状=%d 颜色=%d",
+                  tag, len(holes), rejected['area_small'], rejected['area_big'],
+                  rejected['shape'], rejected['color'])
+        self.debug_info[f'{tag}_rejected'] = rejected
+        self.debug_info[f'{tag}_passed'] = len(holes)
+
+        return self._filter_noise(holes)
+
+    def _detect_adaptive(self, gray, tag='adaptive'):
+        """自适应阈值检测: 不需要差分，直接找深色斑点。
+
+        原理: 用 cv2.adaptiveThreshold 将每个像素与其邻域比较，
+        比邻域暗的区域 → 白色 → 候选弹痕。
+
+        适合: 弹痕与墙面对比度低、或中值滤波效果差的情况。
+        缺点: 墙面本身有纹理时容易误检。
+        """
+        # blockSize=21: 21x21 邻域
+        # C=8: 低于邻域均值 8 个灰度值才算前景
+        binary = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 21, 8)
+
+        ks = self.params['morph_kernel']
+        k = np.ones((ks, ks), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k, iterations=2)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k, iterations=1)
+
+        self.debug_images[f'{tag}_binary'] = binary.copy()
+
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        log.debug("  [%s] 轮廓数=%d", tag, len(contours))
+
+        holes = []
+        min_a = self.params['min_area']
+        max_a = self.params['max_area']
+        min_c = self.params['min_circularity'] * 1.5  # 自适应模式需要更严格的形状约束
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
@@ -186,23 +495,23 @@ class BulletDetector:
                 continue
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"])
-
-            mask = np.zeros(bg_gray.shape[:2], dtype=np.uint8)
-            cv2.drawContours(mask, [cnt], -1, 255, -1)
-            color_diff = abs(cv2.mean(bg_gray, mask=mask)[0] - cv2.mean(result_gray, mask=mask)[0])
-            if color_diff < color_th:
-                continue
-
             holes.append({
-                'x': cx, 'y': cy, 'area': area,
+                'x': cx, 'y': cy,
+                'area': round(float(area), 1),
                 'circularity': round(circularity, 3),
-                'color_diff': round(color_diff, 1),
+                'color_diff': 50,  # 无差分时无法计算，给默认值
             })
 
-        return self._filter_noise(holes)
+        log.debug("  [%s] 通过=%d", tag, len(holes))
+        return holes
+
+    # ═══ 去重与过滤 ═══
 
     @staticmethod
-    def _nms(holes, min_dist=15):
+    def _nms(holes, min_dist=12):
+        """非极大值抑制: 多策略检测同一弹痕时去重。
+        保留置信度/颜色差最高的那个。
+        """
         if not holes:
             return holes
         holes = sorted(holes, key=lambda h: h.get('confidence', h.get('color_diff', 0)), reverse=True)
@@ -213,13 +522,23 @@ class BulletDetector:
         return keep
 
     def _filter_noise(self, holes):
+        """噪声过滤: 弹痕应该沿一条竖直线分布（后坐力是竖直的），
+        偏离主轴太远的点 → 噪声/误检。
+
+        算法:
+          1. 计算所有弹孔 X 坐标的中位数 → 主轴
+          2. 保留 |x - median_x| < max_lateral_deviation 的弹孔
+          3. 如果主轴组太少，尝试其他中心点
+        """
         if len(holes) < 4:
             return holes
         max_dx = self.params['max_lateral_deviation']
         xs = [h['x'] for h in holes]
         median_x = float(np.median(xs))
+
         main_group = [h for h in holes if abs(h['x'] - median_x) <= max_dx]
         if len(main_group) < 3:
+            # 中位数不靠谱时，以每个点为中心找最大群组
             best_group = []
             for h in holes:
                 group = [h2 for h2 in holes if abs(h2['x'] - h['x']) <= max_dx]
@@ -228,17 +547,25 @@ class BulletDetector:
             return best_group if len(best_group) >= 3 else holes
         return main_group
 
+    def _reset_debug(self):
+        self.debug_info = {}
+        self.debug_images = {}
+
 
 # ═══════════════════════════════════════════
 # 标注数据持久化
 # ═══════════════════════════════════════════
 
 class AnnotationData:
-    """标注数据的保存和加载（JSON sidecar 文件）"""
+    """标注数据的保存和加载（JSON sidecar 文件）
+
+    保存: 每次保存标注图时，在同目录生成 <文件名>.analysis.json
+    加载: 选 .analysis.json 或 图片文件（自动查找同名JSON）
+    """
 
     @staticmethod
     def save(image_path, holes, metadata=None):
-        """保存标注数据为 <文件名>.analysis.json"""
+        """保存标注数据"""
         p = Path(image_path)
         json_path = p.parent / f"{p.stem}.analysis.json"
         data = {
@@ -255,15 +582,12 @@ class AnnotationData:
 
     @staticmethod
     def load(path):
-        """加载标注数据。支持 .analysis.json 或图片文件（自动查找同名JSON）。
-        返回 (holes, metadata) 或 (None, None)
-        """
+        """加载标注数据，返回 (holes, metadata) 或 (None, None)"""
         p = Path(path)
         if p.suffix.lower() == '.json':
             json_path = p
         else:
             json_path = p.parent / f"{p.stem}.analysis.json"
-
         if not json_path.exists():
             return None, None
         try:
@@ -296,18 +620,27 @@ class AnnotationData:
 # ═══════════════════════════════════════════
 
 class IterativeCorrector:
-    """迭代修正：加载「宏开启后的弹痕图」+「上一轮参数」→ 微调。
+    """迭代修正: 宏开启后拍新弹痕 + 上一轮参数 → 微调
 
-    原理：
-      宏开启后射击，如果参数完美，所有弹孔应在同一位置。
-      残余偏移 = 每发弹孔相对前一发的位移。
-      dy > 0 → 弹孔偏下 → 过度补偿 → 减小参数
-      dy < 0 → 弹孔偏上 → 补偿不足 → 增大参数
-      将残差按比例分配到对应chunk的各个tick值上。
+    工作流:
+      Round 1: 不开宏射击 → 分析 → 修正参数 v1
+      Round 2: 开宏(用v1)射击 → 残余偏移 → 微调 → 修正参数 v2
+      Round N: ...
+
+    原理:
+      宏开启后，理想情况所有弹孔应在同一位置（完美补偿）。
+      实际残余偏移 = 补偿误差:
+        dy > 0（弹孔偏下）→ 补偿过度 → 减小参数
+        dy < 0（弹孔偏上）→ 补偿不足 → 增大参数
     """
 
     @staticmethod
     def correct(residual_holes, prev_params, scope_val, posture_val, chunk_size=12):
+        """
+        :param residual_holes: 宏开启后的弹痕坐标
+        :param prev_params: 上一轮的参数数组
+        :return: dict 包含 corrected_params, residuals 等
+        """
         if len(residual_holes) < 2 or not prev_params:
             return None
 
@@ -323,13 +656,14 @@ class IterativeCorrector:
             dy = s[i]['y'] - s[i - 1]['y']
             dx = s[i]['x'] - s[i - 1]['x']
 
-            # 需要增减的补偿量（像素→原始值空间）
+            # 需要增减的补偿量（像素 → 原始值空间）
             adjustment_raw = -dy / factor
 
             start = (i - 1) * chunk
             end = min(i * chunk, len(corrected))
             chunk_sum = sum(abs(prev_params[j]) for j in range(start, min(end, len(prev_params))))
 
+            # 按原始值的比例分配调整量到各个tick
             for j in range(start, min(end, len(corrected))):
                 if chunk_sum > 0 and prev_params[j] != 0:
                     proportion = abs(prev_params[j]) / chunk_sum
@@ -359,9 +693,10 @@ class IterativeCorrector:
 # ═══════════════════════════════════════════
 
 class BulletSorter:
-    """
-    按开枪顺序排序弹痕。
-    PUBG 后坐力使子弹向上飞，先打的弹痕在下面（Y值大），后打的在上面（Y值小）。
+    """排序弹痕: PUBG 后坐力使子弹向上飞
+
+    先打的弹痕在最下面（Y值最大），后打的在上面（Y值最小）。
+    排序后为每个弹孔分配 shot_num: 1=第一发(Y最大), 2=第二发 ...
     """
 
     @staticmethod
@@ -375,23 +710,39 @@ class BulletSorter:
 
 
 # ═══════════════════════════════════════════
-# 理论数据对比（核心修复）
+# 理论数据对比
 # ═══════════════════════════════════════════
 
 class BulletComparator:
     """与 GunData JSON 弹道数据对比，计算校准系数。
 
-    数据格式说明:
-      Process.FIRE() 对弹道数组逐元素执行 mouse_R(0, posture*(val*scope))，
-      间隔 9ms/tick。每发子弹约占 10-15 个 tick。
-      因此每发子弹的理论补偿 = sum(chunk_values) * scope * posture (像素)。
-      实际弹孔间距(像素) 与之对比可得校准比值。
+    核心公式:
+      实际补偿(像素) = 弹孔间距 = |Y₁ - Y₂|
+      理论补偿(像素) = sum(chunk_values) × 灵敏度 × 姿态系数
+
+      比值 = 实际/理论:
+        > 1.0 → 弹跳大于预期 → 参数偏小（补偿不足）
+        < 1.0 → 弹跳小于预期 → 参数偏大（过度补偿）
+        ≈ 1.0 → 参数准确
+
+    数据格式:
+      Process.FIRE() 对弹道数组逐元素执行 mouse_R(0, 姿态*(值*灵敏度))
+      间隔 9ms/tick。M762(600RPM) 每发≈100ms → 约11个tick/发
     """
 
     def __init__(self, gun_data_dir=None):
         self.gun_data_dir = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
 
     def compare(self, holes, gun_name, acc_code, scope_val, posture_val):
+        """对比实际弹痕间距与理论值
+
+        :param holes: 已排序的弹痕列表
+        :param gun_name: 枪械名 (如 "m762")
+        :param acc_code: 配件码 (如 "A0B0C0")
+        :param scope_val: 灵敏度系数
+        :param posture_val: 姿态系数
+        :return: dict 包含 details, avg_ratio 等
+        """
         if len(holes) < 2:
             return None
 
@@ -412,11 +763,11 @@ class BulletComparator:
         max_intervals = max(1, len(raw) // max(1, chunk))
         n_compare = min(n_intervals, max_intervals)
 
-        # 实际间距: shot_num=1 在最下面(Y最大), 间距 = 前一发Y - 后一发Y
+        # 实际间距(px): shot 1(Y最大) - shot 2(Y次大) = 第1→2发的Y位移
         actual_spacings = [s[i - 1]['y'] - s[i]['y'] for i in range(1, len(s))]
         actual_dx = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
 
-        # 理论间距: 每个chunk的值求和 * scope * posture
+        # 理论间距(px): chunk内所有tick值的累加 × 灵敏度 × 姿态
         theory_chunks = []
         for i in range(n_compare):
             start = i * chunk
@@ -434,13 +785,13 @@ class BulletComparator:
             if theory > 0 and actual > 0:
                 ratio = actual / theory
                 ratios.append(ratio)
-                status = "⚠偏大" if ratio > 1.3 else "⚠偏小" if ratio < 0.7 else "✅正常"
+                status = "偏大" if ratio > 1.3 else "偏小" if ratio < 0.7 else "正常"
             elif actual <= 0:
                 ratio = None
-                status = "⚠异常(负间距)"
+                status = "异常(负间距)"
             else:
                 ratio = None
-                status = "⚠理论=0"
+                status = "理论=0"
 
             details.append({
                 'shot': i + 1,
@@ -459,7 +810,6 @@ class BulletComparator:
         std_ratio = float(np.std(ratios))
         suggested_scope = round(scope_val * avg_ratio, 3)
 
-        # 水平漂移统计
         avg_dx = float(np.mean(actual_dx)) if actual_dx else 0.0
         max_dx = float(max(abs(d) for d in actual_dx)) if actual_dx else 0.0
         std_dx = float(np.std(actual_dx)) if len(actual_dx) > 1 else 0.0
@@ -485,11 +835,15 @@ class BulletComparator:
 
     @staticmethod
     def _estimate_chunk_size(raw, is_semi):
-        """估算每发子弹对应的数组元素数量"""
+        """估算每发子弹对应的数组元素数量
+
+        半自动: 1个元素=1发
+        全自动: 9ms/tick, 射速决定每发的tick数
+          600RPM → 100ms/发 → 11 ticks
+          800RPM → 75ms/发 → 8 ticks
+        """
         if is_semi:
             return 1
-        # 全自动: 9ms/tick, 典型射速600-900RPM → 67-100ms/发 → 7-11 ticks
-        # 用12作为默认值，适合大多数步枪(~600RPM)
         n = len(raw)
         if n <= 15:
             return max(1, n)
@@ -512,28 +866,34 @@ class BulletComparator:
 # ═══════════════════════════════════════════
 
 class BulletVisualizer:
-    """弹痕标注和图表绘制"""
+    """绘制弹痕标注图和柱状图"""
 
     @staticmethod
     def draw_holes(img, holes):
+        """在图上标注弹孔编号、箭头连线、间距信息"""
         vis = img.copy()
         s = sorted(holes, key=lambda h: h['shot_num'])
 
+        # 相邻弹孔连线（箭头）
         for i in range(len(s) - 1):
             dy = abs(s[i]['y'] - s[i + 1]['y'])
             dx = abs(s[i]['x'] - s[i + 1]['x'])
+            # 颜色编码: 红=间距极小(可能误检), 黄=间距偏小, 绿=正常
             color = (0, 0, 255) if (dy < 5 and dx < 5) else (0, 255, 255) if dy < 15 else (0, 255, 0)
             cv2.arrowedLine(vis, (s[i]['x'], s[i]['y']),
                             (s[i + 1]['x'], s[i + 1]['y']), color, 2, tipLength=0.15)
 
+        # 弹孔标记
         for hv in s:
             n = hv['shot_num']
+            # 颜色编码: 红=前5发, 橙=6-15发, 绿=后续
             col = (0, 0, 255) if n <= 5 else (0, 165, 255) if n <= 15 else (0, 255, 0)
             cv2.circle(vis, (hv['x'], hv['y']), 10, col, 2)
             cv2.circle(vis, (hv['x'], hv['y']), 3, col, -1)
             cv2.putText(vis, str(n), (hv['x'] + 14, hv['y'] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
+        # 统计信息
         if len(s) >= 2:
             spacings = [abs(s[i - 1]['y'] - s[i]['y']) for i in range(1, len(s))]
             dx_list = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
@@ -553,6 +913,7 @@ class BulletVisualizer:
 
     @staticmethod
     def draw_spacing_chart(holes):
+        """绘制纵向间距柱状图"""
         if len(holes) < 2:
             return None
         s = sorted(holes, key=lambda h: h['shot_num'])
@@ -591,6 +952,7 @@ class BulletVisualizer:
 
     @staticmethod
     def draw_drift_chart(holes):
+        """绘制水平漂移柱状图"""
         if len(holes) < 2:
             return None
         s = sorted(holes, key=lambda h: h['shot_num'])
@@ -632,6 +994,8 @@ class BulletVisualizer:
 # ═══════════════════════════════════════════
 
 class ResultSaver:
+    """分析结果文件保存器"""
+
     def __init__(self, save_dir="./calibration_results"):
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
@@ -650,20 +1014,23 @@ class ResultSaver:
 
 
 # ═══════════════════════════════════════════
-# 修正参数生成（支持小数）
+# 修正参数生成
 # ═══════════════════════════════════════════
 
 class ParameterCorrector:
-    """根据校准结果生成修正后的压枪参数，支持小数精度"""
+    """根据校准结果生成修正后的压枪参数
+
+    两种修正方案:
+      均匀修正: 所有tick值 × 平均比值 (简单, 推荐先试)
+      逐发修正: 每个chunk × 对应比值 (精确, 但可能过拟合)
+    """
 
     def __init__(self, gun_data_dir=None):
         self.gun_data_dir = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
 
     def correct(self, comparison_result, gun_name, acc_code, use_float=True):
         """
-        生成修正后的弹道数组。
-
-        :param use_float: True=保留1位小数精度, False=取整(兼容旧逻辑)
+        :param use_float: True=保留1位小数, False=取整
         """
         if not comparison_result:
             return None
@@ -692,10 +1059,10 @@ class ParameterCorrector:
         def _round(v):
             return round(v, 1) if use_float else round(v)
 
-        # 方案一：均匀修正（所有值乘以相同比率）
+        # 方案一: 均匀修正 — 所有值乘以相同比率
         corrected_uniform = [_round(v * avg_ratio) if v != 0 else 0 for v in original]
 
-        # 方案二：逐发修正（每个chunk用对应的ratio）
+        # 方案二: 逐发修正 — 每个chunk用对应的ratio
         per_shot = list(original)
         for i, d in enumerate(details):
             r = d.get('ratio')
@@ -706,7 +1073,6 @@ class ParameterCorrector:
             for j in range(start, end):
                 per_shot[j] = _round(original[j] * r) if original[j] != 0 else 0
 
-        # 水平漂移补偿建议
         x_comp = self._calc_x_compensation(comparison_result, chunk, original)
 
         return {
@@ -727,7 +1093,7 @@ class ParameterCorrector:
 
     @staticmethod
     def _calc_x_compensation(comp, chunk, original):
-        """根据水平漂移数据计算X轴补偿建议"""
+        """分析水平漂移，判断是随机还是系统性的"""
         drifts = comp.get('horizontal_drifts', [])
         if not drifts:
             return None
@@ -735,7 +1101,7 @@ class ParameterCorrector:
         avg_dx = comp.get('avg_horizontal_drift', 0)
         std_dx = comp.get('std_horizontal_drift', 0)
 
-        # 标准差 > 均值绝对值 → 随机性太强，不建议固定补偿
+        # 标准差 >> 均值 → 随机性为主
         if std_dx > abs(avg_dx) * 1.5 and abs(avg_dx) < 3:
             return {'type': 'random', 'avg': avg_dx, 'std': std_dx,
                     'suggestion': '水平漂移随机性强，不建议固定X补偿'}
@@ -744,23 +1110,21 @@ class ParameterCorrector:
         posture = comp.get('posture_val', 1.0)
         factor = max(0.01, scope * posture)
 
-        # 生成每个chunk的X补偿值
         x_per_chunk = []
         for i, dx in enumerate(drifts):
-            # dx > 0 表示弹道向右偏 → 需要向左补偿(负X移动)
             x_raw = round(-dx / factor / max(1, chunk), 1)
             x_per_chunk.append(x_raw)
 
         return {
             'type': 'compensatable',
-            'avg': avg_dx,
-            'std': std_dx,
+            'avg': avg_dx, 'std': std_dx,
             'x_per_chunk': x_per_chunk,
             'suggestion': f'平均水平偏移 {avg_dx:+.1f}px，可添加X轴补偿',
         }
 
     @staticmethod
     def format_array_for_json(arr, items_per_line=36):
+        """格式化数组为 JSON 可读格式"""
         lines = []
         for i in range(0, len(arr), items_per_line):
             chunk = arr[i:i + items_per_line]
@@ -769,7 +1133,7 @@ class ParameterCorrector:
 
     @staticmethod
     def generate_patch_json(correction_result, mode='uniform'):
-        """mode: 'uniform' (均匀修正) 或 'per_shot' (逐发修正)"""
+        """生成可直接粘贴到 JSON 的修正参数"""
         if not correction_result:
             return ""
         arr = correction_result['corrected_uniform'] if mode == 'uniform' \
@@ -784,7 +1148,11 @@ class ParameterCorrector:
 # ═══════════════════════════════════════════
 
 class MultiGroupAnalyzer:
-    """多组弹痕数据的交叉比对分析，取最优参数"""
+    """多组弹痕数据交叉比对，取最优参数
+
+    使用场景: 多次射击取平均，提高修正参数的可靠性。
+    IQR 方法自动移除异常组（比如手抖了那次）。
+    """
 
     def __init__(self):
         self.groups = []
@@ -808,6 +1176,7 @@ class MultiGroupAnalyzer:
         return len(self.groups)
 
     def analyze(self):
+        """跨组统计分析"""
         if not self.groups:
             return None
 
@@ -844,7 +1213,7 @@ class MultiGroupAnalyzer:
         all_ratios = [r for rs in per_interval_ratios for r in rs]
         all_drifts = [d for ds in per_interval_drifts for d in ds]
 
-        # IQR 去除离群值
+        # IQR 离群值移除
         clean_ratios = all_ratios
         n_outliers = 0
         if len(all_ratios) >= 4:
@@ -894,7 +1263,6 @@ class MultiGroupAnalyzer:
         if not original:
             return None
 
-        # 使用逐发最优比率修正
         chunk = self.groups[0]['result'].get('chunk_size', 12) if self.groups else 12
         corrected = list(original)
 
@@ -923,15 +1291,16 @@ class MultiGroupAnalyzer:
 def analyze_bullet_pattern(result_img, gun_name, acc_code,
                            scope_val=1.0, posture_val=1.0,
                            resolution="1920x1080", save_results=True,
-                           base_img=None, template_img=None):
-    """一站式弹痕分析 API。
+                           base_img=None, template_img=None,
+                           sensitivity='medium'):
+    """一站式弹痕分析
 
     :param result_img: 弹痕截图 (BGR)
-    :param base_img: 基线图 (可选, 提供则用差分模式)
-    :param template_img: 弹孔模板 (可选, 提供则用模板匹配)
-    :return: dict 包含 holes, comparison, vis_image 等
+    :param base_img: 基线图 (可选)
+    :param template_img: 弹孔模板 (可选)
+    :param sensitivity: 检测灵敏度 'low'/'medium'/'high'
     """
-    detector = BulletDetector(resolution)
+    detector = BulletDetector(resolution, sensitivity)
     comparator = BulletComparator()
     visualizer = BulletVisualizer()
 
@@ -943,7 +1312,8 @@ def analyze_bullet_pattern(result_img, gun_name, acc_code,
         holes = detector.detect_single(result_img)
 
     if not holes:
-        return {'holes': [], 'comparison': None, 'error': '未检测到弹痕'}
+        return {'holes': [], 'comparison': None, 'error': '未检测到弹痕',
+                'debug_info': detector.debug_info}
 
     sorted_holes = BulletSorter.sort(holes)
     comparison = comparator.compare(sorted_holes, gun_name, acc_code, scope_val, posture_val)
@@ -952,6 +1322,7 @@ def analyze_bullet_pattern(result_img, gun_name, acc_code,
         'holes': sorted_holes,
         'comparison': comparison,
         'shot_count': len(sorted_holes),
+        'debug_info': detector.debug_info,
     }
 
     vis = visualizer.draw_holes(result_img, sorted_holes)
@@ -987,19 +1358,26 @@ def _cli_main():
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("result", help="射击后的墙面截图路径")
-    parser.add_argument("--base", default=None, help="基线图(可选, 不提供则用单图模式)")
-    parser.add_argument("--template", default=None, help="弹孔模板图(可选, 小图)")
-    parser.add_argument("--gun", default="m762", help="枪械名（JSON 文件名，默认 m762）")
-    parser.add_argument("--acc", default="A0B0C0", help="配件码（默认 A0B0C0）")
-    parser.add_argument("--scope", type=float, default=None,
-                        help="倍镜灵敏度系数（默认从config.json读取）")
-    parser.add_argument("--posture", type=float, default=1.0, help="姿态系数（默认 1.0）")
+    parser.add_argument("--base", default=None, help="基线图(可选)")
+    parser.add_argument("--template", default=None, help="弹孔模板图(可选)")
+    parser.add_argument("--gun", default="m762", help="枪械名")
+    parser.add_argument("--acc", default="A0B0C0", help="配件码")
+    parser.add_argument("--scope", type=float, default=None, help="灵敏度系数")
+    parser.add_argument("--posture", type=float, default=1.0, help="姿态系数")
     parser.add_argument("--resolution", default="1920x1080", help="分辨率")
-    parser.add_argument("--no-save", action="store_true", help="不保存结果到磁盘")
+    parser.add_argument("--sensitivity", choices=['low', 'medium', 'high'],
+                        default='medium', help="检测灵敏度")
+    parser.add_argument("--debug", action="store_true", help="显示详细调试信息")
+    parser.add_argument("--no-save", action="store_true", help="不保存结果")
 
     args = parser.parse_args()
 
-    # 自动从config读取scope
+    # debug 模式开启详细日志
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG, format="  [DEBUG] %(message)s")
+    else:
+        logging.basicConfig(level=logging.INFO, format="  %(message)s")
+
     scope = args.scope
     if scope is None:
         cfg = _load_sensitivity_config()
@@ -1010,7 +1388,7 @@ def _cli_main():
         print(f"错误: 无法读取结果图 {args.result}")
         return 1
 
-    detector = BulletDetector(args.resolution)
+    detector = BulletDetector(args.resolution, args.sensitivity)
     if args.template:
         tmpl = cv2.imread(args.template)
         if tmpl is None:
@@ -1029,26 +1407,31 @@ def _cli_main():
         holes = detector.detect_single(result_img)
         mode = "单图自适应"
 
-    print(f"\n{'='*55}")
-    print(f"  PUBG 弹痕分析 ({mode})")
-    print(f"{'='*55}")
+    print(f"\n{'=' * 55}")
+    print(f"  PUBG 弹痕分析 ({mode}, 灵敏度={args.sensitivity})")
+    print(f"{'=' * 55}")
     print(f"  枪械: {args.gun}  配件码: {args.acc}")
     print(f"  倍镜系数: {scope}  姿态系数: {args.posture}")
-    print(f"{'='*55}\n")
+    print(f"{'=' * 55}\n")
+
+    if args.debug:
+        di = detector.debug_info
+        print(f"  [调试] 候选={di.get('total_candidates', '?')}"
+              f"  NMS后={di.get('after_nms', '?')}"
+              f"  最终={di.get('final', '?')}")
+        for k, v in di.items():
+            if k.endswith('_rejected'):
+                print(f"  [调试] {k}: {v}")
+        print()
 
     if not holes:
         print("  未检测到弹痕。")
+        print("  建议: --sensitivity high 或 --template <弹孔截图>")
         return 1
 
     sorted_holes = BulletSorter.sort(holes)
     comparator = BulletComparator()
     comparison = comparator.compare(sorted_holes, args.gun, args.acc, scope, args.posture)
-
-    r = {
-        'holes': sorted_holes,
-        'comparison': comparison,
-        'shot_count': len(sorted_holes),
-    }
 
     if not args.no_save:
         visualizer = BulletVisualizer()
@@ -1058,26 +1441,29 @@ def _cli_main():
         AnnotationData.save(args.result, sorted_holes, {
             'gun': args.gun, 'acc': args.acc, 'scope': scope, 'posture': args.posture,
         })
+        if args.debug:
+            for name, img in detector.debug_images.items():
+                saver.save_image(f"debug_{name}", img)
+            print(f"  [调试] 中间图像已保存到 calibration_results/\n")
 
-    print(f"  检测到 {r['shot_count']} 个弹痕\n")
+    print(f"  检测到 {len(sorted_holes)} 个弹痕\n")
 
-    comp = r.get('comparison')
-    if comp:
-        print(f"  {'发数':>4} {'实际px':>8} {'理论px':>8} {'原值':>6} {'比值':>8} {'X漂':>6} {'状态'}")
-        print(f"  {'-'*58}")
-        for d in comp['details']:
+    if comparison:
+        print(f"  {'发':>4} {'实际px':>8} {'理论px':>8} {'原值':>6} {'比值':>8} {'X漂':>6} {'状态'}")
+        print(f"  {'-' * 58}")
+        for d in comparison['details']:
             ratio_str = f"{d['ratio']:.4f}" if d['ratio'] is not None else "  N/A"
             print(f"  {d['shot']:>4} {d['actual_dy']:>8.1f} {d['theory_dy']:>8.1f} "
                   f"{d['raw_chunk_sum']:>6.1f} {ratio_str:>8}  {d['x_drift']:>+5.0f} {d['status']}")
-        print(f"  {'-'*58}")
-        print(f"  平均比值: {comp['avg_ratio']:.4f}  标准差: {comp['std_ratio']:.4f}")
-        print(f"  建议倍镜系数: {comp['suggested_scope']}")
-        print(f"  水平漂移: 均值{comp['avg_horizontal_drift']:+.1f} "
-              f"标准差{comp['std_horizontal_drift']:.1f} "
-              f"最大{comp['max_horizontal_drift']:.1f}px")
+        print(f"  {'-' * 58}")
+        print(f"  平均比值: {comparison['avg_ratio']:.4f}  标准差: {comparison['std_ratio']:.4f}")
+        print(f"  建议倍镜系数: {comparison['suggested_scope']}")
+        print(f"  水平漂移: 均值{comparison['avg_horizontal_drift']:+.1f} "
+              f"标准差{comparison['std_horizontal_drift']:.1f} "
+              f"最大{comparison['max_horizontal_drift']:.1f}px")
 
         corrector = ParameterCorrector()
-        correction = corrector.correct(comp, args.gun, args.acc)
+        correction = corrector.correct(comparison, args.gun, args.acc)
         if correction:
             print(f"\n  修正后弹道数据 ({args.acc}):")
             patch = corrector.generate_patch_json(correction)
