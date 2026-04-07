@@ -182,11 +182,16 @@ class ProcessClass:
 
     def calculate_the_recoil(self, recoil, posture, scope):
         """
-        计算最终后坐力参数 (精确到2位小数)
-        :param recoil: 压枪弹道数据
-        :param posture: 姿态数据
-        :param scope: 倍镜数据
-        :return: float, 2位小数精度
+        计算本 tick 应下发的垂直鼠标移动量（与 GunData 单元素含义一致）。
+
+        合成公式: ``posture * (recoil * scope)``，乘法结合顺序与 ``recoil * scope * posture`` 等价。
+
+        - ``recoil``: GunData 数组中当前 tick 的基准补偿值（无单位系数，相对表）。
+        - ``scope``: 来自 ``ScopeData`` 的倍镜/机瞄灵敏度倍率；放大倍率越高，同等 ``recoil`` 需要更大的鼠标下移量。
+        - ``posture``: 枪械 JSON 中站姿/蹲/趴等姿态系数；不同姿态后坐力表现不同，与 ``recoil`` 相乘体现姿态对补偿的缩放。
+
+        三者相乘得到「本 tick 理论像素/驱动单位位移」，再 ``round(..., 2)`` 与弹道表精度对齐。
+        注意: 最终整数鼠标步长由 ``FIRE`` / ``FIRE1`` 中的 remainder 累加后再 ``int(round)``，此处仅负责单 tick 浮点合成。
         """
         recoil_value = posture * (recoil * scope)
         return round(float(recoil_value), 2)
@@ -200,7 +205,19 @@ class ProcessClass:
             return None
 
     def FIRE_Start(self, Emit):
+        """
+        压枪宏入口：串联「能否压枪」→「读枪与弹道」→「姿态/倍镜」→「全自动或半自动开火循环」。
 
+        流水线概要:
+        1. 前置条件: 已开镜 (``StartFire``)、已选 1/2 号槽 (``Current_firearms``)、两侧槽位识别结果非空；
+           否则直接 ``Emit`` 日志并返回，避免无数据空跑。
+        2. ``get_guns_info()`` 取当前槽位识别结果 → 枪名 ``gunsName`` → ``read_gun_data`` 加载 ``_internal/GunData/<枪>.json``。
+        3. ``get_accessories_nameCode`` 将枪口/握把/枪托映射为 ``A*B*C*`` 码，从 JSON 中取对应弹道列表 ``ballistic``；
+           ``Posture``、``Scope`` 分别为当前姿态键与当前镜型的灵敏度倍率。
+        4. 若枪属于 ``Not_Guns``（半自动等），走 ``FIRE1``（tick 间隔约 100ms）；否则 ``FIRE``（约 9ms），与游戏内射速档位一致。
+
+        不在此函数内做识别；识别由其他线程/回调更新 ``_Result*``、``StartFire`` 等状态。
+        """
         # 判断数据是否准确
         Judge_List = (self.StartFire, self.Current_firearms, self._Result1, self._Result2)
         LogInfo_List = ("当前没有开启倍镜，无需压枪", "当前没有装备枪械，无需压枪", "还未进行枪械识别，无需压枪",
@@ -258,6 +275,13 @@ class ProcessClass:
         return latency / 1000
 
     def FIRE(self, posture, scope, ballistic, Emit):
+        """
+        全自动压枪：按 ``ballistic`` 每个元素执行一次下移，tick 间隔约 9ms（经 ``Computation_latency`` 微调）。
+
+        remainder（余数）机制: ``mouse_R`` 仅接受整型像素步长，而 ``calculate_the_recoil`` 输出为两位小数的浮点。
+        将「本 tick 理论位移 + 上轮未分配的亚像素」记为 ``exact``，``move = int(round(exact))`` 为本次实际下发量；
+        ``remainder = exact - move`` 把不足 1 像素的误差滚入下一 tick，避免长期系统性截断误差（等价于固定点累加器）。
+        """
         recoil_list = []
         remainder = 0.0
         for i in ballistic:
@@ -266,6 +290,7 @@ class ProcessClass:
             Emit('x', (True,))
             recoil = self.calculate_the_recoil(i, posture, scope)
             recoil_list.append(recoil)
+            # 亚像素余数与本轮补偿合并后再取整，减少量化漂移
             exact = recoil + remainder
             move = int(round(exact))
             remainder = exact - move
@@ -276,6 +301,10 @@ class ProcessClass:
         return recoil_list
 
     def FIRE1(self, posture, scope, ballistic, Emit):
+        """
+        半自动/低射速档压枪：逻辑与 ``FIRE`` 相同（同一 remainder 亚像素累加），仅 sleep 基准改为 100ms，
+        与 ``FIRE_Start`` 中对 ``Not_Guns`` 的分支一致，避免过快连发与游戏内半自动节奏不符。
+        """
         recoil_list = []
         remainder = 0.0
         for i in ballistic:

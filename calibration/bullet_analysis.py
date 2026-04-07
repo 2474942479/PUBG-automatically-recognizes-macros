@@ -82,8 +82,15 @@ _SEMI_AUTO_GUNS = frozenset([
 _TICK_MS = 9
 
 # 武器元数据 (来源: PUBG Resource v39.2 / PUBG Wiki 2026)
-#   fire_interval: 射击间隔 (秒), 用于精确计算 ticks_per_shot
-#   mag: 扩容弹夹容量, 仅在 fire_interval 不可用时回退使用
+#
+# 数据结构说明:
+#   每把枪一条记录，键为小写枪名（与 GunData 文件名一致）。
+#   - fire_interval: 两发子弹之间的游戏内时间间隔（秒）。与宏侧固定 tick 间隔 _TICK_MS（9ms）相除得到
+#     chunk_f = fire_interval×1000/_TICK_MS，表示「一发子弹在压枪循环里对应多少个 9ms tick」，
+#     用于把 GunData 长数组按射速切块，使「理论 chunk 内鼠标位移之和」与真实弹道节奏一致。
+#   - mag: 标准扩容弹匣容量；当缺少 fire_interval 时，可用「有效数组长度 / (mag-1)」等启发式估算 chunk_f。
+#
+# 半自动枪在比较逻辑里 chunk_f 固定为 1（一发对应一个间隔），与 Process.FIRE1 的 100ms 步进语义一致。
 _GUN_META = {
     # === AR ===
     "ace32":  {"fire_interval": 0.088235, "mag": 40},
@@ -129,7 +136,11 @@ def _get_gun_magazine(gun_name):
     return meta["mag"] if meta else 0
 
 def _get_fire_interval(gun_name):
-    """获取武器射击间隔 (秒), 无数据则返回 None"""
+    """从 _GUN_META 读取射击间隔（秒）。
+
+    供 BulletComparator / BulletParamGenerator 等计算 chunk_f、RPM 显示等使用。
+    若枪名未录入（返回 None），调用方需用弹夹容量或数组长度等回退策略，chunk_f 估计会变粗。
+    """
     meta = _GUN_META.get(gun_name.lower())
     return meta["fire_interval"] if meta else None
 
@@ -581,18 +592,20 @@ class ProjectData:
     @staticmethod
     def save(path, holes, config, comparison=None, correction=None,
              image_path=None, image_size=None, iteration_round=1,
-             parent_project=None):
-        """保存项目文件
+             parent_project=None, trajectories=None):
+        """保存项目文件 (支持多轨迹)
 
-        :param config: dict 包含 gun_name, acc_code, scope_key, scope_val, pose_key, pose_val,
-                       以及 muzzle_key, grip_key, stock_key (用于恢复combo)
+        :param trajectories: 可选, 多轨迹列表 [{name, holes, comparison, correction}, ...]
         """
+        def _serialize_holes(hs):
+            return [{'x': h['x'], 'y': h['y'], 'shot_num': h.get('shot_num', 0),
+                     'area': h.get('area', 100)} for h in hs]
+
         data = {
             'version': ProjectData.VERSION,
             'image_path': str(image_path) if image_path else None,
             'image_size': list(image_size) if image_size else None,
-            'holes': [{'x': h['x'], 'y': h['y'], 'shot_num': h.get('shot_num', 0),
-                        'area': h.get('area', 100)} for h in holes],
+            'holes': _serialize_holes(holes),
             'config': config,
             'comparison': comparison,
             'correction': correction,
@@ -600,6 +613,15 @@ class ProjectData:
             'parent_project': str(parent_project) if parent_project else None,
             'timestamp': datetime.now().isoformat(),
         }
+        if trajectories:
+            data['trajectories'] = []
+            for t in trajectories:
+                data['trajectories'].append({
+                    'name': t.get('name', ''),
+                    'holes': _serialize_holes(t.get('holes', [])),
+                    'comparison': t.get('comparison'),
+                    'correction': t.get('correction'),
+                })
         p = Path(path)
         if not p.suffix:
             p = p.with_suffix('.calibration.json')
@@ -708,12 +730,25 @@ class BulletComparator:
     chunk_f 计算优先级:
       1. 射速优先: chunk_f = fire_interval_ms / tick_ms (最准确)
       2. 弹夹回退: chunk_f = effective_array_len / (mag - 1)
+
+    compare() 思路简述:
+      - 将相邻弹孔 |Δy| 作为「该发间隔内屏幕上真实纵向间距」；
+      - 按 chunk_f 把 GunData 的 raw 切片并求和得到 raw_chunk_sum（与宏内逐 tick round 再累加一致），
+        再乘 scope_val×posture_val 得 theory_dy，与 actual_dy 比得到 ratio = actual/theory。
+      - suggested_scope ≈ scope_val×avg_ratio：在姿态不变时，可把倍率误差近似成对 scope 的整体缩放建议。
     """
 
     def __init__(self, gun_data_dir=None):
         self.gun_data_dir = Path(gun_data_dir) if gun_data_dir else Path(_find_gun_data_dir())
 
     def compare(self, holes, gun_name, acc_code, scope_val, posture_val):
+        """将排序后的弹孔序列与 GunData 对齐，逐「发间间隔」比较像素间距与理论补偿。
+
+        对每个间隔 i：actual_dy[i] 为相邻弹孔 |Δy|；理论侧先把 raw 按 chunk_f 切片，对片内各 tick 按
+        round(posture×(v×scope)) 求和得到 theory_chunks[i]，再得到 theo 与 ratio=act/theo。
+        ratio 偏离 1 表示「同配置下实际弹道纵距」相对「当前 GunData+scope+posture 预测」的整体缩放误差，
+        suggested_scope 等字段由此推导，供 ParameterCorrector 做比例修正。
+        """
         if len(holes) < 2:
             return None
 
@@ -754,7 +789,7 @@ class BulletComparator:
         actual_dy = [abs(s[i - 1]['y'] - s[i]['y']) for i in range(1, len(s))]
         actual_dx = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
 
-        # 理论值: 与压枪算法完全一致 — 每个 tick 执行 round(posture*(value*scope), 2)
+        # 理论值: 与压枪算法一致 — 每个 tick 对 raw 元素做 round(posture*(value*scope), 2) 再对区间内求和
         theory_chunks = []
         for i in range(n_compare):
             start = int(round(i * chunk_f))
@@ -767,6 +802,7 @@ class BulletComparator:
         for i in range(n_compare):
             act = actual_dy[i]
             raw_sum = theory_chunks[i]
+            # theo 供 ratio=act/theo 及 details['theory_dy'] 使用；实现上为 theory_chunks[i] × scope × posture
             theo = raw_sum * scope_val * posture_val
 
             if theo > 0 and act > 0:
@@ -905,6 +941,17 @@ class BulletParamGenerator:
 
     @staticmethod
     def generate(holes, gun_name, scope_val=1.0, posture_val=1.0):
+        """Round 1：由无压枪弹痕反推 GunData 风格的每 tick 常数。
+
+        设相邻弹孔纵距为 pixel_dy，两发之间游戏时间约为 fire_interval，宏以 _TICK_MS 为步进，则
+        chunk_f ≈ fire_interval×1000/_TICK_MS 表示该间隔覆盖的 tick 数。
+
+        运行时一 tick 下移量为 round(posture×(value×scope))；若 value 在 chunk 内近似常数，则
+        chunk_f×value ≈ pixel_dy（像素），故 value ≈ pixel_dy/(chunk_f×scope×posture)。
+        factor = scope×posture 即分母中的灵敏度与姿态合成项；除以 chunk_f 把「一发间隔总像素」摊到每个 tick。
+
+        实现上用 chunk_int 个 tick 重复同一 value_per_tick，与真实逐 tick 微调有差异，属 Round 1 粗生成。
+        """
         if len(holes) < 2:
             return None
 
@@ -929,6 +976,7 @@ class BulletParamGenerator:
         for i in range(n_intervals):
             dy = pixel_dys[i]
             dx = pixel_dxs[i] if i < len(pixel_dxs) else 0
+            # dy/chunk_f ≈ 每 tick 平均像素；再除以 (scope×posture) 反解 GunData 中 value，使宏内 round(posture×value×scope)≈该 tick 像素
             value_per_tick = round(dy / chunk_f / factor, 2)
             start_idx = len(result_array)
 
@@ -1071,13 +1119,22 @@ class IterativeCorrector:
       修正比例 = chunk_sum / (chunk_sum + dy)  → 未知因子 C 自动抵消
       一次迭代即可收敛到正确值, 无需多次迭代。
 
-    输出格式与 ParameterCorrector 对齐:
-      corrected_uniform, acc_code, chunk_size 等字段一致,
-      确保自己的输出可以被下一轮加载。
+    支持指定起始发数:
+      当 start_shot > 1 时, 仅修改从 start_shot 对应的 chunk 开始的数组元素,
+      start_shot 之前和标注范围之后的元素保持原值不变。
+
+    支持多轨迹:
+      传入多组 holes, 对每组计算 correction_ratio, 取平均后应用。
     """
 
     @staticmethod
-    def correct(residual_holes, prev_correction, scope_val, posture_val):
+    def correct(residual_holes, prev_correction, scope_val, posture_val,
+                multi_trajectories=None):
+        """
+        :param residual_holes: 当前轨迹的弹孔列表
+        :param multi_trajectories: 可选, 多轨迹列表 [holes_list1, holes_list2, ...]
+                                   若提供则对所有轨迹的 correction_ratio 取平均
+        """
         prev_params = prev_correction.get('corrected_uniform') or \
                       prev_correction.get('corrected_per_shot') or \
                       prev_correction.get('corrected_optimal') or \
@@ -1090,49 +1147,94 @@ class IterativeCorrector:
                                       float(prev_correction.get('chunk_size', 12)))
         acc_code = prev_correction.get('acc_code', 'A0B0C0')
 
-        s = sorted(residual_holes, key=lambda h: h.get('shot_num', 0))
-        n_intervals = len(s) - 1
-        max_chunk = len(prev_params) / max(1, n_intervals)
-        chunk_f = min(chunk_f, max_chunk)
+        all_hole_sets = [residual_holes]
+        if multi_trajectories:
+            for traj_holes in multi_trajectories:
+                if traj_holes is not residual_holes and len(traj_holes) >= 2:
+                    all_hole_sets.append(traj_holes)
+
+        s0 = sorted(residual_holes, key=lambda h: h.get('shot_num', 0))
+        start_shot = s0[0].get('shot_num', 1)
+        n_intervals = len(s0) - 1
+
+        # 按 start_shot 计算数组中的起始偏移
+        array_offset = int(round((start_shot - 1) * chunk_f))
+        array_offset = max(0, min(array_offset, len(prev_params) - 1))
 
         corrected = [float(v) for v in prev_params]
         residuals = []
-        ratios = []
+        modified_ranges = []
 
-        for i in range(1, len(s)):
-            dy = s[i]['y'] - s[i - 1]['y']
-            dx = s[i]['x'] - s[i - 1]['x']
+        # 对每个间隔, 收集所有轨迹的 ratio 再取平均
+        for i in range(n_intervals):
+            ratios_for_interval = []
+            dys_for_interval = []
+            dxs_for_interval = []
 
-            start = int(round((i - 1) * chunk_f))
-            end = min(int(round(i * chunk_f)), len(corrected))
+            for hole_set in all_hole_sets:
+                s = sorted(hole_set, key=lambda h: h.get('shot_num', 0))
+                if i + 1 >= len(s):
+                    continue
+                dy = s[i + 1]['y'] - s[i]['y']
+                dx = s[i + 1]['x'] - s[i]['x']
+                dys_for_interval.append(dy)
+                dxs_for_interval.append(dx)
+
+                start = array_offset + int(round(i * chunk_f))
+                end = min(array_offset + int(round((i + 1) * chunk_f)), len(prev_params))
+                chunk_sum = sum(abs(prev_params[j]) for j in range(start, min(end, len(prev_params))))
+
+                if chunk_sum > 0.01:
+                    ratio = chunk_sum / max(0.01, chunk_sum + dy)
+                    ratio = max(0.05, min(20.0, ratio))
+                    ratios_for_interval.append(ratio)
+
+            start = array_offset + int(round(i * chunk_f))
+            end = min(array_offset + int(round((i + 1) * chunk_f)), len(corrected))
             chunk_sum = sum(abs(prev_params[j]) for j in range(start, min(end, len(prev_params))))
+            avg_dy = round(float(np.mean(dys_for_interval)), 2) if dys_for_interval else 0
+            avg_dx = round(float(np.mean(dxs_for_interval)), 2) if dxs_for_interval else 0
 
-            if chunk_sum > 0.01:
-                correction_ratio = chunk_sum / max(0.01, chunk_sum + dy)
-                correction_ratio = max(0.05, min(20.0, correction_ratio))
+            if ratios_for_interval:
+                avg_ratio = float(np.mean(ratios_for_interval))
+                avg_ratio = max(0.05, min(20.0, avg_ratio))
                 for j in range(start, min(end, len(corrected))):
-                    corrected[j] = round(prev_params[j] * correction_ratio, 2)
-                ratios.append(correction_ratio)
-            elif end > start:
-                per_tick = round(-dy / max(1, end - start), 2)
+                    corrected[j] = round(prev_params[j] * avg_ratio, 2)
+                modified_ranges.append((start, min(end, len(corrected))))
+            elif end > start and chunk_sum <= 0.01:
+                per_tick = round(-avg_dy / max(1, end - start), 2)
                 for j in range(start, min(end, len(corrected))):
                     corrected[j] = round(corrected[j] + per_tick, 2)
-                ratios.append(1.0)
+                avg_ratio = 1.0
+                modified_ranges.append((start, min(end, len(corrected))))
+            else:
+                avg_ratio = 1.0
 
+            shot_label = start_shot + i
             residuals.append({
-                'shot': i, 'dy': round(float(dy), 2), 'dx': round(float(dx), 2),
+                'shot': shot_label,
+                'shot_from': shot_label, 'shot_to': shot_label + 1,
+                'dy': avg_dy, 'dx': avg_dx,
                 'chunk_sum': round(float(chunk_sum), 2),
-                'correction_ratio': round(float(ratios[-1]) if ratios else 1.0, 4),
+                'correction_ratio': round(float(avg_ratio), 4),
+                'array_range': f"[{start}:{end}]",
+                'n_trajectories': len(dys_for_interval),
             })
 
         chunk_int = max(1, int(round(chunk_f)))
-        avg_ratio = round(float(np.mean(ratios)), 4) if ratios else 1.0
+        all_ratios = [r['correction_ratio'] for r in residuals]
+        avg_ratio_total = round(float(np.mean(all_ratios)), 4) if all_ratios else 1.0
+
+        modified_indices = set()
+        for s, e in modified_ranges:
+            modified_indices.update(range(s, e))
+
         return {
             'gun_name': prev_correction.get('gun_name', ''),
             'acc_code': acc_code,
             'corrected_uniform': corrected,
             'original_array': prev_params,
-            'avg_ratio': avg_ratio,
+            'avg_ratio': avg_ratio_total,
             'chunk_size': chunk_int,
             'chunk_size_f': round(chunk_f, 2),
             'scope_val': scope_val, 'posture_val': posture_val,
@@ -1140,6 +1242,9 @@ class IterativeCorrector:
             'avg_residual_dy': round(float(np.mean([r['dy'] for r in residuals])), 2),
             'max_residual_dy': round(float(max(abs(r['dy']) for r in residuals)), 2),
             'is_iterative': True,
+            'start_shot': start_shot,
+            'modified_indices': sorted(modified_indices),
+            'n_trajectories_used': len(all_hole_sets),
         }
 
 

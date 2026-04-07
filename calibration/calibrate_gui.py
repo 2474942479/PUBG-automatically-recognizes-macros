@@ -86,8 +86,7 @@ class BulletCanvas(QWidget):
         self._box_del_start = None
         self._box_del_rect = None
 
-        # 标注参数
-        self._sort_direction = 'bottom_up'  # 'bottom_up' or 'top_down'
+        # 标注参数 (按标注顺序编号, 不再按Y坐标排序)
         self._start_shot = 1
 
         self.setMinimumSize(400, 400)
@@ -117,17 +116,15 @@ class BulletCanvas(QWidget):
     def get_holes(self):
         return self._holes
 
-    def set_sort_direction(self, direction):
-        self._sort_direction = direction
-        if self._holes:
-            BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
-            self.holes_changed.emit()
-            self.update()
+    def _assign_shot_nums(self):
+        """按列表顺序 (即标注顺序) 分配发数编号"""
+        for i, h in enumerate(self._holes):
+            h['shot_num'] = self._start_shot + i
 
     def set_start_shot(self, n):
         self._start_shot = max(1, n)
         if self._holes:
-            BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
+            self._assign_shot_nums()
             self.holes_changed.emit()
             self.update()
 
@@ -289,9 +286,10 @@ class BulletCanvas(QWidget):
                 self._drag_start = (e.x(), e.y())
                 self._just_added = False
             else:
-                self._holes.append({'x': int(ix), 'y': int(iy), 'area': 100,
-                                    'circularity': 1.0, 'color_diff': 50})
-                BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
+                new_hole = {'x': int(ix), 'y': int(iy), 'area': 100,
+                            'circularity': 1.0, 'color_diff': 50,
+                            'shot_num': self._start_shot + len(self._holes)}
+                self._holes.append(new_hole)
                 self._selected = -1
                 self._just_added = True
                 self.holes_changed.emit()
@@ -307,7 +305,7 @@ class BulletCanvas(QWidget):
             if idx >= 0:
                 self._holes.pop(idx)
                 self._selected = -1
-                BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
+                self._assign_shot_nums()
                 self.holes_changed.emit()
                 self.update()
             else:
@@ -365,14 +363,13 @@ class BulletCanvas(QWidget):
                     self._holes = [h for h in self._holes
                                    if not (bx <= h['x'] <= bx + bw and by <= h['y'] <= by + bh)]
                     if len(self._holes) < before:
-                        BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
+                        self._assign_shot_nums()
                         self.holes_changed.emit()
                 self._box_del_start = None
                 self._box_del_rect = None
                 self.update()
             elif self._drag_start and self._selected >= 0:
                 self._drag_start = None
-                BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
                 self.holes_changed.emit()
                 self.update()
 
@@ -380,8 +377,184 @@ class BulletCanvas(QWidget):
         if e.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self._selected >= 0:
             self._holes.pop(self._selected)
             self._selected = -1
-            BulletSorter.sort(self._holes, self._sort_direction, self._start_shot)
+            self._assign_shot_nums()
             self.holes_changed.emit()
+            self.update()
+
+
+# ═══════════════════════════════════════════
+# 可视化曲线编辑器
+# ═══════════════════════════════════════════
+
+class RecoilCurveEditor(QWidget):
+    """可拖拽的后坐力补偿曲线编辑器
+
+    以 chunk 为单位展示 GunData 数组, 每个 chunk 的 sum 对应一发子弹的补偿量。
+    用户可拖动节点调整每发的补偿值, 实时更新底层数组。
+    """
+    data_changed = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._values = []
+        self._chunk_f = 10.0
+        self._chunk_sums = []
+        self._dragging = -1
+        self._hover = -1
+        self._modified = set()
+        self.setMinimumHeight(200)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.ClickFocus)
+
+    def set_data(self, values, chunk_f):
+        self._values = list(values)
+        self._chunk_f = max(1, chunk_f)
+        self._compute_chunks()
+        self._modified.clear()
+        self.update()
+
+    def get_values(self):
+        return list(self._values)
+
+    def get_modified_indices(self):
+        return sorted(self._modified)
+
+    def _compute_chunks(self):
+        self._chunk_sums = []
+        n = len(self._values)
+        i = 0
+        while i < n:
+            end = min(int(round(i + self._chunk_f)), n)
+            s = sum(self._values[i:end])
+            self._chunk_sums.append({'start': i, 'end': end, 'sum': s})
+            i = end
+
+    def _chart_rect(self):
+        m = 40
+        return QRectF(m, 20, self.width() - m * 2, self.height() - 50)
+
+    def _value_to_pos(self, idx, val):
+        r = self._chart_rect()
+        n = max(1, len(self._chunk_sums))
+        x = r.left() + (idx + 0.5) / n * r.width()
+        if not self._chunk_sums:
+            return QPointF(x, r.center().y())
+        max_v = max(abs(c['sum']) for c in self._chunk_sums) * 1.3
+        max_v = max(max_v, 1)
+        y = r.bottom() - (val / max_v) * r.height()
+        return QPointF(x, y)
+
+    def _pos_to_value(self, pos):
+        r = self._chart_rect()
+        n = max(1, len(self._chunk_sums))
+        idx = int((pos.x() - r.left()) / r.width() * n)
+        idx = max(0, min(n - 1, idx))
+        max_v = max(abs(c['sum']) for c in self._chunk_sums) * 1.3
+        max_v = max(max_v, 1)
+        val = (r.bottom() - pos.y()) / r.height() * max_v
+        return idx, val
+
+    def _find_node(self, pos, threshold=12):
+        for i, c in enumerate(self._chunk_sums):
+            pt = self._value_to_pos(i, c['sum'])
+            if (pt.x() - pos.x())**2 + (pt.y() - pos.y())**2 < threshold**2:
+                return i
+        return -1
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor(25, 25, 30))
+
+        r = self._chart_rect()
+        if not self._chunk_sums:
+            p.setPen(Qt.white)
+            p.drawText(r, Qt.AlignCenter, "无数据\n分析参数或迭代修正后显示曲线")
+            return
+
+        # 坐标轴
+        p.setPen(QPen(QColor(80, 80, 80), 1))
+        p.drawLine(int(r.left()), int(r.bottom()), int(r.right()), int(r.bottom()))
+        p.drawLine(int(r.left()), int(r.top()), int(r.left()), int(r.bottom()))
+
+        max_v = max(abs(c['sum']) for c in self._chunk_sums) * 1.3
+        max_v = max(max_v, 1)
+        p.setPen(QPen(QColor(60, 60, 60), 1, Qt.DashLine))
+        for frac in [0.25, 0.5, 0.75, 1.0]:
+            y = int(r.bottom() - frac * r.height())
+            p.drawLine(int(r.left()), y, int(r.right()), y)
+            p.setPen(QColor(100, 100, 100))
+            p.drawText(2, y + 4, f"{frac * max_v:.1f}")
+            p.setPen(QPen(QColor(60, 60, 60), 1, Qt.DashLine))
+
+        # 连线
+        n = len(self._chunk_sums)
+        for i in range(n - 1):
+            p1 = self._value_to_pos(i, self._chunk_sums[i]['sum'])
+            p2 = self._value_to_pos(i + 1, self._chunk_sums[i + 1]['sum'])
+            p.setPen(QPen(QColor(100, 200, 255), 2))
+            p.drawLine(p1, p2)
+
+        # 节点
+        for i, c in enumerate(self._chunk_sums):
+            pt = self._value_to_pos(i, c['sum'])
+            if i in self._modified:
+                col = QColor(255, 200, 50)
+            elif i == self._hover:
+                col = QColor(200, 255, 200)
+            else:
+                col = QColor(100, 200, 255)
+            radius = 6 if i == self._dragging or i == self._hover else 4
+            p.setPen(QPen(col, 2))
+            p.setBrush(QBrush(col))
+            p.drawEllipse(pt, radius, radius)
+
+            # 发数标签
+            if n <= 30 or i % max(1, n // 20) == 0:
+                p.setPen(QColor(160, 160, 160))
+                p.setFont(QFont("Arial", 7))
+                p.drawText(int(pt.x()) - 8, int(r.bottom()) + 14, str(i + 1))
+
+        # Hover tooltip
+        if 0 <= self._hover < n:
+            c = self._chunk_sums[self._hover]
+            pt = self._value_to_pos(self._hover, c['sum'])
+            tip = f"第{self._hover+1}发: sum={c['sum']:.2f} [{c['start']}:{c['end']}]"
+            p.setPen(QColor(255, 255, 200))
+            p.setFont(QFont("Arial", 9))
+            p.drawText(int(pt.x()) - 40, int(pt.y()) - 12, tip)
+
+        p.setBrush(Qt.NoBrush)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._dragging = self._find_node(e.pos())
+
+    def mouseMoveEvent(self, e):
+        if self._dragging >= 0 and self._dragging < len(self._chunk_sums):
+            _, new_val = self._pos_to_value(e.pos())
+            c = self._chunk_sums[self._dragging]
+            old_sum = c['sum']
+            if abs(old_sum) > 0.01:
+                ratio = new_val / old_sum
+            else:
+                ratio = 1.0
+            for j in range(c['start'], c['end']):
+                if j < len(self._values):
+                    self._values[j] = round(self._values[j] * ratio, 2)
+                    self._modified.add(j)
+            self._compute_chunks()
+            self.update()
+        else:
+            old_hover = self._hover
+            self._hover = self._find_node(e.pos())
+            if self._hover != old_hover:
+                self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self._dragging >= 0:
+            self._dragging = -1
+            self.data_changed.emit(self._values)
             self.update()
 
 
@@ -724,7 +897,7 @@ def _build_result_html(comparison, correction):
 
 
 def _build_iteration_html(iter_result):
-    """迭代修正结果 HTML"""
+    """迭代修正结果 HTML (支持指定发数 + 高亮改动元素)"""
     if not iter_result:
         return "<p style='color:gray;'>迭代修正失败</p>"
 
@@ -736,6 +909,9 @@ def _build_iteration_html(iter_result):
     corrected = iter_result.get('corrected_uniform', [])
     chunk_f = iter_result.get('chunk_size_f', iter_result.get('chunk_size', 10))
     acc_code = iter_result.get('acc_code', 'A0B0C0')
+    start_shot = iter_result.get('start_shot', 1)
+    modified_indices = set(iter_result.get('modified_indices', []))
+    n_traj = iter_result.get('n_trajectories_used', 1)
 
     if abs(avg_dy) < 3:
         color = '#44cc44'
@@ -747,25 +923,28 @@ def _build_iteration_html(iter_result):
         color = '#ff4444'
         verdict = '残差较大, 建议继续迭代'
 
+    traj_info = f" | 使用 {n_traj} 条轨迹取平均" if n_traj > 1 else ""
+    shot_info = f" | 起始发数: 第{start_shot}发" if start_shot > 1 else ""
+
     html = f"""
     <div style="margin:8px;">
       <h3 style="color:{color}; font-size:18px;">迭代修正结果 (比例修正)</h3>
       <p>{verdict}</p>
-      <p>平均残差: {avg_dy:.2f}px | 最大残差: {max_dy:.2f}px | 平均修正比例: {avg_ratio:.4f}</p>
+      <p>平均残差: {avg_dy:.2f}px | 最大残差: {max_dy:.2f}px | 平均修正比例: ×{avg_ratio:.4f}{traj_info}{shot_info}</p>
       <p style="color:#aaa; font-size:12px;">
-        修正原理: ratio = chunk_sum / (chunk_sum + dy)<br/>
-        ratio &gt; 1 → 补偿不足, 需增大参数 | ratio &lt; 1 → 补偿过度, 需减小参数<br/>
-        此方法自动适配灵敏度/分辨率, 一次迭代即可收敛
+        修正原理: ratio = chunk_sum / (chunk_sum + dy) → 未知转换系数自动抵消<br/>
+        ratio &gt; 1 → 补偿不足 | ratio &lt; 1 → 补偿过度
       </p>
 
       <h4 style="margin-top:8px;">逐发残差分析:</h4>
       <table style="border-collapse:collapse; font-size:13px;" width="100%">
         <tr style="background:#444; color:white;">
-          <th style="padding:4px;">发</th>
+          <th style="padding:4px;">区间</th>
           <th>Y残差(px)</th>
           <th>X残差(px)</th>
           <th>chunk_sum</th>
           <th>修正比例</th>
+          <th>数组范围</th>
           <th>判断</th>
         </tr>
     """
@@ -779,51 +958,76 @@ def _build_iteration_html(iter_result):
         else:
             judge = '<span style="color:#ff8800;">压过了(下沉)</span>'
         ratio_color = '#44cc44' if 0.9 <= ratio <= 1.1 else '#ffcc00' if 0.7 <= ratio <= 1.3 else '#ff4444'
+        n_t = r.get('n_trajectories', 1)
+        traj_note = f" ({n_t}条)" if n_t > 1 else ""
         html += f"""
         <tr>
-          <td style="padding:3px; text-align:center;">{r['shot']}</td>
-          <td style="text-align:center;">{dy:.2f}</td>
+          <td style="padding:3px; text-align:center;">{r.get('shot_from', r['shot'])}→{r.get('shot_to', r['shot']+1)}</td>
+          <td style="text-align:center;">{dy:.2f}{traj_note}</td>
           <td style="text-align:center;">{r['dx']:.2f}</td>
           <td style="text-align:center;">{r.get('chunk_sum', 0):.2f}</td>
           <td style="text-align:center; color:{ratio_color};"><b>×{ratio:.4f}</b></td>
+          <td style="text-align:center; color:#888;">{r.get('array_range', '')}</td>
           <td style="text-align:center;">{judge}</td>
         </tr>"""
     html += "</table>"
 
+    # 逐发对比表: 使用实际的 shot_from 标号
     html += """
       <h4 style="margin-top:12px;">逐发参数对比 (原值 × 比例 → 调整后):</h4>
       <table style="border-collapse:collapse; font-size:13px;" width="100%">
         <tr style="background:#444; color:white;">
-          <th style="padding:4px;">发</th>
+          <th style="padding:4px;">区间</th>
           <th>原值(chunk sum)</th>
           <th>调整后(chunk sum)</th>
           <th>比例</th>
         </tr>
     """
-    n_shots = len(residuals)
-    for i in range(n_shots):
-        start = int(round(i * chunk_f))
-        end = min(int(round((i + 1) * chunk_f)), len(original))
+    for r in residuals:
+        arr_range = r.get('array_range', '')
+        if arr_range:
+            parts = arr_range.strip('[]').split(':')
+            start, end = int(parts[0]), int(parts[1])
+        else:
+            continue
         orig_sum = round(sum(original[start:end]), 2) if end <= len(original) else 0
         corr_sum = round(sum(corrected[start:end]), 2) if end <= len(corrected) else 0
         ratio = round(corr_sum / orig_sum, 4) if orig_sum != 0 else 1.0
         ratio_color = '#44cc44' if 0.9 <= ratio <= 1.1 else '#ffcc00' if 0.7 <= ratio <= 1.3 else '#ff4444'
         html += f"""
         <tr>
-          <td style="padding:3px; text-align:center;">{i + 1}</td>
+          <td style="padding:3px; text-align:center;">{r.get('shot_from', '')}→{r.get('shot_to', '')}</td>
           <td style="text-align:center;">{orig_sum:.2f}</td>
           <td style="text-align:center; color:#8f8;"><b>{corr_sum:.2f}</b></td>
           <td style="text-align:center; color:{ratio_color};">×{ratio:.4f}</td>
         </tr>"""
     html += "</table>"
 
+    # 输出完整数组, 高亮修改的元素
     if corrected:
-        arr_json = BulletParamGenerator.format_array_for_json(corrected)
         html += f"""
         <h4 style="margin-top:12px;">调整后的完整压枪数据 (直接替换):</h4>
         <p style="color:#aaa;">复制下方数据替换 GunData/{iter_result.get('gun_name', '')}.json 中的 "{acc_code}"</p>
-        <pre style="background:#222; padding:8px; overflow-x:auto; font-size:11px; color:#8f8;">"{acc_code}": {arr_json}</pre>
         """
+        if modified_indices:
+            html += '<p style="color:#aaa; font-size:11px;"><span style="color:#8f8;">■ 绿色 = 已修改</span> | <span style="color:#888;">■ 灰色 = 未修改</span></p>'
+
+        items_per_line = 36
+        html += f'<pre style="background:#222; padding:8px; overflow-x:auto; font-size:11px; line-height:1.6;">"{acc_code}": [\n'
+        for row_start in range(0, len(corrected), items_per_line):
+            row_end = min(row_start + items_per_line, len(corrected))
+            parts = []
+            for idx in range(row_start, row_end):
+                v = corrected[idx]
+                if idx in modified_indices:
+                    parts.append(f'<span style="color:#8f8; font-weight:bold;">{v}</span>')
+                else:
+                    parts.append(f'<span style="color:#666;">{v}</span>')
+            line = "        " + ", ".join(parts)
+            if row_end < len(corrected):
+                line += ","
+            html += line + "\n"
+        html += '    ]</pre>'
 
     html += "</div>"
     return html
@@ -951,17 +1155,15 @@ class MainWindow(QWidget):
             self.c_pose.addItem(cn, k)
         cfg_layout.addWidget(self.c_pose, 2, 3)
 
-        cfg_layout.addWidget(QLabel("标注方向:"), 3, 0)
-        self.c_direction = QComboBox()
-        self.c_direction.addItem("下→上 (后坐力)", "bottom_up")
-        self.c_direction.addItem("上→下 (反向)", "top_down")
-        cfg_layout.addWidget(self.c_direction, 3, 1)
-
-        cfg_layout.addWidget(QLabel("起始发数:"), 3, 2)
+        cfg_layout.addWidget(QLabel("起始发数:"), 3, 0)
         self.c_start_shot = QComboBox()
         for i in range(1, 51):
             self.c_start_shot.addItem(f"第{i}发", i)
-        cfg_layout.addWidget(self.c_start_shot, 3, 3)
+        cfg_layout.addWidget(self.c_start_shot, 3, 1)
+
+        self.lbl_direction_hint = QLabel("标注顺序 = 开火顺序")
+        self.lbl_direction_hint.setStyleSheet("color: #888; font-size: 11px;")
+        cfg_layout.addWidget(self.lbl_direction_hint, 3, 2, 1, 2)
 
         right.addWidget(cfg_group)
 
@@ -1006,6 +1208,22 @@ class MainWindow(QWidget):
         self.result_text.setReadOnly(True)
         self.result_text.setStyleSheet("background:#1a1a1a; color:#ddd; font-size:13px;")
         right.addWidget(self.result_text, 1)
+
+        # 曲线编辑器
+        curve_group = QGroupBox("曲线编辑器 (拖拽节点调整每发补偿量)")
+        curve_layout = QVBoxLayout(curve_group)
+        self.curve_editor = RecoilCurveEditor()
+        self.curve_editor.setMinimumHeight(180)
+        curve_layout.addWidget(self.curve_editor)
+        curve_bar = QHBoxLayout()
+        self.btn_curve_apply = QPushButton("应用曲线修改")
+        self.btn_curve_apply.setStyleSheet("background:#886622; color:white;")
+        self.btn_curve_reset = QPushButton("重置曲线")
+        curve_bar.addWidget(self.btn_curve_apply)
+        curve_bar.addWidget(self.btn_curve_reset)
+        curve_bar.addStretch()
+        curve_layout.addLayout(curve_bar)
+        right.addWidget(curve_group)
 
         # 复制+帮助
         bot = QHBoxLayout()
@@ -1061,8 +1279,10 @@ class MainWindow(QWidget):
 
         self.canvas.holes_changed.connect(self._on_holes_changed)
 
-        self.c_direction.currentIndexChanged.connect(
-            lambda: self.canvas.set_sort_direction(self.c_direction.currentData()))
+        self.btn_curve_apply.clicked.connect(self._apply_curve)
+        self.btn_curve_reset.clicked.connect(self._reset_curve)
+        self.curve_editor.data_changed.connect(self._on_curve_changed)
+
         self.c_start_shot.currentIndexChanged.connect(
             lambda: self.canvas.set_start_shot(self.c_start_shot.currentData()))
 
@@ -1276,6 +1496,7 @@ class MainWindow(QWidget):
             self.result_text.setHtml(html)
 
         self.info_lb.setText(f"已分析 {len(gen_results)} 条轨迹")
+        self._update_curve_editor()
 
     def _pick_template(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择弹孔模板", "", "图片 (*.png *.jpg *.bmp)")
@@ -1324,9 +1545,8 @@ class MainWindow(QWidget):
                 '<p>点击「检测过程」查看中间步骤</p>')
             return
 
-        direction = self.c_direction.currentData() or 'bottom_up'
         start_shot = self.c_start_shot.currentData() or 1
-        BulletSorter.sort(holes, direction, start_shot)
+        BulletSorter.sort(holes, 'bottom_up', start_shot)
         pm = _cv2_to_pixmap(self._result_img)
         self.canvas.set_data(holes, pm)
 
@@ -1381,6 +1601,7 @@ class MainWindow(QWidget):
         self.info_lb.setText(
             f"Round 1 生成完成 [{traj_name}] | {self._gun_name} {self._acc_code} | "
             f"{len(holes)}发 → {len(gen_result['generated_array'])}个数组元素")
+        self._update_curve_editor()
 
     # ═══ 结果刷新 ═══
 
@@ -1406,8 +1627,11 @@ class MainWindow(QWidget):
     # ═══ 保存项目 ═══
 
     def _save_project(self):
-        holes = self.canvas.get_holes()
-        if not holes:
+        self._save_current_traj_holes()
+        all_holes = []
+        for t in self._trajectories:
+            all_holes.extend(t.get('holes', []))
+        if not all_holes:
             QMessageBox.warning(self, "提示", "无弹孔数据可保存")
             return
 
@@ -1422,16 +1646,17 @@ class MainWindow(QWidget):
             img_size = (self._result_img.shape[1], self._result_img.shape[0])
 
         saved = ProjectData.save(
-            path, holes, self._get_config_dict(),
+            path, all_holes, self._get_config_dict(),
             comparison=self._last_comparison, correction=self._last_correction,
-            image_path=self._result_path, image_size=img_size)
+            image_path=self._result_path, image_size=img_size,
+            trajectories=self._trajectories)
         self._current_project_path = saved
 
-        # 同时保存标注图
         img_save_path = Path(saved).with_suffix('.annotated.png')
         self.canvas.save_annotation_image(str(img_save_path))
 
-        self.info_lb.setText(f"已保存: {Path(saved).name}")
+        n_traj = len(self._trajectories)
+        self.info_lb.setText(f"已保存: {Path(saved).name} ({n_traj}条轨迹, {len(all_holes)}个弹孔)")
 
     # ═══ 加载项目 ═══
 
@@ -1457,11 +1682,30 @@ class MainWindow(QWidget):
         self._set_combo(self.c_pose, cfg.get('pose_key', 'none'))
         self._read_config()
 
-        holes = data.get('holes', [])
+        # 多轨迹加载
+        saved_trajectories = data.get('trajectories')
+        if saved_trajectories and isinstance(saved_trajectories, list):
+            self._trajectories = []
+            self.traj_combo.blockSignals(True)
+            self.traj_combo.clear()
+            for t in saved_trajectories:
+                self._trajectories.append({
+                    'name': t.get('name', f"轨迹{len(self._trajectories)+1}"),
+                    'holes': t.get('holes', []),
+                    'comparison': t.get('comparison'),
+                    'correction': t.get('correction'),
+                })
+                self.traj_combo.addItem(self._trajectories[-1]['name'])
+            self.traj_combo.blockSignals(False)
+            self._current_traj_idx = 0
+            self.traj_combo.setCurrentIndex(0)
+            holes = self._trajectories[0]['holes'] if self._trajectories else []
+        else:
+            holes = data.get('holes', [])
+
         if not all('shot_num' in h for h in holes):
-            direction = self.c_direction.currentData() or 'bottom_up'
             start_shot = self.c_start_shot.currentData() or 1
-            BulletSorter.sort(holes, direction, start_shot)
+            BulletSorter.sort(holes, 'bottom_up', start_shot)
 
         # 尝试加载原图
         img_path = data.get('image_path')
@@ -1524,22 +1768,29 @@ class MainWindow(QWidget):
     # ═══ 迭代修正 (Phase 3) ═══
 
     def _iterate(self):
-        """迭代修正: 基于当前画布标注 + 当前GunData实际参数 → 微调
+        """迭代修正: 基于所有轨迹标注 + 当前GunData实际参数 → 比例修正
 
-        与上一版的区别: 不再加载旧项目文件, 直接读取当前GunData JSON
-        中枪械实际使用的弹道数组作为基准进行比较。
+        支持多轨迹: 自动收集所有轨迹的弹孔, 对比例取平均。
+        支持指定发数: 只修改标注范围内的数组元素。
         """
-        holes = self.canvas.get_holes()
-        if len(holes) < 2:
-            QMessageBox.warning(self, "提示", "请先标注开宏后的弹痕 (至少2个)")
+        self._save_current_traj_holes()
+
+        # 收集所有有效轨迹
+        valid_trajs = []
+        for t in self._trajectories:
+            if len(t.get('holes', [])) >= 2:
+                valid_trajs.append(t['holes'])
+        if not valid_trajs:
+            QMessageBox.warning(self, "提示", "请先标注开宏后的弹痕 (至少2个弹孔, 至少1条轨迹)")
             return
+
+        holes = valid_trajs[0]
 
         self._read_config()
         if not self._gun_name:
             QMessageBox.warning(self, "提示", "请先选择枪械")
             return
 
-        # 读取当前 GunData 中实际使用的参数 (宏正在使用的)
         gp = Path(self._gun_data_dir) / f"{self._gun_name}.json"
         if not gp.exists():
             QMessageBox.warning(self, "错误", f"枪械数据文件不存在: {gp}")
@@ -1571,8 +1822,10 @@ class MainWindow(QWidget):
             'gun_name': self._gun_name,
         }
 
+        multi_trajs = valid_trajs[1:] if len(valid_trajs) > 1 else None
         iter_result = IterativeCorrector.correct(
-            holes, prev_correction, self._scope_val, self._pose_val)
+            holes, prev_correction, self._scope_val, self._pose_val,
+            multi_trajectories=multi_trajs)
         if not iter_result:
             self.result_text.setHtml("<p style='color:#ff6666;'>迭代修正计算失败</p>")
             return
@@ -1582,19 +1835,25 @@ class MainWindow(QWidget):
         self.result_text.setHtml(_build_iteration_html(iter_result))
 
         # 自动保存
+        self._save_current_traj_holes()
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         save_name = f"{self._gun_name}_iter_{ts}.calibration.json"
         save_dir = Path("calibration_project")
         save_dir.mkdir(exist_ok=True)
         save_path = save_dir / save_name
+        all_holes = []
+        for t in self._trajectories:
+            all_holes.extend(t.get('holes', []))
         ProjectData.save(
-            str(save_path), holes, self._get_config_dict(),
+            str(save_path), all_holes, self._get_config_dict(),
             correction=iter_result,
             image_path=self._result_path,
-            image_size=(self._result_img.shape[1], self._result_img.shape[0]) if self._result_img is not None else None)
+            image_size=(self._result_img.shape[1], self._result_img.shape[0]) if self._result_img is not None else None,
+            trajectories=self._trajectories)
         self._current_project_path = str(save_path)
         self.info_lb.setText(
             f"迭代修正完成 | 基准: {self._gun_name}.json [{self._acc_code}] | 已保存: {save_name}")
+        self._update_curve_editor()
 
     # ═══ Debug ═══
 
@@ -1622,6 +1881,60 @@ class MainWindow(QWidget):
         QApplication.clipboard().setText(text)
         self.info_lb.setText(f"已复制到剪贴板 ({len(arr)}个元素)")
 
+    # ═══ 曲线编辑器 ═══
+
+    def _update_curve_editor(self):
+        """分析/迭代完成后刷新曲线编辑器"""
+        corr = self._last_correction
+        if not corr:
+            return
+        arr = corr.get('corrected_uniform', [])
+        chunk_f = corr.get('chunk_size_f', corr.get('chunk_size', 10))
+        if arr:
+            self.curve_editor.set_data(arr, chunk_f)
+
+    def _on_curve_changed(self, new_values):
+        """曲线编辑器拖拽后的实时回调"""
+        pass
+
+    def _apply_curve(self):
+        """将曲线编辑器的修改应用到 _last_correction"""
+        new_values = self.curve_editor.get_values()
+        if not new_values or not self._last_correction:
+            QMessageBox.information(self, "提示", "暂无可应用的数据")
+            return
+        modified = self.curve_editor.get_modified_indices()
+        self._last_correction['corrected_uniform'] = new_values
+        acc_code = self._last_correction.get('acc_code', 'A0B0C0')
+        arr_json_parts = []
+        items_per_line = 36
+        for row_start in range(0, len(new_values), items_per_line):
+            row_end = min(row_start + items_per_line, len(new_values))
+            parts = []
+            for idx in range(row_start, row_end):
+                v = new_values[idx]
+                if idx in modified:
+                    parts.append(f'<span style="color:#ffcc33; font-weight:bold;">{v}</span>')
+                else:
+                    parts.append(f'<span style="color:#666;">{v}</span>')
+            line = "        " + ", ".join(parts)
+            if row_end < len(new_values):
+                line += ","
+            arr_json_parts.append(line)
+
+        html = f"""<div style="margin:8px;">
+        <h3 style="color:#ffcc33;">曲线编辑结果</h3>
+        <p>已修改 {len(modified)} 个元素 (黄色高亮)</p>
+        <pre style="background:#222; padding:8px; overflow-x:auto; font-size:11px; line-height:1.6;">"{acc_code}": [
+{chr(10).join(arr_json_parts)}
+    ]</pre></div>"""
+        self.result_text.setHtml(html)
+        self.info_lb.setText(f"曲线编辑已应用 ({len(modified)}个元素已修改)")
+
+    def _reset_curve(self):
+        """重置曲线编辑器到上次分析/迭代结果"""
+        self._update_curve_editor()
+        self.info_lb.setText("曲线已重置")
 
 
 # ═══════════════════════════════════════════
