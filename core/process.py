@@ -190,11 +190,11 @@ class ProcessClass:
         - ``scope``: 来自 ``ScopeData`` 的倍镜/机瞄灵敏度倍率；放大倍率越高，同等 ``recoil`` 需要更大的鼠标下移量。
         - ``posture``: 枪械 JSON 中站姿/蹲/趴等姿态系数；不同姿态后坐力表现不同，与 ``recoil`` 相乘体现姿态对补偿的缩放。
 
-        三者相乘得到「本 tick 理论像素/驱动单位位移」，再 ``round(..., 2)`` 与弹道表精度对齐。
+        三者相乘得到「本 tick 理论像素/驱动单位位移」，再 ``int(round(...))`` 取整为整数。
         注意: 最终整数鼠标步长由 ``FIRE`` / ``FIRE1`` 中的 remainder 累加后再 ``int(round)``，此处仅负责单 tick 浮点合成。
         """
         recoil_value = posture * (recoil * scope)
-        return round(float(recoil_value), 2)
+        return int(round(recoil_value))  # 返回整数
 
     def get_guns_info(self):
         if self.Current_firearms == 1:
@@ -278,9 +278,8 @@ class ProcessClass:
         """
         全自动压枪：按 ``ballistic`` 每个元素执行一次下移，tick 间隔约 9ms（经 ``Computation_latency`` 微调）。
 
-        remainder（余数）机制: ``mouse_R`` 仅接受整型像素步长，而 ``calculate_the_recoil`` 输出为两位小数的浮点。
-        将「本 tick 理论位移 + 上轮未分配的亚像素」记为 ``exact``，``move = int(round(exact))`` 为本次实际下发量；
-        ``remainder = exact - move`` 把不足 1 像素的误差滚入下一 tick，避免长期系统性截断误差（等价于固定点累加器）。
+        注意: ballistic 数组中的值已经是整数，直接下发即可。
+        remainder 机制保留用于处理 posture/scope 计算时的亚像素误差。
         """
         recoil_list = []
         remainder = 0.0
@@ -288,9 +287,9 @@ class ProcessClass:
             if not self.mouse_one:
                 break
             Emit('x', (True,))
-            recoil = self.calculate_the_recoil(i, posture, scope)
+            recoil = self.calculate_the_recoil(i, posture, scope)  # 返回整数
             recoil_list.append(recoil)
-            # 亚像素余数与本轮补偿合并后再取整，减少量化漂移
+            # 整数 + 余数，然后取整
             exact = recoil + remainder
             move = int(round(exact))
             remainder = exact - move

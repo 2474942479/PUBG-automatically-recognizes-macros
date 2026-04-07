@@ -391,6 +391,7 @@ class RecoilCurveEditor(QWidget):
 
     以 chunk 为单位展示 GunData 数组, 每个 chunk 的 sum 对应一发子弹的补偿量。
     用户可拖动节点调整每发的补偿值, 实时更新底层数组。
+    支持自动识别异常值（反向、突变）。
     """
     data_changed = pyqtSignal(list)
 
@@ -402,7 +403,9 @@ class RecoilCurveEditor(QWidget):
         self._dragging = -1
         self._hover = -1
         self._modified = set()
-        self.setMinimumHeight(200)
+        self._anomalies = []  # 异常值索引列表 [(idx, type, desc)]
+        self._show_anomalies = True  # 是否显示异常标记
+        self.setMinimumHeight(250)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.ClickFocus)
 
@@ -428,6 +431,9 @@ class RecoilCurveEditor(QWidget):
             s = sum(self._values[i:end])
             self._chunk_sums.append({'start': i, 'end': end, 'sum': s})
             i = end
+        
+        # 检测异常值
+        self._detect_anomalies()
 
     def _chart_rect(self):
         m = 40
@@ -454,6 +460,68 @@ class RecoilCurveEditor(QWidget):
         val = (r.bottom() - pos.y()) / r.height() * max_v
         return idx, val
 
+    def _detect_anomalies(self):
+        """检测异常值：反向、突变"""
+        self._anomalies = []
+        if len(self._chunk_sums) < 3:
+            return
+        
+        sums = [c['sum'] for c in self._chunk_sums]
+        
+        # 计算统计信息
+        mean_val = sum(sums) / len(sums)
+        std_val = (sum((x - mean_val) ** 2 for x in sums) / len(sums)) ** 0.5 if len(sums) > 1 else 0
+        
+        for i in range(len(self._chunk_sums)):
+            current_sum = sums[i]
+            
+            # 1. 检测反向值（与整体趋势相反）
+            if i > 0 and i < len(sums) - 1:
+                prev_sum = sums[i - 1]
+                next_sum = sums[i + 1]
+                avg_neighbor = (prev_sum + next_sum) / 2
+                
+                # 如果当前值与邻居平均值符号相反且绝对值较大
+                if current_sum * avg_neighbor < 0 and abs(current_sum) > 2:
+                    self._anomalies.append({
+                        'index': i,
+                        'type': 'reverse',
+                        'desc': f'反向: {current_sum:.2f} vs 邻居{avg_neighbor:.2f}',
+                        'severity': 'high'
+                    })
+                    continue
+            
+            # 2. 检测突变（偏离均值超过2倍标准差）
+            if std_val > 0 and abs(current_sum - mean_val) > 2.5 * std_val:
+                deviation = abs(current_sum - mean_val) / std_val
+                severity = 'high' if deviation > 4 else 'medium'
+                self._anomalies.append({
+                    'index': i,
+                    'type': 'spike',
+                    'desc': f'突变: {current_sum:.2f} (偏离{deviation:.1f}σ)',
+                    'severity': severity
+                })
+            
+            # 3. 检测零值簇（连续多个零可能表示数据缺失）
+            if current_sum == 0 and i > 0 and i < len(sums) - 1:
+                if sums[i-1] != 0 or sums[i+1] != 0:
+                    # 孤立零值
+                    self._anomalies.append({
+                        'index': i,
+                        'type': 'zero',
+                        'desc': f'孤立零值',
+                        'severity': 'low'
+                    })
+    
+    def get_anomaly_info(self):
+        """获取异常值信息"""
+        return list(self._anomalies)
+    
+    def toggle_anomaly_display(self):
+        """切换异常值显示"""
+        self._show_anomalies = not self._show_anomalies
+        self.update()
+    
     def _find_node(self, pos, threshold=12):
         for i, c in enumerate(self._chunk_sums):
             pt = self._value_to_pos(i, c['sum'])
@@ -486,25 +554,54 @@ class RecoilCurveEditor(QWidget):
             p.setPen(QColor(100, 100, 100))
             p.drawText(2, y + 4, f"{frac * max_v:.1f}")
             p.setPen(QPen(QColor(60, 60, 60), 1, Qt.DashLine))
+        
+        # 绘制零线
+        zero_y = int(r.bottom() - (0 - (-max_v)) / (2 * max_v) * r.height())
+        p.setPen(QPen(QColor(100, 100, 100, 150), 1, Qt.DashLine))
+        p.drawLine(int(r.left()), zero_y, int(r.right()), zero_y)
 
         # 连线
         n = len(self._chunk_sums)
         for i in range(n - 1):
             p1 = self._value_to_pos(i, self._chunk_sums[i]['sum'])
             p2 = self._value_to_pos(i + 1, self._chunk_sums[i + 1]['sum'])
-            p.setPen(QPen(QColor(100, 200, 255), 2))
+            
+            # 检查是否是异常区间
+            is_anomaly_line = False
+            if self._show_anomalies:
+                anomaly_indices = {a['index'] for a in self._anomalies}
+                if i in anomaly_indices or (i + 1) in anomaly_indices:
+                    is_anomaly_line = True
+            
+            if is_anomaly_line:
+                p.setPen(QPen(QColor(255, 80, 80, 180), 2, Qt.DashLine))
+            else:
+                p.setPen(QPen(QColor(100, 200, 255), 2))
             p.drawLine(p1, p2)
 
         # 节点
+        anomaly_indices = {a['index']: a for a in self._anomalies} if self._show_anomalies else {}
+        
         for i, c in enumerate(self._chunk_sums):
             pt = self._value_to_pos(i, c['sum'])
+            
+            # 确定节点颜色
             if i in self._modified:
-                col = QColor(255, 200, 50)
+                col = QColor(255, 200, 50)  # 黄色：已修改
+            elif i in anomaly_indices:
+                anomaly = anomaly_indices[i]
+                if anomaly['severity'] == 'high':
+                    col = QColor(255, 50, 50)  # 红色：严重异常
+                elif anomaly['severity'] == 'medium':
+                    col = QColor(255, 150, 50)  # 橙色：中等异常
+                else:
+                    col = QColor(255, 255, 100)  # 浅黄：轻微异常
             elif i == self._hover:
-                col = QColor(200, 255, 200)
+                col = QColor(200, 255, 200)  # 绿色：悬停
             else:
-                col = QColor(100, 200, 255)
-            radius = 6 if i == self._dragging or i == self._hover else 4
+                col = QColor(100, 200, 255)  # 蓝色：正常
+            
+            radius = 7 if i == self._dragging else 6 if i == self._hover or i in anomaly_indices else 4
             p.setPen(QPen(col, 2))
             p.setBrush(QBrush(col))
             p.drawEllipse(pt, radius, radius)
@@ -514,12 +611,31 @@ class RecoilCurveEditor(QWidget):
                 p.setPen(QColor(160, 160, 160))
                 p.setFont(QFont("Arial", 7))
                 p.drawText(int(pt.x()) - 8, int(r.bottom()) + 14, str(i + 1))
+            
+            # 异常标记图标
+            if i in anomaly_indices and self._show_anomalies:
+                anomaly = anomaly_indices[i]
+                p.setPen(QPen(Qt.white, 1))
+                p.setFont(QFont("Arial", 8))
+                if anomaly['type'] == 'reverse':
+                    symbol = '↕'
+                elif anomaly['type'] == 'spike':
+                    symbol = '▲'
+                else:
+                    symbol = '○'
+                p.drawText(int(pt.x()) - 4, int(pt.y()) - radius - 5, symbol)
 
         # Hover tooltip
         if 0 <= self._hover < n:
             c = self._chunk_sums[self._hover]
             pt = self._value_to_pos(self._hover, c['sum'])
-            tip = f"第{self._hover+1}发: sum={c['sum']:.2f} [{c['start']}:{c['end']}]"
+            tip = f"第{self._hover+1}发: sum={int(c['sum'])} [{c['start']}:{c['end']}]"
+            
+            # 如果有异常，添加异常信息
+            if self._hover in anomaly_indices:
+                anomaly = anomaly_indices[self._hover]
+                tip += f"\n⚠ {anomaly['desc']}"
+            
             p.setPen(QColor(255, 255, 200))
             p.setFont(QFont("Arial", 9))
             p.drawText(int(pt.x()) - 40, int(pt.y()) - 12, tip)
@@ -541,7 +657,7 @@ class RecoilCurveEditor(QWidget):
                 ratio = 1.0
             for j in range(c['start'], c['end']):
                 if j < len(self._values):
-                    self._values[j] = round(self._values[j] * ratio, 2)
+                    self._values[j] = int(round(self._values[j] * ratio))  # 使用整数
                     self._modified.add(j)
             self._compute_chunks()
             self.update()
@@ -932,8 +1048,9 @@ def _build_iteration_html(iter_result):
       <p>{verdict}</p>
       <p>平均残差: {avg_dy:.2f}px | 最大残差: {max_dy:.2f}px | 平均修正比例: ×{avg_ratio:.4f}{traj_info}{shot_info}</p>
       <p style="color:#aaa; font-size:12px;">
-        修正原理: ratio = chunk_sum / (chunk_sum + dy) → 未知转换系数自动抵消<br/>
-        ratio &gt; 1 → 补偿不足 | ratio &lt; 1 → 补偿过度
+        修正原理: ratio = chunk_sum / (chunk_sum + |dy|), dy保留符号表示方向<br/>
+        dy &lt; 0 → 没压住(下沉), 应用 1/ratio 增大补偿 | dy &gt; 0 → 压过了(上飘), 应用 ratio 减小补偿<br/>
+        <span style="color:#ffcc00;">特殊处理:</span> chunk原值为0时, 直接将 |dy| 平均分配到每个元素
       </p>
 
       <h4 style="margin-top:8px;">逐发残差分析:</h4>
@@ -963,9 +1080,9 @@ def _build_iteration_html(iter_result):
         html += f"""
         <tr>
           <td style="padding:3px; text-align:center;">{r.get('shot_from', r['shot'])}→{r.get('shot_to', r['shot']+1)}</td>
-          <td style="text-align:center;">{dy:.2f}{traj_note}</td>
-          <td style="text-align:center;">{r['dx']:.2f}</td>
-          <td style="text-align:center;">{r.get('chunk_sum', 0):.2f}</td>
+          <td style="text-align:center;">{int(dy)}{traj_note}</td>
+          <td style="text-align:center;">{int(r['dx'])}</td>
+          <td style="text-align:center;">{int(r.get('chunk_sum', 0))}</td>
           <td style="text-align:center; color:{ratio_color};"><b>×{ratio:.4f}</b></td>
           <td style="text-align:center; color:#888;">{r.get('array_range', '')}</td>
           <td style="text-align:center;">{judge}</td>
@@ -990,15 +1107,15 @@ def _build_iteration_html(iter_result):
             start, end = int(parts[0]), int(parts[1])
         else:
             continue
-        orig_sum = round(sum(original[start:end]), 2) if end <= len(original) else 0
-        corr_sum = round(sum(corrected[start:end]), 2) if end <= len(corrected) else 0
+        orig_sum = int(round(sum(original[start:end]))) if end <= len(original) else 0
+        corr_sum = int(round(sum(corrected[start:end]))) if end <= len(corrected) else 0
         ratio = round(corr_sum / orig_sum, 4) if orig_sum != 0 else 1.0
         ratio_color = '#44cc44' if 0.9 <= ratio <= 1.1 else '#ffcc00' if 0.7 <= ratio <= 1.3 else '#ff4444'
         html += f"""
         <tr>
           <td style="padding:3px; text-align:center;">{r.get('shot_from', '')}→{r.get('shot_to', '')}</td>
-          <td style="text-align:center;">{orig_sum:.2f}</td>
-          <td style="text-align:center; color:#8f8;"><b>{corr_sum:.2f}</b></td>
+          <td style="text-align:center;">{orig_sum}</td>
+          <td style="text-align:center; color:#8f8;"><b>{corr_sum}</b></td>
           <td style="text-align:center; color:{ratio_color};">×{ratio:.4f}</td>
         </tr>"""
     html += "</table>"
@@ -1219,10 +1336,23 @@ class MainWindow(QWidget):
         self.btn_curve_apply = QPushButton("应用曲线修改")
         self.btn_curve_apply.setStyleSheet("background:#886622; color:white;")
         self.btn_curve_reset = QPushButton("重置曲线")
+        self.btn_toggle_anomalies = QPushButton("隐藏异常标记")
+        self.btn_toggle_anomalies.setCheckable(True)
+        self.btn_toggle_anomalies.setStyleSheet("background:#444; color:#aaa;")
         curve_bar.addWidget(self.btn_curve_apply)
         curve_bar.addWidget(self.btn_curve_reset)
+        curve_bar.addWidget(self.btn_toggle_anomalies)
         curve_bar.addStretch()
         curve_layout.addLayout(curve_bar)
+        
+        # 异常值信息面板
+        self.anomaly_info = QTextEdit()
+        self.anomaly_info.setReadOnly(True)
+        self.anomaly_info.setMaximumHeight(120)
+        self.anomaly_info.setStyleSheet("background:#1a1a1a; color:#ddd; font-size:12px;")
+        self.anomaly_info.setVisible(False)
+        curve_layout.addWidget(self.anomaly_info)
+        
         right.addWidget(curve_group)
 
         # 复制+帮助
@@ -1281,6 +1411,7 @@ class MainWindow(QWidget):
 
         self.btn_curve_apply.clicked.connect(self._apply_curve)
         self.btn_curve_reset.clicked.connect(self._reset_curve)
+        self.btn_toggle_anomalies.toggled.connect(self._toggle_anomalies)
         self.curve_editor.data_changed.connect(self._on_curve_changed)
 
         self.c_start_shot.currentIndexChanged.connect(
@@ -1892,6 +2023,12 @@ class MainWindow(QWidget):
         chunk_f = corr.get('chunk_size_f', corr.get('chunk_size', 10))
         if arr:
             self.curve_editor.set_data(arr, chunk_f)
+            # 自动检测并显示异常值
+            anomalies = self.curve_editor.get_anomaly_info()
+            if anomalies:
+                self.info_lb.setText(f"曲线已加载 | 检测到 {len(anomalies)} 个异常值 (点击'隐藏异常标记'查看详情)")
+            else:
+                self.info_lb.setText("曲线已加载 | 数据质量良好")
 
     def _on_curve_changed(self, new_values):
         """曲线编辑器拖拽后的实时回调"""
@@ -1935,6 +2072,57 @@ class MainWindow(QWidget):
         """重置曲线编辑器到上次分析/迭代结果"""
         self._update_curve_editor()
         self.info_lb.setText("曲线已重置")
+    
+    def _toggle_anomalies(self, checked):
+        """切换异常值显示"""
+        self.curve_editor.toggle_anomaly_display()
+        if checked:
+            self.btn_toggle_anomalies.setText("显示异常标记")
+            self.anomaly_info.setVisible(False)
+        else:
+            self.btn_toggle_anomalies.setText("隐藏异常标记")
+            # 显示异常信息
+            self._update_anomaly_info()
+            self.anomaly_info.setVisible(True)
+    
+    def _update_anomaly_info(self):
+        """更新异常值信息面板"""
+        anomalies = self.curve_editor.get_anomaly_info()
+        if not anomalies:
+            html = "<p style='color:#44cc44;'>✓ 未检测到异常值，数据质量良好</p>"
+        else:
+            high_count = sum(1 for a in anomalies if a['severity'] == 'high')
+            medium_count = sum(1 for a in anomalies if a['severity'] == 'medium')
+            low_count = sum(1 for a in anomalies if a['severity'] == 'low')
+            
+            html = f"<h3 style='color:#ffaa00; margin:5px 0;'>⚠ 检测到 {len(anomalies)} 个异常值</h3>"
+            html += f"<p style='margin:3px 0;'><span style='color:#ff4444;'>■ 严重: {high_count}</span> | "
+            html += f"<span style='color:#ff9900;'>■ 中等: {medium_count}</span> | "
+            html += f"<span style='color:#ffff66;'>■ 轻微: {low_count}</span></p>"
+            html += "<table style='border-collapse:collapse; font-size:11px; width:100%;'>"
+            html += "<tr style='background:#333; color:white;'><th style='padding:3px;'>发数</th><th>类型</th><th>描述</th></tr>"
+            
+            for a in anomalies:
+                if a['severity'] == 'high':
+                    color = '#ff4444'
+                    icon = '🔴'
+                elif a['severity'] == 'medium':
+                    color = '#ff9900'
+                    icon = '🟠'
+                else:
+                    color = '#ffff66'
+                    icon = '🟡'
+                
+                type_cn = {'reverse': '反向', 'spike': '突变', 'zero': '零值'}.get(a['type'], a['type'])
+                html += f"<tr style='color:{color};'>"
+                html += f"<td style='padding:2px; text-align:center;'>{a['index']+1}</td>"
+                html += f"<td>{icon} {type_cn}</td>"
+                html += f"<td>{a['desc']}</td></tr>"
+            
+            html += "</table>"
+            html += "<p style='color:#aaa; font-size:10px; margin-top:5px;'>提示: 拖拽节点可手动修正异常值</p>"
+        
+        self.anomaly_info.setHtml(html)
 
 
 # ═══════════════════════════════════════════

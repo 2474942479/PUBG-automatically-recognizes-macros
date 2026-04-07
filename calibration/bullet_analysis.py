@@ -1164,6 +1164,9 @@ class IterativeCorrector:
         corrected = [float(v) for v in prev_params]
         residuals = []
         modified_ranges = []
+        
+        # 跟踪是否扩容过
+        array_expanded = False
 
         # 对每个间隔, 收集所有轨迹的 ratio 再取平均
         for i in range(n_intervals):
@@ -1175,7 +1178,7 @@ class IterativeCorrector:
                 s = sorted(hole_set, key=lambda h: h.get('shot_num', 0))
                 if i + 1 >= len(s):
                     continue
-                dy = s[i + 1]['y'] - s[i]['y']
+                dy = s[i + 1]['y'] - s[i]['y']  # 带符号的残差 (负=没压住/下沉, 正=压过了/上飘)
                 dx = s[i + 1]['x'] - s[i]['x']
                 dys_for_interval.append(dy)
                 dxs_for_interval.append(dx)
@@ -1185,28 +1188,78 @@ class IterativeCorrector:
                 chunk_sum = sum(abs(prev_params[j]) for j in range(start, min(end, len(prev_params))))
 
                 if chunk_sum > 0.01:
-                    ratio = chunk_sum / max(0.01, chunk_sum + dy)
+                    # 修正比例计算: dy取绝对值
+                    # dy的正负表示方向: 负=没压住(下沉), 正=压过了(上飘)
+                    # ratio只关心残差大小, 不关心方向
+                    # ratio = chunk_sum / (chunk_sum + |dy|)
+                    #   |dy|越大, ratio越小, 说明需要调整的幅度越大
+                    abs_dy = abs(dy)
+                    ratio = chunk_sum / max(0.01, chunk_sum + abs_dy)
                     ratio = max(0.05, min(20.0, ratio))
                     ratios_for_interval.append(ratio)
 
             start = array_offset + int(round(i * chunk_f))
             end = min(array_offset + int(round((i + 1) * chunk_f)), len(corrected))
-            chunk_sum = sum(abs(prev_params[j]) for j in range(start, min(end, len(prev_params))))
+            
+            # 如果start超出数组范围，自动扩容数组
+            if start >= len(corrected):
+                # 扩容数组，用0填充新增的元素
+                old_len = len(corrected)
+                new_len = start + max(10, int(round(chunk_f)))  # 至少多留10个元素的余量
+                corrected.extend([0.0] * (new_len - old_len))
+                array_expanded = True
+            
+            # 确保 end > start
+            if end <= start:
+                end = start + 1
+            
+            # 如果end也超出了（扩容后），再次扩容
+            if end > len(corrected):
+                old_len = len(corrected)
+                corrected.extend([0.0] * (end - old_len))
+                array_expanded = True
+            
+            # 使用corrected的当前长度作为prev_params的参考
+            # 如果扩容了，新增的部分原值都是0
+            prev_for_calc = list(prev_params) if not array_expanded else corrected[:len(prev_params)] + [0.0] * (len(corrected) - len(prev_params))
+            
+            chunk_sum = sum(abs(prev_for_calc[j]) for j in range(start, end))
             avg_dy = round(float(np.mean(dys_for_interval)), 2) if dys_for_interval else 0
             avg_dx = round(float(np.mean(dxs_for_interval)), 2) if dxs_for_interval else 0
 
             if ratios_for_interval:
                 avg_ratio = float(np.mean(ratios_for_interval))
                 avg_ratio = max(0.05, min(20.0, avg_ratio))
-                for j in range(start, min(end, len(corrected))):
-                    corrected[j] = round(prev_params[j] * avg_ratio, 2)
-                modified_ranges.append((start, min(end, len(corrected))))
+                # 根据avg_dy的符号决定调整方向
+                # dy < 0 (没压住): 需要增大补偿 → ratio > 1
+                # dy > 0 (压过了): 需要减小补偿 → ratio < 1
+                # 当前ratio = chunk_sum / (chunk_sum + |dy|) < 1
+                # 需要转换为: 如果dy < 0, 用 1/ratio; 如果dy > 0, 用 ratio
+                if avg_dy < 0:
+                    # 没压住, 需要增大补偿
+                    apply_ratio = 1.0 / avg_ratio if avg_ratio > 0.01 else 20.0
+                    apply_ratio = min(20.0, apply_ratio)
+                else:
+                    # 压过了, 需要减小补偿
+                    apply_ratio = avg_ratio
+                for j in range(start, end):
+                    corrected[j] = int(round(prev_for_calc[j] * apply_ratio))  # 整数
+                modified_ranges.append((start, end))
             elif end > start and chunk_sum <= 0.01:
-                per_tick = round(-avg_dy / max(1, end - start), 2)
-                for j in range(start, min(end, len(corrected))):
-                    corrected[j] = round(corrected[j] + per_tick, 2)
+                # chunk原值为0时, 不用算比例, 直接将|dy|平均分配到每个元素上
+                # dy的正负表示方向: 负=没压住, 正=压过了
+                per_tick = round(abs(avg_dy) / max(1, end - start))  # 使用整数
+                # 根据dy符号决定正负
+                if avg_dy < 0:
+                    # 没压住, 需要正向补偿
+                    for j in range(start, end):
+                        corrected[j] = int(per_tick)  # 整数
+                else:
+                    # 压过了, 需要负向补偿
+                    for j in range(start, end):
+                        corrected[j] = int(-per_tick)  # 整数
                 avg_ratio = 1.0
-                modified_ranges.append((start, min(end, len(corrected))))
+                modified_ranges.append((start, end))
             else:
                 avg_ratio = 1.0
 
@@ -1233,7 +1286,7 @@ class IterativeCorrector:
             'gun_name': prev_correction.get('gun_name', ''),
             'acc_code': acc_code,
             'corrected_uniform': corrected,
-            'original_array': prev_params,
+            'original_array': list(prev_params) + [0.0] * (len(corrected) - len(prev_params)) if array_expanded else prev_params,
             'avg_ratio': avg_ratio_total,
             'chunk_size': chunk_int,
             'chunk_size_f': round(chunk_f, 2),
