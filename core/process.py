@@ -239,6 +239,11 @@ class ProcessClass:
         if not gun:
             return Emit("l", ("枪械数据不存在",))
 
+        # v2 格式：per-shot 浮点数组 + 水平补偿 + 平滑展开
+        if gun.get("version") == 2:
+            return self._fire_start_v2(gun, guns_info, Emit)
+
+        # ── v1 兼容路径 ──
         # 获取配件码
         NameCode = self.get_accessories_nameCode(guns_info)
         # 获取弹道数据
@@ -274,22 +279,102 @@ class ProcessClass:
             return (latency - 0) / 1000
         return latency / 1000
 
-    def FIRE(self, posture, scope, ballistic, Emit):
-        """
-        全自动压枪：按 ``ballistic`` 每个元素执行一次下移，tick 间隔约 9ms（经 ``Computation_latency`` 微调）。
+    # ═══════════════════════════════════════════
+    # v2 开火路径：per-shot 平滑展开 + 水平补偿
+    # ═══════════════════════════════════════════
 
-        注意: ballistic 数组中的值已经是整数，直接下发即可。
-        remainder 机制保留用于处理 posture/scope 计算时的亚像素误差。
+    def _fire_start_v2(self, gun, guns_info, Emit):
+        """v2 格式入口：从 gun JSON 中提取 per-shot 数据，调用 FIRE_v2。"""
+        NameCode = self.get_accessories_nameCode(guns_info)
+        recoil_data = gun.get("recoil", {}).get(NameCode)
+        if not recoil_data:
+            return Emit("l", (f"配件组合 {NameCode} 无弹道数据",))
+
+        y_array = recoil_data.get("y", [])
+        x_array = recoil_data.get("x", [])
+        if not y_array:
+            return Emit("l", ("弹道数据为空，请先校准",))
+
+        posture_key = self.Current_posture.lower()
+        posture = gun.get("posture", {}).get(posture_key, 1.0)
+
+        accessor_scope = guns_info.get("Scope", "None").lower()
+        scope = self.ScopeData.get(accessor_scope, 1)
+
+        ticks_per_shot = gun.get("ticks_per_shot", 10)
+        tick_ms = gun.get("tick_ms", 9)
+
+        return self.FIRE_v2(posture, scope, y_array, x_array,
+                            ticks_per_shot, tick_ms, Emit)
+
+    def FIRE_v2(self, posture, scope, y_array, x_array,
+                ticks_per_shot, tick_ms, Emit):
         """
+        v2 压枪核心：将每发子弹的总补偿量平滑展开到多个 tick。
+
+        相比 v1 FIRE 的改进:
+        - 消除锯齿：per-shot 总量均匀分配到每个 tick，不再出现 [3,0,0,3,0,0] 的抖动
+        - 水平补偿：同时输出 x/y 方向的鼠标移动
+        - 亚像素精度：remainder 在 shot 之间连续累积，总位移量精确等于理论值
+        """
+        y_remainder = 0.0
+        x_remainder = 0.0
+        shot_totals = []
+
+        for shot_idx in range(len(y_array)):
+            if not self.mouse_one:
+                break
+            Emit('x', (True,))
+
+            y_total = y_array[shot_idx]
+            x_total = x_array[shot_idx] if shot_idx < len(x_array) else 0.0
+
+            y_per_tick = y_total / ticks_per_shot
+            x_per_tick = x_total / ticks_per_shot
+
+            y_shot_actual = 0
+            x_shot_actual = 0
+
+            for _ in range(ticks_per_shot):
+                if not self.mouse_one:
+                    break
+
+                y_exact = posture * (y_per_tick * scope) + y_remainder
+                x_exact = posture * (x_per_tick * scope) + x_remainder
+
+                y_move = int(round(y_exact))
+                x_move = int(round(x_exact))
+
+                y_remainder = y_exact - y_move
+                x_remainder = x_exact - x_move
+
+                self._gd.mouse_R(x_move, y_move)
+
+                y_shot_actual += y_move
+                x_shot_actual += x_move
+
+                latency = self.Computation_latency(tick_ms)
+                time.sleep(latency)
+
+            shot_totals.append(y_shot_actual)
+
+        Emit('x', (False,))
+        return shot_totals
+
+    # ═══════════════════════════════════════════
+    # v1 兼容开火路径（保留，直到所有数据迁移完成）
+    # ═══════════════════════════════════════════
+
+    def FIRE(self, posture, scope, ballistic, Emit):
+        """v1 全自动压枪：per-tick 逐元素下发，tick 间隔约 9ms。"""
         recoil_list = []
         remainder = 0.0
         for i in ballistic:
             if not self.mouse_one:
                 break
             Emit('x', (True,))
-            recoil = self.calculate_the_recoil(i, posture, scope)  # 返回整数
+            recoil = self.calculate_the_recoil(i, posture, scope)
             recoil_list.append(recoil)
-            # 整数 + 余数，然后取整
             exact = recoil + remainder
             move = int(round(exact))
             remainder = exact - move
@@ -300,10 +385,7 @@ class ProcessClass:
         return recoil_list
 
     def FIRE1(self, posture, scope, ballistic, Emit):
-        """
-        半自动/低射速档压枪：逻辑与 ``FIRE`` 相同（同一 remainder 亚像素累加），仅 sleep 基准改为 100ms，
-        与 ``FIRE_Start`` 中对 ``Not_Guns`` 的分支一致，避免过快连发与游戏内半自动节奏不符。
-        """
+        """v1 半自动压枪：per-tick 逐元素下发，tick 间隔约 100ms。"""
         recoil_list = []
         remainder = 0.0
         for i in ballistic:

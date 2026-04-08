@@ -28,6 +28,7 @@ from calibration.bullet_analysis import (
     ParameterCorrector, ProjectData, IterativeCorrector,
     BulletParamGenerator, _find_gun_data_dir, _load_sensitivity_config,
 )
+from calibration.video_calibrator import VideoCalibrator
 
 MUZZLE_CN = {
     'none': '无', 'eliuquan': '扼流圈', 'yazuiqiangkou': '鸭嘴枪口',
@@ -1151,6 +1152,230 @@ def _build_iteration_html(iter_result):
 
 
 # ═══════════════════════════════════════════
+# 视频校准对话框
+# ═══════════════════════════════════════════
+
+class VideoCalibrationDialog(QDialog):
+    """视频校准对话框: 录屏 + 帧差分自动弹孔检测 + per-shot v2 写入。"""
+
+    def __init__(self, gun_name, acc_code, scope_val, posture_val,
+                 gun_data_dir, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("视频校准")
+        self.resize(720, 600)
+        self._vc = VideoCalibrator(
+            gun_name, acc_code, scope_val, posture_val,
+            gun_data_dir=gun_data_dir)
+        self._result = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._init_ui()
+
+    def _init_ui(self):
+        lo = QVBoxLayout(self)
+
+        info = QGroupBox("配置")
+        ig = QGridLayout(info)
+        vc = self._vc
+        ig.addWidget(QLabel(f"枪械: {vc.gun_name}"), 0, 0)
+        ig.addWidget(QLabel(f"配件: {vc.acc_code}"), 0, 1)
+        ig.addWidget(QLabel(f"倍镜系数: {vc.scope_val}"), 0, 2)
+        ig.addWidget(QLabel(f"姿态系数: {vc.posture_val}"), 1, 0)
+        ig.addWidget(QLabel(f"射速: {round(60/vc.fire_interval)} RPM"), 1, 1)
+        ig.addWidget(QLabel(f"弹匣: {vc.magazine}"), 1, 2)
+        lo.addWidget(info)
+
+        from PyQt5.QtWidgets import QRadioButton, QButtonGroup
+        mode_box = QGroupBox("模式")
+        mlo = QHBoxLayout(mode_box)
+        self._bg = QButtonGroup(self)
+        self._rb_init = QRadioButton("初始生成 (无宏)")
+        self._rb_refine = QRadioButton("迭代修正 (有宏)")
+        self._rb_init.setChecked(True)
+        self._bg.addButton(self._rb_init)
+        self._bg.addButton(self._rb_refine)
+        mlo.addWidget(self._rb_init)
+        mlo.addWidget(self._rb_refine)
+        lo.addWidget(mode_box)
+
+        ctrl = QHBoxLayout()
+        self._btn_start = QPushButton("开始录制 (F6)")
+        self._btn_start.setStyleSheet(
+            "background:#22aa44;color:white;padding:8px 20px;font-size:14px;")
+        self._btn_stop = QPushButton("停止录制 (F7)")
+        self._btn_stop.setStyleSheet(
+            "background:#cc3333;color:white;padding:8px 20px;font-size:14px;")
+        self._btn_stop.setEnabled(False)
+        ctrl.addWidget(self._btn_start)
+        ctrl.addWidget(self._btn_stop)
+        lo.addLayout(ctrl)
+
+        self._lbl_status = QLabel("就绪 — 点击「开始录制」或按 F6")
+        self._lbl_status.setStyleSheet(
+            "font-size:14px;padding:6px;background:#222;color:#aaa;")
+        self._lbl_status.setAlignment(Qt.AlignCenter)
+        lo.addWidget(self._lbl_status)
+
+        self._txt = QTextEdit()
+        self._txt.setReadOnly(True)
+        self._txt.setStyleSheet("background:#1a1a1a;color:#ddd;font-size:13px;")
+        lo.addWidget(self._txt, 1)
+
+        bot = QHBoxLayout()
+        self._btn_write = QPushButton("写入 GunData")
+        self._btn_write.setStyleSheet("background:#886622;color:white;padding:6px;")
+        self._btn_write.setEnabled(False)
+        self._btn_copy = QPushButton("复制 Y 数组")
+        self._btn_copy.setEnabled(False)
+        self._btn_close = QPushButton("关闭")
+        bot.addWidget(self._btn_write)
+        bot.addWidget(self._btn_copy)
+        bot.addStretch()
+        bot.addWidget(self._btn_close)
+        lo.addLayout(bot)
+
+        self._btn_start.clicked.connect(self._on_start)
+        self._btn_stop.clicked.connect(self._on_stop)
+        self._btn_write.clicked.connect(self._on_write)
+        self._btn_copy.clicked.connect(self._on_copy)
+        self._btn_close.clicked.connect(self.accept)
+
+        self._vc.enable_hotkeys(on_start=self._hotkey_start, on_stop=self._hotkey_stop)
+
+    def _hotkey_start(self):
+        QTimer.singleShot(0, self._on_start)
+
+    def _hotkey_stop(self):
+        QTimer.singleShot(0, self._on_stop)
+
+    def _on_start(self):
+        if self._vc.recorder.recording:
+            return
+        self._vc.start_recording()
+        self._btn_start.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._btn_write.setEnabled(False)
+        self._btn_copy.setEnabled(False)
+        self._lbl_status.setText("录制中 … 对墙射击，完毕后点击「停止录制」或按 F7")
+        self._lbl_status.setStyleSheet(
+            "font-size:14px;padding:6px;background:#442222;color:#ff6666;")
+        self._timer.start(200)
+
+    def _tick(self):
+        n = self._vc.recorder.frame_count
+        self._lbl_status.setText(f"录制中 … 已捕获 {n} 帧")
+
+    def _on_stop(self):
+        if not self._vc.recorder.recording:
+            return
+        self._timer.stop()
+        count = self._vc.stop_recording()
+        self._btn_start.setEnabled(True)
+        self._btn_stop.setEnabled(False)
+        self._lbl_status.setText(f"录制结束: {count} 帧，分析中 …")
+        self._lbl_status.setStyleSheet(
+            "font-size:14px;padding:6px;background:#222;color:#aaa;")
+
+        if count < 10:
+            self._lbl_status.setText("帧数不足，请重新录制")
+            return
+
+        QApplication.processEvents()
+
+        mode = "initial" if self._rb_init.isChecked() else "refine"
+        prev = self._vc.load_prev_data() if mode == "refine" else None
+
+        self._result = self._vc.analyze(mode=mode, prev_data=prev)
+        if self._result is None:
+            self._lbl_status.setText("分析失败 (弹孔不足)")
+            self._txt.setHtml("<p style='color:#ff6666;'>未检测到足够弹孔，请重试</p>")
+            return
+
+        self._btn_write.setEnabled(True)
+        self._btn_copy.setEnabled(True)
+        self._show_result()
+
+    def _show_result(self):
+        r = self._result
+        summary = self._vc.summary(r)
+        self._lbl_status.setText("分析完成")
+
+        mode = r["mode"]
+        y = r.get("y_array" if mode == "initial" else "corrected_y", [])
+        x = r.get("x_array", [])
+
+        html = f"<div style='margin:8px;'>"
+        html += f"<h3 style='color:#44cc44;'>{'初始生成' if mode=='initial' else '迭代修正'} 完成</h3>"
+        html += f"<pre>{summary}</pre>"
+        html += f"<h4>per-shot Y ({len(y)} 发):</h4>"
+        html += f"<pre style='background:#222;padding:8px;color:#8f8;'>{y}</pre>"
+        if any(v != 0 for v in x):
+            html += f"<h4>per-shot X:</h4>"
+            html += f"<pre style='background:#222;padding:8px;color:#8f8;'>{x}</pre>"
+
+        details = r.get("details", [])
+        if details:
+            html += "<h4>逐发明细:</h4>"
+            html += "<table style='border-collapse:collapse;font-size:12px;' width='100%'>"
+            html += "<tr style='background:#444;color:white;'>"
+            if mode == "initial":
+                html += "<th>发</th><th>像素dy</th><th>像素dx</th><th>raw_y</th><th>raw_x</th><th>dt(ms)</th>"
+            else:
+                html += "<th>发</th><th>残差dy</th><th>原值</th><th>修正后</th>"
+            html += "</tr>"
+            for d in details[:40]:
+                html += "<tr>"
+                if mode == "initial":
+                    html += (f"<td style='text-align:center;'>{d['shot']}</td>"
+                             f"<td style='text-align:center;'>{d['pixel_dy']}</td>"
+                             f"<td style='text-align:center;'>{d['pixel_dx']}</td>"
+                             f"<td style='text-align:center;color:#8f8;'>{d['raw_y']}</td>"
+                             f"<td style='text-align:center;'>{d['raw_x']}</td>"
+                             f"<td style='text-align:center;'>{d['dt_ms']}</td>")
+                else:
+                    html += (f"<td style='text-align:center;'>{d['shot']}</td>"
+                             f"<td style='text-align:center;'>{d['residual_dy']}</td>"
+                             f"<td style='text-align:center;'>{d.get('prev_y','')}</td>"
+                             f"<td style='text-align:center;color:#8f8;'>{d.get('corrected_y','')}</td>")
+                html += "</tr>"
+            html += "</table>"
+
+        html += "</div>"
+        self._txt.setHtml(html)
+
+    def _on_write(self):
+        if self._result is None:
+            return
+        ok = self._vc.write_to_gundata(self._result)
+        if ok:
+            QMessageBox.information(
+                self, "成功",
+                f"已写入 {self._vc.gun_name}.json [{self._vc.acc_code}]")
+        else:
+            QMessageBox.warning(self, "失败", "写入失败，请检查日志")
+
+    def _on_copy(self):
+        if self._result is None:
+            return
+        mode = self._result["mode"]
+        y = self._result.get("y_array" if mode == "initial" else "corrected_y", [])
+        QApplication.clipboard().setText(json.dumps(y))
+        self._lbl_status.setText(f"已复制 {len(y)} 发 Y 数组到剪贴板")
+
+    def closeEvent(self, e):
+        self._vc.disable_hotkeys()
+        if self._vc.recorder.recording:
+            self._vc.stop_recording()
+        super().closeEvent(e)
+
+    def reject(self):
+        self._vc.disable_hotkeys()
+        if self._vc.recorder.recording:
+            self._vc.stop_recording()
+        super().reject()
+
+
+# ═══════════════════════════════════════════
 # 主窗口
 # ═══════════════════════════════════════════
 
@@ -1312,6 +1537,11 @@ class MainWindow(QWidget):
         btn_layout.addWidget(self.btn_iterate, 1, 2)
         btn_layout.addWidget(self.btn_debug, 1, 3)
 
+        self.btn_video_cal = QPushButton("视频校准 (F6/F7)")
+        self.btn_video_cal.setStyleSheet(
+            "font-weight:bold; background:#7733aa; color:white; padding:6px;")
+        btn_layout.addWidget(self.btn_video_cal, 2, 0, 1, 4)
+
         right.addLayout(btn_layout)
 
         # 状态标签
@@ -1400,6 +1630,7 @@ class MainWindow(QWidget):
         self.btn_copy.clicked.connect(self._copy_output)
         self.btn_help.clicked.connect(lambda: HelpDialog(self).exec_())
 
+        self.btn_video_cal.clicked.connect(self._open_video_calibration)
         self.btn_roi.toggled.connect(self.canvas.set_roi_mode)
         self.btn_clear_roi.clicked.connect(self._clear_roi)
 
@@ -1994,6 +2225,19 @@ class MainWindow(QWidget):
             return
         DebugDialog(self._last_detector.debug_info,
                     self._last_detector.debug_images, self).exec_()
+
+    # ═══ 视频校准 ═══
+
+    def _open_video_calibration(self):
+        self._read_config()
+        if not self._gun_name:
+            QMessageBox.warning(self, "提示", "请先选择枪械")
+            return
+        dlg = VideoCalibrationDialog(
+            self._gun_name, self._acc_code,
+            self._scope_val, self._pose_val,
+            self._gun_data_dir, parent=self)
+        dlg.exec_()
 
     # ═══ 复制 ═══
 

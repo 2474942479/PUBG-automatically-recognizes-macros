@@ -761,27 +761,38 @@ class BulletComparator:
         if gun_data is None:
             return None
 
-        raw = gun_data.get(acc_code, gun_data.get("A0B0C0", []))
+        is_v2 = gun_data.get("version") == 2
+        n_intervals = len(s) - 1
+
+        if is_v2:
+            # v2: per-shot 浮点数组，直接从 recoil 字典中提取
+            recoil_entry = gun_data.get("recoil", {}).get(
+                acc_code, gun_data.get("recoil", {}).get("A0B0C0", {}))
+            raw = recoil_entry.get("y", [])
+            chunk_f = 1.0  # 每个元素即一发
+        else:
+            # v1: per-tick 数组
+            raw = gun_data.get(acc_code, gun_data.get("A0B0C0", []))
         if not raw:
             return None
 
         is_semi = gun_name.lower() in _SEMI_AUTO_GUNS
-        n_intervals = len(s) - 1
 
-        if is_semi:
-            chunk_f = 1.0
-        else:
-            fire_interval = _get_fire_interval(gun_name)
-            if fire_interval and fire_interval > 0:
-                chunk_f = fire_interval * 1000 / _TICK_MS
+        if not is_v2:
+            if is_semi:
+                chunk_f = 1.0
             else:
-                effective_len = _trim_trailing_zeros(raw)
-                mag_size = _get_gun_magazine(gun_name)
-                if mag_size >= 2:
-                    total_intervals = mag_size - 1
+                fire_interval = _get_fire_interval(gun_name)
+                if fire_interval and fire_interval > 0:
+                    chunk_f = fire_interval * 1000 / _TICK_MS
                 else:
-                    total_intervals = max(n_intervals, round(effective_len / 9.0))
-                chunk_f = effective_len / max(1, total_intervals)
+                    effective_len = _trim_trailing_zeros(raw)
+                    mag_size = _get_gun_magazine(gun_name)
+                    if mag_size >= 2:
+                        total_intervals = mag_size - 1
+                    else:
+                        total_intervals = max(n_intervals, round(effective_len / 9.0))
+                    chunk_f = effective_len / max(1, total_intervals)
 
         n_compare = min(n_intervals, int(len(raw) / max(0.5, chunk_f)))
 
@@ -789,7 +800,10 @@ class BulletComparator:
         actual_dy = [abs(s[i - 1]['y'] - s[i]['y']) for i in range(1, len(s))]
         actual_dx = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
 
-        # 理论值: 与压枪算法一致 — 每个 tick 对 raw 元素做 round(posture*(value*scope), 2) 再对区间内求和
+        # 理论值计算（v2 和 v1 统一路径）
+        # v2: chunk_f=1, 每个元素是 per-shot 原始值, sum 就是该元素本身
+        # v1: chunk_f=N, 对 N 个 tick 元素做 round(posture*(v*scope)) 后求和
+        # chunk_sum 已包含 scope 和 posture 的缩放, 即宏实际输出的鼠标位移总量
         theory_chunks = []
         for i in range(n_compare):
             start = int(round(i * chunk_f))
@@ -802,8 +816,8 @@ class BulletComparator:
         for i in range(n_compare):
             act = actual_dy[i]
             raw_sum = theory_chunks[i]
-            # theo 供 ratio=act/theo 及 details['theory_dy'] 使用；实现上为 theory_chunks[i] × scope × posture
-            theo = raw_sum * scope_val * posture_val
+            # theo = chunk_sum 本身, 已包含 scope×posture, 即宏实际输出的鼠标位移
+            theo = raw_sum
 
             if theo > 0 and act > 0:
                 ratio = act / theo
@@ -862,7 +876,8 @@ class BulletComparator:
             'fire_interval_ms': round(fire_interval * 1000, 2) if fire_interval else None,
             'rpm': rpm,
             'magazine_size': _get_gun_magazine(gun_name),
-            'effective_array_len': _trim_trailing_zeros(raw) if not is_semi else len(raw),
+            'effective_array_len': len(raw) if is_v2 else (_trim_trailing_zeros(raw) if not is_semi else len(raw)),
+            'is_v2': is_v2,
             'avg_horizontal_drift': round(avg_dx, 2),
             'max_horizontal_drift': round(max_dx, 2),
             'std_horizontal_drift': round(std_dx, 2),
@@ -941,16 +956,12 @@ class BulletParamGenerator:
 
     @staticmethod
     def generate(holes, gun_name, scope_val=1.0, posture_val=1.0):
-        """Round 1：由无压枪弹痕反推 GunData 风格的每 tick 常数。
+        """从无压枪弹痕直接生成 v2 格式的 per-shot 补偿数组。
 
-        设相邻弹孔纵距为 pixel_dy，两发之间游戏时间约为 fire_interval，宏以 _TICK_MS 为步进，则
-        chunk_f ≈ fire_interval×1000/_TICK_MS 表示该间隔覆盖的 tick 数。
+        v2 格式下每个元素代表一发子弹的总补偿量（raw 值），运行时由 FIRE_v2
+        均匀展开到 ticks_per_shot 个 tick 并施加 scope/posture 缩放。
 
-        运行时一 tick 下移量为 round(posture×(value×scope))；若 value 在 chunk 内近似常数，则
-        chunk_f×value ≈ pixel_dy（像素），故 value ≈ pixel_dy/(chunk_f×scope×posture)。
-        factor = scope×posture 即分母中的灵敏度与姿态合成项；除以 chunk_f 把「一发间隔总像素」摊到每个 tick。
-
-        实现上用 chunk_int 个 tick 重复同一 value_per_tick，与真实逐 tick 微调有差异，属 Round 1 粗生成。
+        反推公式: raw_per_shot = pixel_dy / (scope × posture)
         """
         if len(holes) < 2:
             return None
@@ -965,52 +976,51 @@ class BulletParamGenerator:
             chunk_f = 10.0
 
         factor = max(0.01, scope_val * posture_val)
-        chunk_int = max(1, int(round(chunk_f)))
 
         pixel_dys = [abs(s[i - 1]['y'] - s[i]['y']) for i in range(1, len(s))]
         pixel_dxs = [s[i]['x'] - s[i - 1]['x'] for i in range(1, len(s))]
 
-        result_array = []
+        y_array = []
+        x_array = []
         details = []
 
         for i in range(n_intervals):
             dy = pixel_dys[i]
             dx = pixel_dxs[i] if i < len(pixel_dxs) else 0
-            # dy/chunk_f ≈ 每 tick 平均像素；再除以 (scope×posture) 反解 GunData 中 value，使宏内 round(posture×value×scope)≈该 tick 像素
-            value_per_tick = round(dy / chunk_f / factor, 2)
-            start_idx = len(result_array)
-
-            for _ in range(chunk_int):
-                result_array.append(value_per_tick)
+            # per-shot raw 值 = 实测像素距 / (scope × posture)
+            raw_y = round(dy / factor, 2)
+            raw_x = round(dx / factor, 2)
+            y_array.append(raw_y)
+            x_array.append(raw_x)
 
             details.append({
                 'shot_from': s[i].get('shot_num', i + 1),
                 'shot_to': s[i + 1].get('shot_num', i + 2),
                 'pixel_dy': round(dy, 2),
                 'pixel_dx': round(dx, 2),
-                'value_per_tick': value_per_tick,
-                'n_ticks': chunk_int,
-                'array_range': f"[{start_idx}:{start_idx + chunk_int}]",
+                'raw_y': raw_y,
+                'raw_x': raw_x,
             })
 
         fire_interval_ms = round(fire_interval * 1000, 2) if fire_interval else None
         rpm = round(60 / fire_interval) if fire_interval else None
+        ticks_per_shot = max(1, int(round(chunk_f)))
 
         return {
             'gun_name': gun_name,
             'scope_val': scope_val,
             'posture_val': posture_val,
-            'chunk_f': round(chunk_f, 2),
-            'chunk_int': chunk_int,
+            'ticks_per_shot': ticks_per_shot,
             'fire_interval_ms': fire_interval_ms,
             'rpm': rpm,
             'n_shots': len(s),
             'n_intervals': n_intervals,
-            'array_length': len(result_array),
-            'generated_array': result_array,
+            'generated_y': y_array,
+            'generated_x': x_array,
             'details': details,
             'avg_pixel_dy': round(sum(pixel_dys) / len(pixel_dys), 2) if pixel_dys else 0,
             'total_pixel_dy': round(sum(pixel_dys), 2),
+            'is_v2': True,
         }
 
     @staticmethod
@@ -1044,11 +1054,20 @@ class ParameterCorrector:
         except (json.JSONDecodeError, IOError):
             return None
 
-        original = gun_data.get(acc_code)
+        is_v2 = gun_data.get("version") == 2
         fallback_code = acc_code
-        if original is None:
-            original = gun_data.get("A0B0C0", [])
-            fallback_code = "A0B0C0"
+
+        if is_v2:
+            recoil_entry = gun_data.get("recoil", {}).get(acc_code)
+            if recoil_entry is None:
+                recoil_entry = gun_data.get("recoil", {}).get("A0B0C0", {})
+                fallback_code = "A0B0C0"
+            original = recoil_entry.get("y", [])
+        else:
+            original = gun_data.get(acc_code)
+            if original is None:
+                original = gun_data.get("A0B0C0", [])
+                fallback_code = "A0B0C0"
         if not original:
             return None
 
@@ -1083,6 +1102,7 @@ class ParameterCorrector:
             'corrected_per_shot': per_shot,
             'chunk_size': max(1, int(round(chunk_f))),
             'chunk_size_f': round(chunk_f, 2),
+            'is_v2': is_v2,
         }
 
     @staticmethod
@@ -1143,6 +1163,7 @@ class IterativeCorrector:
             return None
 
         prev_params = list(prev_params)
+        is_v2 = prev_correction.get('is_v2', False)
         chunk_f = prev_correction.get('chunk_size_f',
                                       float(prev_correction.get('chunk_size', 12)))
         acc_code = prev_correction.get('acc_code', 'A0B0C0')
@@ -1230,34 +1251,23 @@ class IterativeCorrector:
             if ratios_for_interval:
                 avg_ratio = float(np.mean(ratios_for_interval))
                 avg_ratio = max(0.05, min(20.0, avg_ratio))
-                # 根据avg_dy的符号决定调整方向
-                # dy < 0 (没压住): 需要增大补偿 → ratio > 1
-                # dy > 0 (压过了): 需要减小补偿 → ratio < 1
-                # 当前ratio = chunk_sum / (chunk_sum + |dy|) < 1
-                # 需要转换为: 如果dy < 0, 用 1/ratio; 如果dy > 0, 用 ratio
                 if avg_dy < 0:
-                    # 没压住, 需要增大补偿
                     apply_ratio = 1.0 / avg_ratio if avg_ratio > 0.01 else 20.0
                     apply_ratio = min(20.0, apply_ratio)
                 else:
-                    # 压过了, 需要减小补偿
                     apply_ratio = avg_ratio
                 for j in range(start, end):
-                    corrected[j] = int(round(prev_for_calc[j] * apply_ratio))  # 整数
+                    val = prev_for_calc[j] * apply_ratio
+                    corrected[j] = round(val, 2) if is_v2 else int(round(val))
                 modified_ranges.append((start, end))
             elif end > start and chunk_sum <= 0.01:
-                # chunk原值为0时, 不用算比例, 直接将|dy|平均分配到每个元素上
-                # dy的正负表示方向: 负=没压住, 正=压过了
-                per_tick = round(abs(avg_dy) / max(1, end - start))  # 使用整数
-                # 根据dy符号决定正负
+                per_tick_val = abs(avg_dy) / max(1, end - start)
                 if avg_dy < 0:
-                    # 没压住, 需要正向补偿
                     for j in range(start, end):
-                        corrected[j] = int(per_tick)  # 整数
+                        corrected[j] = round(per_tick_val, 2) if is_v2 else int(round(per_tick_val))
                 else:
-                    # 压过了, 需要负向补偿
                     for j in range(start, end):
-                        corrected[j] = int(-per_tick)  # 整数
+                        corrected[j] = round(-per_tick_val, 2) if is_v2 else int(round(-per_tick_val))
                 avg_ratio = 1.0
                 modified_ranges.append((start, end))
             else:
