@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PUBG 视频校准模块
-═══════════════════════════
-录屏 + 逐帧差分自动检测弹孔 + 直接输出 per-shot v2 格式
+PUBG 视频校准模块 (v2 — 透明化重构)
+═══════════════════════════════════════
+录屏 → 自动检测弹孔 → 标注预览图 → 加载到画布手动审核 → 计算参数
 
-流程:
-    F6 开始录制 → 对墙射击 → F7 停止
-    工具自动检测弹孔时序 → 输出 per-shot 补偿值
-    一键写入 GunData v2 JSON
-
-两种模式:
-    initial  — 无宏，从弹痕反推初始补偿值
-    refine   — 有宏，从残差弹痕迭代修正已有参数
+核心改进 (vs v1):
+  1. 录屏自动保存为 .avi，可回放
+  2. 检测结果生成标注图 (编号 + 轨迹线)
+  3. 加载到 BulletCanvas 供手动调整
+  4. initial 模式: 帧差分保留时序
+  5. refine 模式: 最后一帧静态检测 (BulletDetector)，不再用帧差分
 """
 
 import cv2
@@ -20,6 +18,7 @@ import json
 import logging
 import mss
 import numpy as np
+import os
 import threading
 import time
 from pathlib import Path
@@ -29,15 +28,16 @@ log = logging.getLogger("video_calibrator")
 
 try:
     from calibration.bullet_analysis import (
-        _GUN_META, _get_fire_interval, _find_gun_data_dir,
+        _GUN_META, _get_fire_interval, _find_gun_data_dir, BulletDetector,
     )
 except ImportError:
     try:
         from bullet_analysis import (
-            _GUN_META, _get_fire_interval, _find_gun_data_dir,
+            _GUN_META, _get_fire_interval, _find_gun_data_dir, BulletDetector,
         )
     except ImportError:
         _GUN_META = {}
+        BulletDetector = None
         def _get_fire_interval(n): return None
         def _find_gun_data_dir(): return "./_internal/GunData"
 
@@ -47,19 +47,16 @@ except ImportError:
 # ═══════════════════════════════════════════
 
 class ScreenRecorder:
-    """高速屏幕捕获，支持 F6/F7 热键控制。"""
+    """高速屏幕捕获，支持 F6/F7 热键控制 + 视频保存。"""
 
     def __init__(self, capture_region=None, target_fps=60):
-        """
-        :param capture_region: (left, top, width, height) 或 None 自动取屏幕中央
-        :param target_fps: 目标帧率
-        """
         self.capture_region = capture_region
         self.target_fps = target_fps
         self.frames = []
         self._recording = False
         self._thread = None
         self._hotkey_listener = None
+        self.actual_region = None
 
     @property
     def recording(self):
@@ -103,11 +100,15 @@ class ScreenRecorder:
 
     def _loop(self):
         interval = 1.0 / self.target_fps
-        region = (
-            {"left": self.capture_region[0], "top": self.capture_region[1],
-             "width": self.capture_region[2], "height": self.capture_region[3]}
-            if self.capture_region else self._auto_region()
-        )
+        if self.capture_region:
+            region = {
+                "left": self.capture_region[0], "top": self.capture_region[1],
+                "width": self.capture_region[2], "height": self.capture_region[3],
+            }
+        else:
+            region = self._auto_region()
+        self.actual_region = region
+
         with mss.mss() as sct:
             while self._recording:
                 t0 = time.perf_counter()
@@ -117,6 +118,35 @@ class ScreenRecorder:
                 sleep_t = interval - (time.perf_counter() - t0)
                 if sleep_t > 0:
                     time.sleep(sleep_t)
+
+    def get_reference_frame(self):
+        return self.frames[0][1].copy() if self.frames else None
+
+    def get_last_frame(self):
+        return self.frames[-1][1].copy() if self.frames else None
+
+    def save_video(self, path=None):
+        """将录制帧保存为 .avi 视频文件，返回保存路径。"""
+        if len(self.frames) < 2:
+            return None
+
+        if path is None:
+            out_dir = Path("calibration_results")
+            out_dir.mkdir(exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = str(out_dir / f"recording_{ts}.avi")
+
+        h, w = self.frames[0][1].shape[:2]
+        dur = self.frames[-1][0] - self.frames[0][0]
+        fps = len(self.frames) / max(0.01, dur)
+
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
+        for _, frame in self.frames:
+            writer.write(frame)
+        writer.release()
+        log.info("视频已保存: %s (%d帧, %.1ffps)", path, len(self.frames), fps)
+        return path
 
     # ── 热键 ──
 
@@ -154,11 +184,15 @@ class ScreenRecorder:
 
 
 # ═══════════════════════════════════════════
-# 帧分析器
+# 帧分析器 (仅用于 initial 模式的时序检测)
 # ═══════════════════════════════════════════
 
 class FrameAnalyzer:
-    """逐帧差分 + 图像稳定 + 增量弹孔检测。"""
+    """逐帧差分 + 图像稳定 + 增量弹孔检测。
+
+    适用于 initial 模式 (弹孔分散, 时序有价值)。
+    不适用于 refine 模式 (弹孔重叠, 帧差分无法区分)。
+    """
 
     def __init__(self, diff_threshold=25, stabilize=True,
                  min_area_ratio=5e-6, max_area_ratio=8e-4):
@@ -166,16 +200,19 @@ class FrameAnalyzer:
         self.stabilize = stabilize
         self.min_area_ratio = min_area_ratio
         self.max_area_ratio = max_area_ratio
+        self.debug_frames = []
 
     def analyze(self, frames, fire_interval_ms=85.7, progress_cb=None):
         """分析录制帧序列，返回按时间排序的弹孔列表。
 
         Returns:
-            [{"x": int, "y": int, "timestamp": float, "shot_num": int}, ...]
+            [{"x": int, "y": int, "timestamp": float, "shot_num": int,
+              "frame_idx": int}, ...]
         """
         if len(frames) < 5:
             return []
 
+        self.debug_frames = []
         ref_t, ref_bgr = frames[0]
         ref_gray = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2GRAY)
         h, w = ref_gray.shape
@@ -185,11 +222,10 @@ class FrameAnalyzer:
         nms_r = max(8, int(min(h, w) * 0.01))
 
         ref_kp, ref_des = None, None
+        orb = None
         if self.stabilize:
             orb = cv2.ORB_create(nfeatures=1500)
             ref_kp, ref_des = orb.detectAndCompute(ref_gray, None)
-        else:
-            orb = None
 
         detected = []
         known = set()
@@ -208,7 +244,6 @@ class FrameAnalyzer:
                 aligned = self._align(cur_gray, ref_gray, ref_kp, ref_des, orb)
 
             diff = cv2.absdiff(ref_gray, aligned)
-
             _, bw = cv2.threshold(diff, self.diff_threshold, 255, cv2.THRESH_BINARY)
             kern = np.ones((3, 3), np.uint8)
             bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kern, iterations=1)
@@ -217,6 +252,7 @@ class FrameAnalyzer:
             contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL,
                                            cv2.CHAIN_APPROX_SIMPLE)
 
+            new_in_frame = []
             for cnt in contours:
                 area = cv2.contourArea(cnt)
                 if not (min_a <= area <= max_a):
@@ -233,9 +269,19 @@ class FrameAnalyzer:
                     for dx in range(-1, 2) for dy in range(-1, 2)
                 )
                 if is_new:
-                    detected.append({"x": cx, "y": cy, "timestamp": cur_t,
-                                     "frame_idx": idx})
+                    hole = {"x": cx, "y": cy, "timestamp": cur_t, "frame_idx": idx}
+                    detected.append(hole)
                     known.add(gk)
+                    new_in_frame.append(hole)
+
+            if new_in_frame:
+                self.debug_frames.append({
+                    "frame_idx": idx,
+                    "timestamp": cur_t,
+                    "diff_image": diff.copy(),
+                    "binary_image": bw.copy(),
+                    "new_holes": list(new_in_frame),
+                })
 
         detected.sort(key=lambda h: h["timestamp"])
         for i, hole in enumerate(detected):
@@ -243,7 +289,7 @@ class FrameAnalyzer:
 
         if progress_cb:
             progress_cb(1.0)
-        log.info("检测到 %d 个弹孔", len(detected))
+        log.info("帧差分检测到 %d 个弹孔 (分析了 %d 关键帧)", len(detected), len(self.debug_frames))
         return detected
 
     @staticmethod
@@ -262,9 +308,71 @@ class FrameAnalyzer:
             H, _ = cv2.findHomography(pts2, pts1, cv2.RANSAC, 5.0)
             if H is None:
                 return frame_gray
-            return cv2.warpPerspective(frame_gray, H, (ref_gray.shape[1], ref_gray.shape[0]))
+            return cv2.warpPerspective(frame_gray, H,
+                                       (ref_gray.shape[1], ref_gray.shape[0]))
         except Exception:
             return frame_gray
+
+
+# ═══════════════════════════════════════════
+# 标注工具
+# ═══════════════════════════════════════════
+
+def annotate_frame(frame_bgr, holes, title=""):
+    """在帧图像上绘制弹孔标注 (编号 + 轨迹线 + 颜色分段)，返回标注后的副本。"""
+    canvas = frame_bgr.copy()
+    h, w = canvas.shape[:2]
+    n = len(holes)
+    if n == 0:
+        return canvas
+
+    sorted_h = sorted(holes, key=lambda x: x.get("shot_num", 0))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.35, min(h, w) / 2000)
+    thickness = max(1, int(min(h, w) / 800))
+    radius = max(4, int(min(h, w) / 300))
+
+    for i in range(len(sorted_h) - 1):
+        a, b = sorted_h[i], sorted_h[i + 1]
+        cv2.line(canvas, (a["x"], a["y"]), (b["x"], b["y"]),
+                 (180, 180, 60), thickness, cv2.LINE_AA)
+
+    for hole in sorted_h:
+        sn = hole.get("shot_num", 0)
+        frac = (sn - 1) / max(1, n - 1)
+        if frac < 0.33:
+            color = (0, 0, 255)
+        elif frac < 0.66:
+            color = (0, 165, 255)
+        else:
+            color = (0, 200, 0)
+
+        cv2.circle(canvas, (hole["x"], hole["y"]), radius, color, thickness + 1,
+                   cv2.LINE_AA)
+        cv2.circle(canvas, (hole["x"], hole["y"]), max(2, radius // 3),
+                   color, -1, cv2.LINE_AA)
+
+        label = str(sn)
+        (tw, th_), _ = cv2.getTextSize(label, font, font_scale, thickness)
+        lx = hole["x"] + radius + 3
+        ly = hole["y"] - radius
+        cv2.putText(canvas, label, (lx, ly), font, font_scale,
+                    (255, 255, 255), thickness + 1, cv2.LINE_AA)
+        cv2.putText(canvas, label, (lx, ly), font, font_scale,
+                    color, thickness, cv2.LINE_AA)
+
+    info_lines = [
+        f"Holes: {n}",
+        f"Red=early  Orange=mid  Green=late",
+    ]
+    if title:
+        info_lines.insert(0, title)
+    for i, line in enumerate(info_lines):
+        y_pos = 25 + i * int(22 * max(1, font_scale / 0.4))
+        cv2.putText(canvas, line, (10, y_pos), font, font_scale * 0.8,
+                    (200, 200, 200), thickness, cv2.LINE_AA)
+
+    return canvas
 
 
 # ═══════════════════════════════════════════
@@ -272,15 +380,20 @@ class FrameAnalyzer:
 # ═══════════════════════════════════════════
 
 class VideoCalibrator:
-    """视频校准主控器
+    """视频校准主控器 (v2 — 透明化)
 
-    用法::
+    典型工作流::
 
-        vc = VideoCalibrator("m416", "A0B0C0", scope_val=1.0)
-        vc.enable_hotkeys()          # F6 开始, F7 停止
-        # ... 用户射击 ...
-        result = vc.analyze()        # 自动分析
-        vc.write_to_gundata(result)  # 一键写入
+        vc = VideoCalibrator("m416", "A0B0C0")
+        vc.enable_hotkeys()
+
+        # 用户按 F6 → 射击 → F7
+        video_path = vc.save_recording()       # 保存录屏
+        frame, holes = vc.detect_holes("initial")  # 检测弹孔
+        annotated = vc.get_annotated_frame(holes)   # 生成标注图
+
+        # → 加载到 BulletCanvas 供手动审核调整
+        # → 用户确认后用 BulletParamGenerator / IterativeCorrector 计算
     """
 
     def __init__(self, gun_name, acc_code="A0B0C0",
@@ -293,7 +406,7 @@ class VideoCalibrator:
         self.gun_data_dir = Path(gun_data_dir or _find_gun_data_dir())
 
         self.recorder = ScreenRecorder(capture_region=capture_region, target_fps=60)
-        self.analyzer = FrameAnalyzer(stabilize=True)
+        self.frame_analyzer = FrameAnalyzer(stabilize=True)
 
         meta = _GUN_META.get(gun_name.lower(), {})
         self.fire_interval = meta.get("fire_interval", 0.0857)
@@ -315,122 +428,113 @@ class VideoCalibrator:
     def disable_hotkeys(self):
         self.recorder.stop_hotkey_listener()
 
-    # ── 分析 ──
+    def save_recording(self, path=None):
+        return self.recorder.save_video(path)
 
-    def analyze(self, mode="initial", prev_data=None, progress_cb=None):
+    # ── 弹孔检测 ──
+
+    def detect_holes(self, mode="initial", progress_cb=None):
+        """检测弹孔，返回 (base_frame_bgr, holes_list)。
+
+        mode:
+            "initial" — 帧差分时序检测 (弹孔分散, 保留射击顺序)
+            "refine"  — 最后一帧静态检测 (弹孔密集/重叠, 用 BulletDetector)
+
+        holes_list 格式: [{"x", "y", "shot_num", ...}, ...]
+        可直接加载到 BulletCanvas 供手动调整。
         """
-        :param mode: "initial" 初始生成 | "refine" 迭代修正
-        :param prev_data: refine 模式下传入当前 y_array
-        :param progress_cb: 进度回调 (0.0~1.0)
-        """
-        holes = self.analyzer.analyze(
+        if self.recorder.frame_count < 5:
+            log.warning("帧数不足 (%d)", self.recorder.frame_count)
+            return None, []
+
+        if mode == "initial":
+            return self._detect_frame_diff(progress_cb)
+        else:
+            return self._detect_static(progress_cb)
+
+    def _detect_frame_diff(self, progress_cb):
+        """initial 模式: 帧差分时序检测。"""
+        holes = self.frame_analyzer.analyze(
             self.recorder.frames, self.fire_interval_ms, progress_cb)
-        if len(holes) < 2:
-            log.warning("弹孔不足 (%d), 无法计算", len(holes))
+
+        last_frame = self.recorder.get_last_frame()
+        if last_frame is None:
+            return None, holes
+
+        for h in holes:
+            h.setdefault("area", 100)
+            h.setdefault("circularity", 1.0)
+            h.setdefault("color_diff", 50)
+
+        log.info("initial 帧差分: %d 个弹孔, %d 个调试帧",
+                 len(holes), len(self.frame_analyzer.debug_frames))
+        return last_frame, holes
+
+    def _detect_static(self, progress_cb):
+        """refine 模式: 用 BulletDetector 在最后一帧做静态检测。
+
+        比帧差分更适合弹孔密集/重叠的情况。
+        """
+        last_frame = self.recorder.get_last_frame()
+        if last_frame is None:
+            return None, []
+
+        if BulletDetector is None:
+            log.error("BulletDetector 不可用")
+            return last_frame, []
+
+        if progress_cb:
+            progress_cb(0.1)
+
+        detector = BulletDetector(sensitivity="high")
+        holes = detector.detect_single(last_frame)
+
+        if progress_cb:
+            progress_cb(0.8)
+
+        if holes:
+            holes.sort(key=lambda h: h["y"])
+            for i, h in enumerate(holes):
+                h["shot_num"] = i + 1
+
+        if progress_cb:
+            progress_cb(1.0)
+
+        log.info("refine 静态检测: %d 个弹孔", len(holes))
+        return last_frame, holes
+
+    def get_annotated_frame(self, holes, title=None):
+        """生成标注图 (在最后一帧上绘制弹孔标号 + 轨迹线)。"""
+        last = self.recorder.get_last_frame()
+        if last is None:
             return None
-        if mode == "refine" and prev_data is not None:
-            return self._refine(holes, prev_data)
-        return self._generate(holes)
+        t = title or f"{self.gun_name} [{self.acc_code}]"
+        return annotate_frame(last, holes, title=t)
 
-    def _generate(self, holes):
-        """无宏模式: 从弹痕像素距反推 per-shot raw 值。"""
-        factor = max(0.01, self.scope_val * self.posture_val)
-        y_arr, x_arr, details = [], [], []
+    def save_annotated_frame(self, holes, path=None):
+        """保存标注图到文件，返回路径。"""
+        img = self.get_annotated_frame(holes)
+        if img is None:
+            return None
+        if path is None:
+            out_dir = Path("calibration_results")
+            out_dir.mkdir(exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = str(out_dir / f"annotated_{self.gun_name}_{ts}.png")
+        cv2.imwrite(path, img)
+        log.info("标注图已保存: %s", path)
+        return path
 
-        for i in range(1, len(holes)):
-            dy = abs(holes[i - 1]["y"] - holes[i]["y"])
-            dx = holes[i]["x"] - holes[i - 1]["x"]
-            ry = round(dy / factor, 2)
-            rx = round(dx / factor, 2)
-            y_arr.append(ry)
-            x_arr.append(rx)
-            details.append({
-                "shot": i, "pixel_dy": round(dy, 2), "pixel_dx": round(dx, 2),
-                "raw_y": ry, "raw_x": rx,
-                "dt_ms": round((holes[i]["timestamp"] - holes[i - 1]["timestamp"]) * 1000, 1),
-            })
+    def get_debug_frames(self):
+        """获取帧差分过程中的关键帧 (仅 initial 模式有效)。
 
-        return {
-            "mode": "initial",
-            "gun_name": self.gun_name, "acc_code": self.acc_code,
-            "scope_val": self.scope_val, "posture_val": self.posture_val,
-            "n_holes": len(holes), "n_shots": len(y_arr),
-            "rpm": round(60 / self.fire_interval) if self.fire_interval > 0 else 0,
-            "ticks_per_shot": self.ticks_per_shot,
-            "y_array": y_arr, "x_array": x_arr,
-            "details": details, "holes": holes,
-        }
+        Returns: [{"frame_idx", "diff_image", "binary_image", "new_holes"}, ...]
+        """
+        return self.frame_analyzer.debug_frames
 
-    def _refine(self, holes, prev_y):
-        """有宏模式: 根据残差弹痕迭代修正已有参数。"""
-        factor = max(0.01, self.scope_val * self.posture_val)
-        n = min(len(holes) - 1, len(prev_y))
-        corrected = list(prev_y)
-        details = []
-
-        for i in range(n):
-            dy = holes[i + 1]["y"] - holes[i]["y"]
-            theo = prev_y[i] * self.scope_val * self.posture_val
-
-            if abs(theo) > 0.01:
-                ratio = theo / max(0.01, theo + abs(dy))
-                if dy < 0:
-                    ratio = 1.0 / max(0.01, ratio)
-                ratio = max(0.1, min(10.0, ratio))
-                corrected[i] = round(prev_y[i] * ratio, 2)
-            elif abs(dy) > 2:
-                corrected[i] = round(abs(dy) / factor, 2)
-
-            details.append({
-                "shot": i + 1, "residual_dy": round(dy, 2),
-                "prev_y": prev_y[i], "corrected_y": corrected[i],
-            })
-
-        return {
-            "mode": "refine",
-            "gun_name": self.gun_name, "acc_code": self.acc_code,
-            "n_shots_corrected": n,
-            "original_y": list(prev_y), "corrected_y": corrected,
-            "x_array": [0.0] * len(corrected), "details": details,
-        }
-
-    # ── GunData 写入 ──
-
-    def write_to_gundata(self, result, backup=True):
-        """将校准结果一键写入 GunData v2 JSON。"""
-        if result is None:
-            return False
-        gp = self.gun_data_dir / f"{self.gun_name}.json"
-        if not gp.exists():
-            log.error("文件不存在: %s", gp)
-            return False
-
-        with open(gp, encoding="utf-8") as f:
-            gd = json.load(f)
-        if gd.get("version") != 2:
-            log.error("非 v2 格式，请先运行 tools/migrate_gundata.py")
-            return False
-
-        if backup:
-            bak = gp.with_suffix(f".{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak")
-            with open(bak, "w", encoding="utf-8") as f:
-                json.dump(gd, f, ensure_ascii=False, indent=4)
-
-        y_key = "corrected_y" if result["mode"] == "refine" else "y_array"
-        gd.setdefault("recoil", {})[self.acc_code] = {
-            "y": result[y_key],
-            "x": result.get("x_array", [0.0] * len(result[y_key])),
-        }
-        with open(gp, "w", encoding="utf-8") as f:
-            json.dump(gd, f, ensure_ascii=False, indent=4)
-
-        log.info("写入 %s [%s]: %d 发", self.gun_name, self.acc_code, len(result[y_key]))
-        return True
-
-    # ── 工具 ──
+    # ── GunData 交互 ──
 
     def load_prev_data(self):
-        """从 GunData 加载当前配件的 y_array (供 refine 模式使用)。"""
         gp = self.gun_data_dir / f"{self.gun_name}.json"
         if not gp.exists():
             return None
@@ -443,26 +547,35 @@ class VideoCalibrator:
         except Exception:
             return None
 
-    def summary(self, result):
-        if result is None:
-            return "无结果"
-        lines = [
-            f"模式: {'初始生成' if result['mode'] == 'initial' else '迭代修正'}",
-            f"枪械: {result.get('gun_name', '?')} [{result.get('acc_code', '?')}]",
-        ]
-        if result["mode"] == "initial":
-            y = result.get("y_array", [])
-            lines.append(f"弹孔数: {result.get('n_holes', 0)}")
-            lines.append(f"per-shot: {len(y)} 发")
-            if y:
-                lines.append(f"范围: {min(y):.1f} ~ {max(y):.1f}, 均值: {sum(y)/len(y):.1f}")
-        else:
-            details = result.get("details", [])
-            if details:
-                res = [abs(d["residual_dy"]) for d in details]
-                lines.append(f"修正: {result.get('n_shots_corrected', 0)} 发")
-                lines.append(f"残差: 均{sum(res)/len(res):.1f}px, 最大{max(res):.1f}px")
-        return "\n".join(lines)
+    def write_to_gundata(self, y_array, x_array=None, backup=True):
+        """直接将 per-shot 数组写入 GunData v2 JSON。"""
+        gp = self.gun_data_dir / f"{self.gun_name}.json"
+        if not gp.exists():
+            log.error("文件不存在: %s", gp)
+            return False
+
+        with open(gp, encoding="utf-8") as f:
+            gd = json.load(f)
+        if gd.get("version") != 2:
+            log.error("非 v2 格式")
+            return False
+
+        if backup:
+            bak = gp.with_suffix(f".{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak")
+            with open(bak, "w", encoding="utf-8") as f:
+                json.dump(gd, f, ensure_ascii=False, indent=4)
+
+        if x_array is None:
+            x_array = [0.0] * len(y_array)
+
+        gd.setdefault("recoil", {})[self.acc_code] = {
+            "y": y_array, "x": x_array,
+        }
+        with open(gp, "w", encoding="utf-8") as f:
+            json.dump(gd, f, ensure_ascii=False, indent=4)
+
+        log.info("写入 %s [%s]: %d 发", self.gun_name, self.acc_code, len(y_array))
+        return True
 
 
 # ═══════════════════════════════════════════
@@ -471,13 +584,12 @@ class VideoCalibrator:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="PUBG 视频校准工具")
+    parser = argparse.ArgumentParser(description="PUBG 视频校准工具 (v2)")
     parser.add_argument("gun", help="枪械名 (m416, akm, ...)")
     parser.add_argument("--acc", default="A0B0C0", help="配件码")
     parser.add_argument("--scope", type=float, default=1.0, help="倍镜灵敏度")
     parser.add_argument("--posture", type=float, default=1.0, help="姿态系数")
     parser.add_argument("--mode", choices=["initial", "refine"], default="initial")
-    parser.add_argument("--write", action="store_true", help="自动写入 GunData")
     parser.add_argument("--region", help="捕获区域 left,top,width,height")
     args = parser.parse_args()
 
@@ -485,17 +597,14 @@ def main():
                         format="%(asctime)s [%(name)s] %(message)s")
 
     region = tuple(int(x) for x in args.region.split(",")) if args.region else None
-
     vc = VideoCalibrator(args.gun, args.acc, args.scope, args.posture,
                          capture_region=region)
 
-    prev_data = vc.load_prev_data() if args.mode == "refine" else None
-
-    print(f"\n{'='*40}")
-    print(f"  PUBG 视频校准")
+    print(f"\n{'='*44}")
+    print(f"  PUBG 视频校准 v2 (透明化)")
     print(f"  枪械: {args.gun} [{args.acc}]")
-    print(f"  模式: {'初始生成' if args.mode == 'initial' else '迭代修正'}")
-    print(f"{'='*40}")
+    print(f"  模式: {'初始生成 (帧差分)' if args.mode == 'initial' else '迭代修正 (静态检测)'}")
+    print(f"{'='*44}")
     print(f"\n  按 F6 开始录制 → 对墙射击 → 按 F7 停止")
     print(f"  Ctrl+C 退出\n")
 
@@ -506,27 +615,32 @@ def main():
 
     def on_stop():
         n = vc.recorder.frame_count
-        print(f"  [停止] {n} 帧")
+        print(f"\n  录制结束: {n} 帧")
         if n < 10:
-            print("  帧数不足, 请重新 F6 录制")
+            print("  帧数不足, 请重试")
             return
+
+        video_path = vc.save_recording()
+        print(f"  录屏已保存: {video_path}")
 
         print("  分析中 ...")
-        result = vc.analyze(args.mode, prev_data,
-                            lambda p: print(f"\r  进度: {p*100:.0f}%", end="", flush=True))
+        frame, holes = vc.detect_holes(
+            args.mode,
+            lambda p: print(f"\r  进度: {p*100:.0f}%", end="", flush=True))
         print()
 
-        if result is None:
-            print("  分析失败")
+        if not holes:
+            print("  未检测到弹孔")
+            done.set()
             return
 
-        print(f"\n{vc.summary(result)}\n")
-        y = result.get("y_array" if result["mode"] == "initial" else "corrected_y", [])
-        print(f"  Y 值: {y}\n")
+        print(f"  检测到 {len(holes)} 个弹孔:")
+        for h in holes:
+            print(f"    #{h['shot_num']:2d}  ({h['x']:4d}, {h['y']:4d})")
 
-        if args.write:
-            ok = vc.write_to_gundata(result)
-            print(f"  {'写入成功' if ok else '写入失败'}")
+        ann_path = vc.save_annotated_frame(holes)
+        print(f"  标注图已保存: {ann_path}")
+        print(f"\n  请在 GUI 中打开标注图确认弹孔位置，手动调整后再计算参数")
 
         done.set()
 

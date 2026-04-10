@@ -1152,45 +1152,56 @@ def _build_iteration_html(iter_result):
 
 
 # ═══════════════════════════════════════════
-# 视频校准对话框
+# 视频校准对话框 (v2 — 透明化)
 # ═══════════════════════════════════════════
 
 class VideoCalibrationDialog(QDialog):
-    """视频校准对话框: 录屏 + 帧差分自动弹孔检测 + per-shot v2 写入。"""
+    """视频校准对话框 — 录屏 → 弹孔检测 → 预览标注图 → 加载到主画布手动调整。
+
+    不再自动计算 per-shot / 修正值。
+    分析结果加载到主窗口 BulletCanvas 后，由用户手动确认 → 分析参数/迭代修正。
+    """
 
     def __init__(self, gun_name, acc_code, scope_val, posture_val,
                  gun_data_dir, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("视频校准")
-        self.resize(720, 600)
+        self.setWindowTitle("视频校准 (v2)")
+        self.resize(900, 700)
         self._vc = VideoCalibrator(
             gun_name, acc_code, scope_val, posture_val,
             gun_data_dir=gun_data_dir)
-        self._result = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
+
+        self.result_frame = None
+        self.result_holes = None
+        self._video_path = None
+        self._annotated_path = None
+
         self._init_ui()
 
     def _init_ui(self):
         lo = QVBoxLayout(self)
 
-        info = QGroupBox("配置")
+        # ── 配置 ──
+        info = QGroupBox("枪械配置")
         ig = QGridLayout(info)
         vc = self._vc
         ig.addWidget(QLabel(f"枪械: {vc.gun_name}"), 0, 0)
         ig.addWidget(QLabel(f"配件: {vc.acc_code}"), 0, 1)
-        ig.addWidget(QLabel(f"倍镜系数: {vc.scope_val}"), 0, 2)
-        ig.addWidget(QLabel(f"姿态系数: {vc.posture_val}"), 1, 0)
+        ig.addWidget(QLabel(f"倍镜: {vc.scope_val}"), 0, 2)
+        ig.addWidget(QLabel(f"姿态: {vc.posture_val}"), 1, 0)
         ig.addWidget(QLabel(f"射速: {round(60/vc.fire_interval)} RPM"), 1, 1)
         ig.addWidget(QLabel(f"弹匣: {vc.magazine}"), 1, 2)
         lo.addWidget(info)
 
+        # ── 模式选择 ──
         from PyQt5.QtWidgets import QRadioButton, QButtonGroup
-        mode_box = QGroupBox("模式")
+        mode_box = QGroupBox("检测模式")
         mlo = QHBoxLayout(mode_box)
         self._bg = QButtonGroup(self)
-        self._rb_init = QRadioButton("初始生成 (无宏)")
-        self._rb_refine = QRadioButton("迭代修正 (有宏)")
+        self._rb_init = QRadioButton("初始生成 — 帧差分时序 (无宏, 弹孔分散)")
+        self._rb_refine = QRadioButton("迭代修正 — 静态检测 (有宏, 弹孔密集)")
         self._rb_init.setChecked(True)
         self._bg.addButton(self._rb_init)
         self._bg.addButton(self._rb_refine)
@@ -1198,6 +1209,7 @@ class VideoCalibrationDialog(QDialog):
         mlo.addWidget(self._rb_refine)
         lo.addWidget(mode_box)
 
+        # ── 录制控制 ──
         ctrl = QHBoxLayout()
         self._btn_start = QPushButton("开始录制 (F6)")
         self._btn_start.setStyleSheet(
@@ -1210,35 +1222,64 @@ class VideoCalibrationDialog(QDialog):
         ctrl.addWidget(self._btn_stop)
         lo.addLayout(ctrl)
 
-        self._lbl_status = QLabel("就绪 — 点击「开始录制」或按 F6")
+        # ── 状态 ──
+        self._lbl_status = QLabel("就绪 — 点击「开始录制」或按 F6，对墙射击后按 F7 停止")
         self._lbl_status.setStyleSheet(
-            "font-size:14px;padding:6px;background:#222;color:#aaa;")
+            "font-size:13px;padding:6px;background:#222;color:#aaa;")
         self._lbl_status.setAlignment(Qt.AlignCenter)
+        self._lbl_status.setWordWrap(True)
         lo.addWidget(self._lbl_status)
 
-        self._txt = QTextEdit()
-        self._txt.setReadOnly(True)
-        self._txt.setStyleSheet("background:#1a1a1a;color:#ddd;font-size:13px;")
-        lo.addWidget(self._txt, 1)
+        # ── 预览图 + 弹孔列表 (水平分栏) ──
+        preview_split = QSplitter(Qt.Horizontal)
 
+        self._preview_label = QLabel("标注预览将在录制分析后显示")
+        self._preview_label.setAlignment(Qt.AlignCenter)
+        self._preview_label.setStyleSheet(
+            "background:#111;color:#666;min-height:300px;")
+        self._preview_label.setScaledContents(False)
+        preview_split.addWidget(self._preview_label)
+
+        right_panel = QWidget()
+        rlo = QVBoxLayout(right_panel)
+        rlo.setContentsMargins(0, 0, 0, 0)
+        rlo.addWidget(QLabel("检测到的弹孔:"))
+        self._hole_list = QTextEdit()
+        self._hole_list.setReadOnly(True)
+        self._hole_list.setStyleSheet("background:#1a1a1a;color:#ddd;font-size:12px;")
+        rlo.addWidget(self._hole_list, 1)
+
+        self._lbl_paths = QLabel("")
+        self._lbl_paths.setWordWrap(True)
+        self._lbl_paths.setStyleSheet("color:#888;font-size:11px;")
+        rlo.addWidget(self._lbl_paths)
+        preview_split.addWidget(right_panel)
+
+        preview_split.setStretchFactor(0, 3)
+        preview_split.setStretchFactor(1, 2)
+        lo.addWidget(preview_split, 1)
+
+        # ── 底部按钮 ──
         bot = QHBoxLayout()
-        self._btn_write = QPushButton("写入 GunData")
-        self._btn_write.setStyleSheet("background:#886622;color:white;padding:6px;")
-        self._btn_write.setEnabled(False)
-        self._btn_copy = QPushButton("复制 Y 数组")
-        self._btn_copy.setEnabled(False)
+        self._btn_load_canvas = QPushButton("加载到主画布 (手动审核)")
+        self._btn_load_canvas.setStyleSheet(
+            "font-weight:bold;background:#2266cc;color:white;padding:8px 16px;font-size:13px;")
+        self._btn_load_canvas.setEnabled(False)
+        self._btn_open_video = QPushButton("打开录屏文件")
+        self._btn_open_video.setEnabled(False)
         self._btn_close = QPushButton("关闭")
-        bot.addWidget(self._btn_write)
-        bot.addWidget(self._btn_copy)
+        bot.addWidget(self._btn_load_canvas)
+        bot.addWidget(self._btn_open_video)
         bot.addStretch()
         bot.addWidget(self._btn_close)
         lo.addLayout(bot)
 
+        # ── 信号 ──
         self._btn_start.clicked.connect(self._on_start)
         self._btn_stop.clicked.connect(self._on_stop)
-        self._btn_write.clicked.connect(self._on_write)
-        self._btn_copy.clicked.connect(self._on_copy)
-        self._btn_close.clicked.connect(self.accept)
+        self._btn_load_canvas.clicked.connect(self._on_load_canvas)
+        self._btn_open_video.clicked.connect(self._on_open_video)
+        self._btn_close.clicked.connect(self.reject)
 
         self._vc.enable_hotkeys(on_start=self._hotkey_start, on_stop=self._hotkey_stop)
 
@@ -1254,16 +1295,20 @@ class VideoCalibrationDialog(QDialog):
         self._vc.start_recording()
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
-        self._btn_write.setEnabled(False)
-        self._btn_copy.setEnabled(False)
-        self._lbl_status.setText("录制中 … 对墙射击，完毕后点击「停止录制」或按 F7")
+        self._btn_load_canvas.setEnabled(False)
+        self._btn_open_video.setEnabled(False)
+        self._lbl_status.setText("录制中 … 对墙射击，完毕后按 F7 停止")
         self._lbl_status.setStyleSheet(
-            "font-size:14px;padding:6px;background:#442222;color:#ff6666;")
+            "font-size:13px;padding:6px;background:#442222;color:#ff6666;")
         self._timer.start(200)
 
     def _tick(self):
         n = self._vc.recorder.frame_count
-        self._lbl_status.setText(f"录制中 … 已捕获 {n} 帧")
+        elapsed = ""
+        if n > 1:
+            dur = self._vc.recorder.frames[-1][0] - self._vc.recorder.frames[0][0]
+            elapsed = f" ({dur:.1f}s)"
+        self._lbl_status.setText(f"录制中 … {n} 帧{elapsed}")
 
     def _on_stop(self):
         if not self._vc.recorder.recording:
@@ -1272,95 +1317,89 @@ class VideoCalibrationDialog(QDialog):
         count = self._vc.stop_recording()
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
-        self._lbl_status.setText(f"录制结束: {count} 帧，分析中 …")
-        self._lbl_status.setStyleSheet(
-            "font-size:14px;padding:6px;background:#222;color:#aaa;")
 
         if count < 10:
-            self._lbl_status.setText("帧数不足，请重新录制")
+            self._lbl_status.setText("帧数不足 (需 >10)，请重新录制")
+            self._lbl_status.setStyleSheet(
+                "font-size:13px;padding:6px;background:#222;color:#aaa;")
             return
 
+        self._lbl_status.setText(f"录制 {count} 帧 — 保存视频 + 分析中 …")
+        self._lbl_status.setStyleSheet(
+            "font-size:13px;padding:6px;background:#222;color:#aaa;")
         QApplication.processEvents()
 
+        self._video_path = self._vc.save_recording()
+
         mode = "initial" if self._rb_init.isChecked() else "refine"
-        prev = self._vc.load_prev_data() if mode == "refine" else None
+        self.result_frame, self.result_holes = self._vc.detect_holes(mode=mode)
 
-        self._result = self._vc.analyze(mode=mode, prev_data=prev)
-        if self._result is None:
-            self._lbl_status.setText("分析失败 (弹孔不足)")
-            self._txt.setHtml("<p style='color:#ff6666;'>未检测到足够弹孔，请重试</p>")
+        if not self.result_holes:
+            self._lbl_status.setText("未检测到弹孔，请重试 (换用另一模式 / 调整距离 / 重新射击)")
+            self._preview_label.setText("未检测到弹孔")
+            self._hole_list.setHtml("<p style='color:#ff6666;'>无结果</p>")
+            self._btn_open_video.setEnabled(self._video_path is not None)
+            self._update_paths()
             return
 
-        self._btn_write.setEnabled(True)
-        self._btn_copy.setEnabled(True)
-        self._show_result()
+        self._annotated_path = self._vc.save_annotated_frame(self.result_holes)
+        self._show_preview()
 
-    def _show_result(self):
-        r = self._result
-        summary = self._vc.summary(r)
-        self._lbl_status.setText("分析完成")
+    def _show_preview(self):
+        """显示标注预览图和弹孔列表。"""
+        from calibration.video_calibrator import annotate_frame
+        ann = self._vc.get_annotated_frame(self.result_holes)
+        if ann is not None:
+            pm = _cv2_to_pixmap(ann)
+            if pm:
+                scaled = pm.scaled(self._preview_label.size(),
+                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._preview_label.setPixmap(scaled)
 
-        mode = r["mode"]
-        y = r.get("y_array" if mode == "initial" else "corrected_y", [])
-        x = r.get("x_array", [])
+        n = len(self.result_holes)
+        html = f"<p style='color:#44cc44;'>检测到 <b>{n}</b> 个弹孔</p>"
+        html += "<table style='border-collapse:collapse;font-size:12px;width:100%;'>"
+        html += "<tr style='background:#333;color:white;'><th>#</th><th>X</th><th>Y</th></tr>"
+        for h in sorted(self.result_holes, key=lambda x: x.get("shot_num", 0)):
+            sn = h.get("shot_num", 0)
+            html += (f"<tr><td style='text-align:center;'>{sn}</td>"
+                     f"<td style='text-align:center;'>{h['x']}</td>"
+                     f"<td style='text-align:center;'>{h['y']}</td></tr>")
+        html += "</table>"
+        self._hole_list.setHtml(html)
 
-        html = f"<div style='margin:8px;'>"
-        html += f"<h3 style='color:#44cc44;'>{'初始生成' if mode=='initial' else '迭代修正'} 完成</h3>"
-        html += f"<pre>{summary}</pre>"
-        html += f"<h4>per-shot Y ({len(y)} 发):</h4>"
-        html += f"<pre style='background:#222;padding:8px;color:#8f8;'>{y}</pre>"
-        if any(v != 0 for v in x):
-            html += f"<h4>per-shot X:</h4>"
-            html += f"<pre style='background:#222;padding:8px;color:#8f8;'>{x}</pre>"
+        mode_txt = "帧差分时序" if self._rb_init.isChecked() else "静态检测"
+        self._lbl_status.setText(
+            f"检测完成 ({mode_txt}): {n} 个弹孔 — 点击「加载到主画布」审核调整")
+        self._lbl_status.setStyleSheet(
+            "font-size:13px;padding:6px;background:#223322;color:#66cc66;")
 
-        details = r.get("details", [])
-        if details:
-            html += "<h4>逐发明细:</h4>"
-            html += "<table style='border-collapse:collapse;font-size:12px;' width='100%'>"
-            html += "<tr style='background:#444;color:white;'>"
-            if mode == "initial":
-                html += "<th>发</th><th>像素dy</th><th>像素dx</th><th>raw_y</th><th>raw_x</th><th>dt(ms)</th>"
+        self._btn_load_canvas.setEnabled(True)
+        self._btn_open_video.setEnabled(self._video_path is not None)
+        self._update_paths()
+
+    def _update_paths(self):
+        parts = []
+        if self._video_path:
+            parts.append(f"录屏: {self._video_path}")
+        if self._annotated_path:
+            parts.append(f"标注图: {self._annotated_path}")
+        self._lbl_paths.setText("\n".join(parts))
+
+    def _on_load_canvas(self):
+        """将检测结果传回主窗口 BulletCanvas，关闭对话框。"""
+        if self.result_frame is not None and self.result_holes:
+            self.accept()
+
+    def _on_open_video(self):
+        if self._video_path:
+            import subprocess, sys
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", self._video_path])
+            elif sys.platform == "win32":
+                os.startfile(self._video_path)
             else:
-                html += "<th>发</th><th>残差dy</th><th>原值</th><th>修正后</th>"
-            html += "</tr>"
-            for d in details[:40]:
-                html += "<tr>"
-                if mode == "initial":
-                    html += (f"<td style='text-align:center;'>{d['shot']}</td>"
-                             f"<td style='text-align:center;'>{d['pixel_dy']}</td>"
-                             f"<td style='text-align:center;'>{d['pixel_dx']}</td>"
-                             f"<td style='text-align:center;color:#8f8;'>{d['raw_y']}</td>"
-                             f"<td style='text-align:center;'>{d['raw_x']}</td>"
-                             f"<td style='text-align:center;'>{d['dt_ms']}</td>")
-                else:
-                    html += (f"<td style='text-align:center;'>{d['shot']}</td>"
-                             f"<td style='text-align:center;'>{d['residual_dy']}</td>"
-                             f"<td style='text-align:center;'>{d.get('prev_y','')}</td>"
-                             f"<td style='text-align:center;color:#8f8;'>{d.get('corrected_y','')}</td>")
-                html += "</tr>"
-            html += "</table>"
-
-        html += "</div>"
-        self._txt.setHtml(html)
-
-    def _on_write(self):
-        if self._result is None:
-            return
-        ok = self._vc.write_to_gundata(self._result)
-        if ok:
-            QMessageBox.information(
-                self, "成功",
-                f"已写入 {self._vc.gun_name}.json [{self._vc.acc_code}]")
-        else:
-            QMessageBox.warning(self, "失败", "写入失败，请检查日志")
-
-    def _on_copy(self):
-        if self._result is None:
-            return
-        mode = self._result["mode"]
-        y = self._result.get("y_array" if mode == "initial" else "corrected_y", [])
-        QApplication.clipboard().setText(json.dumps(y))
-        self._lbl_status.setText(f"已复制 {len(y)} 发 Y 数组到剪贴板")
+                subprocess.Popen(["xdg-open", self._video_path])
 
     def closeEvent(self, e):
         self._vc.disable_hotkeys()
@@ -2237,7 +2276,21 @@ class MainWindow(QWidget):
             self._gun_name, self._acc_code,
             self._scope_val, self._pose_val,
             self._gun_data_dir, parent=self)
-        dlg.exec_()
+        if dlg.exec_() == QDialog.Accepted:
+            frame = dlg.result_frame
+            holes = dlg.result_holes
+            if frame is not None and holes:
+                self._result_img = frame
+                self._result_path = dlg._annotated_path
+                pm = _cv2_to_pixmap(frame)
+                self.canvas.set_data(holes, pm)
+                self.lbl_holes_count.setText(f"弹孔: {len(holes)}")
+                if 0 <= self._current_traj_idx < len(self._trajectories):
+                    self._trajectories[self._current_traj_idx]['holes'] = list(holes)
+                self.info_lb.setText(
+                    f"视频校准: {len(holes)} 个弹孔已加载到画布 | "
+                    f"请审核弹孔位置 (左键拖拽/右键删除/左键空白添加)，"
+                    f"确认后点击「分析参数」或「迭代修正」")
 
     # ═══ 复制 ═══
 
