@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PUBG 视频校准模块 (v3 — YOLO + 视频加载)
-═══════════════════════════════════════════
-支持三种检测后端:
-  1. YOLO 模型 (推荐, 需训练)  — 高精度, 抗纹理干扰
-  2. 帧差分时序              — 保留射击顺序, 需干净墙面
-  3. 传统静态 (BulletDetector) — 兜底
+PUBG 视频校准模块 (v3 — YOLO / YOLO-World / 传统)
+═══════════════════════════════════════════════════
+检测后端:
+  1. YOLO-World (推荐首选) — 零样本, 无需训练, 安装即用
+  2. YOLO 自定义模型       — 最高精度, 需训练
+  3. 帧差分时序            — 保留射击顺序, 需干净墙面
+  4. 传统静态              — 兜底
 
-支持两种输入:
+输入:
   - 实时录屏 (F6/F7)
   - 加载已有视频文件 (.avi/.mp4)
+
+注意: 所有 YOLO 推理仅在校准分析时运行, 不在游戏对局中运行, 不影响游戏性能。
 """
 
 import cv2
@@ -43,20 +46,122 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════
-# YOLO 弹孔检测器
+# YOLO-World 零样本检测器 (推荐首选 — 无需训练)
 # ═══════════════════════════════════════════
 
-class YOLOHoleDetector:
-    """YOLOv8/v11 弹孔检测器。
+# YOLO-World 支持的提示词列表，用于检测 PUBG 弹孔
+_YOLO_WORLD_PROMPTS = ["bullet hole", "hole", "bullet impact", "bullet mark"]
 
-    需要提供训练好的 .pt 模型文件。
-    训练方法见 tools/train_yolo_guide.md
+class YOLOWorldDetector:
+    """YOLO-World 零样本弹孔检测器 — 无需任何训练数据。
 
     用法::
 
-        detector = YOLOHoleDetector("models/bullet_hole_best.pt")
+        detector = YOLOWorldDetector()
         holes = detector.detect(image_bgr)
     """
+
+    _INSTANCE = None
+    _MODEL_SIZE = None
+
+    def __init__(self, model_size="s", prompts=None):
+        self.model = None
+        self.available = False
+        self.model_size = model_size
+        self.prompts = prompts or _YOLO_WORLD_PROMPTS
+        self._load()
+
+    def _load(self):
+        try:
+            from ultralytics import YOLOWorld
+            model_name = f"yolov8{self.model_size}-worldv2.pt"
+            log.info("加载 YOLO-World %s …", model_name)
+            self.model = YOLOWorld(model_name)
+            self.model.set_classes(self.prompts)
+            self.available = True
+            log.info("YOLO-World 就绪 (提示词: %s)", self.prompts)
+        except ImportError:
+            log.warning("ultralytics 未安装或版本过低, 运行: pip install -U ultralytics")
+        except Exception as e:
+            log.error("YOLO-World 加载失败: %s", e)
+
+    @classmethod
+    def get_or_create(cls, model_size="s", prompts=None):
+        if cls._INSTANCE is None or cls._MODEL_SIZE != model_size:
+            cls._INSTANCE = cls(model_size, prompts)
+            cls._MODEL_SIZE = model_size
+        elif prompts and prompts != cls._INSTANCE.prompts:
+            cls._INSTANCE.prompts = prompts
+            if cls._INSTANCE.model:
+                cls._INSTANCE.model.set_classes(prompts)
+        return cls._INSTANCE
+
+    def detect(self, image, conf=0.15):
+        """零样本检测弹孔。conf 默认 0.15 (零样本需要更低阈值)。"""
+        if not self.available or self.model is None:
+            return []
+        results = self.model(image, conf=conf, verbose=False)
+        return self._parse_results(results)
+
+    def detect_video_temporal(self, frames, fire_interval_ms=85.7,
+                              conf=0.15, progress_cb=None):
+        """逐帧零样本检测 + 时序追踪。"""
+        if not self.available or len(frames) < 2:
+            return []
+        detected, known_positions, nms_dist = [], [], 15
+        sample_step = max(1, int(fire_interval_ms / 2 / 16.7))
+
+        for idx in range(0, len(frames), sample_step):
+            if progress_cb and idx % (sample_step * 5) == 0:
+                progress_cb(idx / len(frames))
+            cur_t, cur_bgr = frames[idx]
+            frame_holes = self.detect(cur_bgr, conf=conf)
+            for fh in frame_holes:
+                is_new = all(
+                    abs(fh["x"] - kx) >= nms_dist or abs(fh["y"] - ky) >= nms_dist
+                    for kx, ky in known_positions
+                )
+                if is_new:
+                    fh["timestamp"] = cur_t
+                    fh["frame_idx"] = idx
+                    detected.append(fh)
+                    known_positions.append((fh["x"], fh["y"]))
+
+        detected.sort(key=lambda h: h.get("timestamp", 0))
+        for i, h in enumerate(detected):
+            h["shot_num"] = i + 1
+        if progress_cb:
+            progress_cb(1.0)
+        log.info("YOLO-World 时序: %d 个弹孔", len(detected))
+        return detected
+
+    @staticmethod
+    def _parse_results(results):
+        holes = []
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                w, h = int(x2 - x1), int(y2 - y1)
+                holes.append({
+                    "x": cx, "y": cy,
+                    "area": w * h,
+                    "confidence": round(float(box.conf[0]), 3),
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "circularity": 1.0, "color_diff": 50,
+                })
+        holes.sort(key=lambda h: h["y"])
+        for i, h in enumerate(holes):
+            h["shot_num"] = i + 1
+        return holes
+
+
+# ═══════════════════════════════════════════
+# YOLO 自定义模型检测器 (需训练)
+# ═══════════════════════════════════════════
+
+class YOLOHoleDetector:
+    """YOLOv8/v11 自定义弹孔检测器 — 需要提供训练好的 .pt 模型。"""
 
     _INSTANCE = None
     _INSTANCE_PATH = None
@@ -72,7 +177,7 @@ class YOLOHoleDetector:
             from ultralytics import YOLO
             self.model = YOLO(self.model_path)
             self.available = True
-            log.info("YOLO 模型已加载: %s", self.model_path)
+            log.info("YOLO 自定义模型: %s", self.model_path)
         except ImportError:
             log.warning("ultralytics 未安装, 运行: pip install ultralytics")
         except Exception as e:
@@ -80,7 +185,6 @@ class YOLOHoleDetector:
 
     @classmethod
     def get_or_create(cls, model_path):
-        """缓存单例，避免重复加载同一模型。"""
         p = str(model_path)
         if cls._INSTANCE is None or cls._INSTANCE_PATH != p:
             cls._INSTANCE = cls(p)
@@ -88,14 +192,8 @@ class YOLOHoleDetector:
         return cls._INSTANCE
 
     def detect(self, image, conf=0.25):
-        """检测弹孔，返回 holes 列表。
-
-        Returns:
-            [{"x", "y", "shot_num", "confidence", "bbox", "area", ...}, ...]
-        """
         if not self.available or self.model is None:
             return []
-
         results = self.model(image, conf=conf, verbose=False)
         holes = []
         for r in results:
@@ -104,12 +202,10 @@ class YOLOHoleDetector:
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 w, h = int(x2 - x1), int(y2 - y1)
                 holes.append({
-                    "x": cx, "y": cy,
-                    "area": w * h,
+                    "x": cx, "y": cy, "area": w * h,
                     "confidence": round(float(box.conf[0]), 3),
                     "bbox": [int(x1), int(y1), int(x2), int(y2)],
-                    "circularity": 1.0,
-                    "color_diff": 50,
+                    "circularity": 1.0, "color_diff": 50,
                 })
         holes.sort(key=lambda h: h["y"])
         for i, h in enumerate(holes):
@@ -118,33 +214,21 @@ class YOLOHoleDetector:
 
     def detect_video_temporal(self, frames, fire_interval_ms=85.7,
                               conf=0.25, progress_cb=None):
-        """逐帧 YOLO 检测 + 时序增量跟踪，保留射击顺序。
-
-        与帧差分不同: YOLO 在每帧独立识别弹孔，通过与已知集合比对发现新弹孔。
-        不需要干净墙面，不需要图像稳定。
-        """
         if not self.available or len(frames) < 2:
             return []
-
-        detected = []
-        known_positions = []
-        nms_dist = 15
-
+        detected, known_positions, nms_dist = [], [], 15
         sample_step = max(1, int(fire_interval_ms / 2 / 16.7))
 
         for idx in range(0, len(frames), sample_step):
             if progress_cb and idx % (sample_step * 5) == 0:
                 progress_cb(idx / len(frames))
-
             cur_t, cur_bgr = frames[idx]
             frame_holes = self.detect(cur_bgr, conf=conf)
-
             for fh in frame_holes:
-                is_new = True
-                for kx, ky in known_positions:
-                    if abs(fh["x"] - kx) < nms_dist and abs(fh["y"] - ky) < nms_dist:
-                        is_new = False
-                        break
+                is_new = all(
+                    abs(fh["x"] - kx) >= nms_dist or abs(fh["y"] - ky) >= nms_dist
+                    for kx, ky in known_positions
+                )
                 if is_new:
                     fh["timestamp"] = cur_t
                     fh["frame_idx"] = idx
@@ -154,11 +238,9 @@ class YOLOHoleDetector:
         detected.sort(key=lambda h: h.get("timestamp", 0))
         for i, h in enumerate(detected):
             h["shot_num"] = i + 1
-
         if progress_cb:
             progress_cb(1.0)
-
-        log.info("YOLO 时序检测: %d 个弹孔", len(detected))
+        log.info("YOLO 自定义时序: %d 个弹孔", len(detected))
         return detected
 
 
@@ -542,28 +624,30 @@ def annotate_frame(frame_bgr, holes, title=""):
 class VideoCalibrator:
     """视频校准主控器 (v3)
 
-    支持三种检测后端 + 两种输入源::
+    支持六种检测后端 + 两种输入源::
 
         vc = VideoCalibrator("m416")
 
         # 输入方式 1: 实时录屏
-        vc.start_recording()
-        # ... 射击 ...
-        vc.stop_recording()
+        vc.start_recording() / vc.stop_recording()
 
         # 输入方式 2: 加载视频文件
         vc.load_video("recording.avi")
 
-        # 检测弹孔 (三种后端)
-        frame, holes = vc.detect_holes("yolo")       # YOLO 模型
-        frame, holes = vc.detect_holes("yolo_temporal")  # YOLO + 时序
-        frame, holes = vc.detect_holes("frame_diff")  # 传统帧差分
-        frame, holes = vc.detect_holes("static")      # 传统静态
-
-        # 标注 → 加载到画布 → 手动确认
+        # 检测弹孔 (六种后端)
+        frame, holes = vc.detect_holes("yolo_world")       # ★ 推荐: 零样本
+        frame, holes = vc.detect_holes("yolo_world_temporal") # 零样本 + 时序
+        frame, holes = vc.detect_holes("yolo")              # 自定义模型
+        frame, holes = vc.detect_holes("yolo_temporal")     # 自定义 + 时序
+        frame, holes = vc.detect_holes("frame_diff")        # 帧差分
+        frame, holes = vc.detect_holes("static")            # 传统静态
     """
 
-    BACKENDS = ("yolo", "yolo_temporal", "frame_diff", "static")
+    BACKENDS = (
+        "yolo_world", "yolo_world_temporal",
+        "yolo", "yolo_temporal",
+        "frame_diff", "static",
+    )
 
     def __init__(self, gun_name, acc_code="A0B0C0",
                  scope_val=1.0, posture_val=1.0,
@@ -589,12 +673,23 @@ class VideoCalibrator:
         if yp:
             self._yolo = YOLOHoleDetector.get_or_create(yp)
 
+        self._yolo_world = None
+
     @property
     def yolo_available(self):
         return self._yolo is not None and self._yolo.available
 
+    @property
+    def yolo_world_available(self):
+        return self._yolo_world is not None and self._yolo_world.available
+
     def set_yolo_model(self, model_path):
         self._yolo = YOLOHoleDetector.get_or_create(model_path)
+
+    def init_yolo_world(self, model_size="s", prompts=None):
+        """初始化 YOLO-World (首次调用会下载模型, ~50MB)。"""
+        self._yolo_world = YOLOWorldDetector.get_or_create(model_size, prompts)
+        return self._yolo_world.available
 
     # ── 输入 ──
 
@@ -605,7 +700,6 @@ class VideoCalibrator:
         return self.recorder.stop()
 
     def load_video(self, path):
-        """从视频文件加载帧 (替代实时录屏)。"""
         return self.recorder.load_video(path)
 
     def enable_hotkeys(self, on_start=None, on_stop=None):
@@ -619,59 +713,89 @@ class VideoCalibrator:
 
     # ── 弹孔检测 (多后端) ──
 
-    def detect_holes(self, backend="yolo", progress_cb=None):
+    def detect_holes(self, backend="yolo_world", progress_cb=None):
         """检测弹孔，返回 (base_frame_bgr, holes_list)。
 
         backend:
-            "yolo"          — YOLO 在最后一帧检测 (推荐, 最高精度)
-            "yolo_temporal"  — YOLO 逐帧扫描 + 时序追踪 (保留射击顺序)
-            "frame_diff"    — 传统帧差分 (需干净墙面)
-            "static"        — 传统 BulletDetector 静态检测
+            "yolo_world"          — YOLO-World 零样本 (推荐首选, 无需训练)
+            "yolo_world_temporal"  — YOLO-World + 时序追踪
+            "yolo"                — 自定义 YOLO 模型 (需训练, 最高精度)
+            "yolo_temporal"       — 自定义 YOLO + 时序追踪
+            "frame_diff"          — 传统帧差分
+            "static"              — 传统 BulletDetector
         """
         if self.recorder.frame_count < 2:
             log.warning("帧数不足 (%d)", self.recorder.frame_count)
             return None, []
 
-        if backend == "yolo":
-            return self._detect_yolo_static(progress_cb)
-        elif backend == "yolo_temporal":
-            return self._detect_yolo_temporal(progress_cb)
-        elif backend == "frame_diff":
-            return self._detect_frame_diff(progress_cb)
-        elif backend == "static":
-            return self._detect_traditional_static(progress_cb)
-        else:
+        dispatch = {
+            "yolo_world": self._detect_yolo_world_static,
+            "yolo_world_temporal": self._detect_yolo_world_temporal,
+            "yolo": self._detect_yolo_static,
+            "yolo_temporal": self._detect_yolo_temporal,
+            "frame_diff": self._detect_frame_diff,
+            "static": self._detect_traditional_static,
+        }
+        fn = dispatch.get(backend)
+        if fn is None:
             log.error("未知后端: %s", backend)
             return None, []
+        return fn(progress_cb)
+
+    def _detect_yolo_world_static(self, progress_cb):
+        """YOLO-World 零样本检测 (最后一帧)。"""
+        last = self.recorder.get_last_frame()
+        if last is None:
+            return None, []
+        if not self.yolo_world_available:
+            self.init_yolo_world()
+        if not self.yolo_world_available:
+            log.warning("YOLO-World 不可用, 回退到传统检测")
+            return self._detect_traditional_static(progress_cb)
+        if progress_cb:
+            progress_cb(0.1)
+        holes = self._yolo_world.detect(last)
+        if progress_cb:
+            progress_cb(1.0)
+        log.info("YOLO-World 静态: %d 个弹孔", len(holes))
+        return last, holes
+
+    def _detect_yolo_world_temporal(self, progress_cb):
+        """YOLO-World 零样本 + 时序追踪。"""
+        if not self.yolo_world_available:
+            self.init_yolo_world()
+        if not self.yolo_world_available:
+            log.warning("YOLO-World 不可用, 回退到帧差分")
+            return self._detect_frame_diff(progress_cb)
+        holes = self._yolo_world.detect_video_temporal(
+            self.recorder.frames, self.fire_interval_ms,
+            progress_cb=progress_cb)
+        last = self.recorder.get_last_frame()
+        return last, holes
 
     def _detect_yolo_static(self, progress_cb):
-        """YOLO 在最后一帧做静态检测。"""
         last = self.recorder.get_last_frame()
         if last is None:
             return None, []
         if not self.yolo_available:
-            log.warning("YOLO 不可用，回退到传统静态检测")
+            log.warning("YOLO 自定义模型不可用, 回退到传统静态检测")
             return self._detect_traditional_static(progress_cb)
-
         if progress_cb:
             progress_cb(0.1)
         holes = self._yolo.detect(last)
         if progress_cb:
             progress_cb(1.0)
-        log.info("YOLO 静态: %d 个弹孔", len(holes))
+        log.info("YOLO 自定义静态: %d 个弹孔", len(holes))
         return last, holes
 
     def _detect_yolo_temporal(self, progress_cb):
-        """YOLO 逐帧检测 + 时序追踪。"""
         if not self.yolo_available:
-            log.warning("YOLO 不可用，回退到帧差分")
+            log.warning("YOLO 自定义模型不可用, 回退到帧差分")
             return self._detect_frame_diff(progress_cb)
-
         holes = self._yolo.detect_video_temporal(
             self.recorder.frames, self.fire_interval_ms,
             progress_cb=progress_cb)
         last = self.recorder.get_last_frame()
-        log.info("YOLO 时序: %d 个弹孔", len(holes))
         return last, holes
 
     def _detect_frame_diff(self, progress_cb):
@@ -772,13 +896,18 @@ class VideoCalibrator:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="PUBG 视频校准 v3 (YOLO)")
+    parser = argparse.ArgumentParser(description="PUBG 视频校准 v3")
     parser.add_argument("gun", help="枪械名")
     parser.add_argument("--acc", default="A0B0C0")
     parser.add_argument("--backend", choices=VideoCalibrator.BACKENDS,
-                        default="yolo", help="检测后端")
+                        default="yolo_world", help="检测后端 (默认 yolo_world)")
     parser.add_argument("--video", help="加载视频文件 (替代实时录屏)")
-    parser.add_argument("--model", help="YOLO 模型路径 (.pt)")
+    parser.add_argument("--model", help="YOLO 自定义模型路径 (.pt)")
+    parser.add_argument("--world-size", default="s", choices=["s", "m", "l"],
+                        help="YOLO-World 模型大小 (默认 s)")
+    parser.add_argument("--prompts", nargs="+",
+                        default=["bullet hole", "hole"],
+                        help="YOLO-World 提示词")
     parser.add_argument("--scope", type=float, default=1.0)
     parser.add_argument("--posture", type=float, default=1.0)
     parser.add_argument("--region", help="捕获区域 left,top,w,h")
@@ -791,11 +920,18 @@ def main():
     vc = VideoCalibrator(args.gun, args.acc, args.scope, args.posture,
                          capture_region=region, yolo_model_path=args.model)
 
+    if args.backend.startswith("yolo_world"):
+        vc.init_yolo_world(args.world_size, args.prompts)
+
     print(f"\n{'='*48}")
     print(f"  PUBG 视频校准 v3")
     print(f"  枪械: {args.gun} [{args.acc}]")
     print(f"  后端: {args.backend}")
-    print(f"  YOLO: {'可用' if vc.yolo_available else '不可用 (需要模型文件)'}")
+    if args.backend.startswith("yolo_world"):
+        print(f"  YOLO-World: {'就绪' if vc.yolo_world_available else '不可用'}")
+        print(f"  提示词: {args.prompts}")
+    elif args.backend.startswith("yolo"):
+        print(f"  YOLO 模型: {'可用' if vc.yolo_available else '不可用'}")
     print(f"{'='*48}")
 
     if args.video:

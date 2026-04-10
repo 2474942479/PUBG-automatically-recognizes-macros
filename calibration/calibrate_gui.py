@@ -1194,28 +1194,32 @@ class VideoCalibrationDialog(QDialog):
         backend_box = QGroupBox("检测后端")
         blo = QGridLayout(backend_box)
         self._bg = QButtonGroup(self)
-        self._rb_yolo = QRadioButton("YOLO 模型 (推荐, 高精度)")
-        self._rb_yolo_t = QRadioButton("YOLO + 时序追踪 (保留射击顺序)")
-        self._rb_fdiff = QRadioButton("帧差分 (传统, 需干净墙面)")
-        self._rb_static = QRadioButton("静态检测 (传统 BulletDetector)")
-        for rb in (self._rb_yolo, self._rb_yolo_t, self._rb_fdiff, self._rb_static):
+        self._rb_world = QRadioButton("YOLO-World 零样本 (推荐, 无需训练)")
+        self._rb_world_t = QRadioButton("YOLO-World + 时序 (保留射击顺序)")
+        self._rb_yolo = QRadioButton("YOLO 自定义模型 (需训练)")
+        self._rb_yolo_t = QRadioButton("YOLO 自定义 + 时序")
+        self._rb_fdiff = QRadioButton("帧差分 (传统)")
+        self._rb_static = QRadioButton("静态检测 (传统)")
+        for rb in (self._rb_world, self._rb_world_t, self._rb_yolo,
+                   self._rb_yolo_t, self._rb_fdiff, self._rb_static):
             self._bg.addButton(rb)
-        self._rb_yolo.setChecked(True)
-        blo.addWidget(self._rb_yolo, 0, 0)
-        blo.addWidget(self._rb_yolo_t, 0, 1)
-        blo.addWidget(self._rb_fdiff, 1, 0)
-        blo.addWidget(self._rb_static, 1, 1)
+        self._rb_world.setChecked(True)
+        blo.addWidget(self._rb_world, 0, 0)
+        blo.addWidget(self._rb_world_t, 0, 1)
+        blo.addWidget(self._rb_yolo, 1, 0)
+        blo.addWidget(self._rb_yolo_t, 1, 1)
+        blo.addWidget(self._rb_fdiff, 2, 0)
+        blo.addWidget(self._rb_static, 2, 1)
 
         model_row = QHBoxLayout()
-        self._lbl_model = QLabel(
-            f"YOLO: {'已加载' if vc.yolo_available else '未加载 (选择模型文件)'}")
-        self._lbl_model.setStyleSheet(
-            f"color:{'#66cc66' if vc.yolo_available else '#ff8800'};font-size:12px;")
-        self._btn_model = QPushButton("选择模型 (.pt)")
-        self._btn_model.setMaximumWidth(140)
+        self._lbl_model = QLabel("YOLO-World: 安装 ultralytics 即可使用 (pip install -U ultralytics)")
+        self._lbl_model.setStyleSheet("color:#66aaff;font-size:12px;")
+        self._btn_model = QPushButton("选择自定义模型 (.pt)")
+        self._btn_model.setMaximumWidth(160)
+        self._btn_model.setToolTip("仅 YOLO 自定义模式需要，YOLO-World 无需模型文件")
         model_row.addWidget(self._lbl_model, 1)
         model_row.addWidget(self._btn_model)
-        blo.addLayout(model_row, 2, 0, 1, 2)
+        blo.addLayout(model_row, 3, 0, 1, 2)
         lo.addWidget(backend_box)
 
         # ── 输入控制: 录屏 / 加载视频 ──
@@ -1293,6 +1297,10 @@ class VideoCalibrationDialog(QDialog):
         self._vc.enable_hotkeys(on_start=self._hotkey_start, on_stop=self._hotkey_stop)
 
     def _selected_backend(self):
+        if self._rb_world.isChecked():
+            return "yolo_world"
+        if self._rb_world_t.isChecked():
+            return "yolo_world_temporal"
         if self._rb_yolo.isChecked():
             return "yolo"
         if self._rb_yolo_t.isChecked():
@@ -1382,11 +1390,21 @@ class VideoCalibrationDialog(QDialog):
 
         if backend in ("yolo", "yolo_temporal") and not self._vc.yolo_available:
             self._lbl_status.setText(
-                f"{count} 帧 — YOLO 模型未加载, 请先选择 .pt 模型文件, 或切换到传统后端")
+                f"{count} 帧 — YOLO 自定义模型未加载, 请选择 .pt 文件或改用 YOLO-World")
             self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#332200;color:#ff8800;")
             self._btn_open_video.setEnabled(self._video_path is not None)
             self._update_paths()
             return
+
+        if backend.startswith("yolo_world"):
+            self._lbl_status.setText(f"{count} 帧 — 初始化 YOLO-World (首次需下载 ~50MB) …")
+            QApplication.processEvents()
+            self._vc.init_yolo_world()
+            if not self._vc.yolo_world_available:
+                self._lbl_status.setText(
+                    "YOLO-World 初始化失败 — 请确保: pip install -U ultralytics")
+                self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#332200;color:#ff8800;")
+                return
 
         self._lbl_status.setText(f"{count} 帧 — 使用 [{backend}] 检测中 …")
         self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#222;color:#aaa;")
