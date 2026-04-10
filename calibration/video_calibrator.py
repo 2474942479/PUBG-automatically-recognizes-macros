@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PUBG 视频校准模块 (v2 — 透明化重构)
-═══════════════════════════════════════
-录屏 → 自动检测弹孔 → 标注预览图 → 加载到画布手动审核 → 计算参数
+PUBG 视频校准模块 (v3 — YOLO + 视频加载)
+═══════════════════════════════════════════
+支持三种检测后端:
+  1. YOLO 模型 (推荐, 需训练)  — 高精度, 抗纹理干扰
+  2. 帧差分时序              — 保留射击顺序, 需干净墙面
+  3. 传统静态 (BulletDetector) — 兜底
 
-核心改进 (vs v1):
-  1. 录屏自动保存为 .avi，可回放
-  2. 检测结果生成标注图 (编号 + 轨迹线)
-  3. 加载到 BulletCanvas 供手动调整
-  4. initial 模式: 帧差分保留时序
-  5. refine 模式: 最后一帧静态检测 (BulletDetector)，不再用帧差分
+支持两种输入:
+  - 实时录屏 (F6/F7)
+  - 加载已有视频文件 (.avi/.mp4)
 """
 
 import cv2
@@ -43,11 +43,146 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════
+# YOLO 弹孔检测器
+# ═══════════════════════════════════════════
+
+class YOLOHoleDetector:
+    """YOLOv8/v11 弹孔检测器。
+
+    需要提供训练好的 .pt 模型文件。
+    训练方法见 tools/train_yolo_guide.md
+
+    用法::
+
+        detector = YOLOHoleDetector("models/bullet_hole_best.pt")
+        holes = detector.detect(image_bgr)
+    """
+
+    _INSTANCE = None
+    _INSTANCE_PATH = None
+
+    def __init__(self, model_path):
+        self.model_path = str(model_path)
+        self.model = None
+        self.available = False
+        self._load()
+
+    def _load(self):
+        try:
+            from ultralytics import YOLO
+            self.model = YOLO(self.model_path)
+            self.available = True
+            log.info("YOLO 模型已加载: %s", self.model_path)
+        except ImportError:
+            log.warning("ultralytics 未安装, 运行: pip install ultralytics")
+        except Exception as e:
+            log.error("YOLO 模型加载失败: %s", e)
+
+    @classmethod
+    def get_or_create(cls, model_path):
+        """缓存单例，避免重复加载同一模型。"""
+        p = str(model_path)
+        if cls._INSTANCE is None or cls._INSTANCE_PATH != p:
+            cls._INSTANCE = cls(p)
+            cls._INSTANCE_PATH = p
+        return cls._INSTANCE
+
+    def detect(self, image, conf=0.25):
+        """检测弹孔，返回 holes 列表。
+
+        Returns:
+            [{"x", "y", "shot_num", "confidence", "bbox", "area", ...}, ...]
+        """
+        if not self.available or self.model is None:
+            return []
+
+        results = self.model(image, conf=conf, verbose=False)
+        holes = []
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                w, h = int(x2 - x1), int(y2 - y1)
+                holes.append({
+                    "x": cx, "y": cy,
+                    "area": w * h,
+                    "confidence": round(float(box.conf[0]), 3),
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "circularity": 1.0,
+                    "color_diff": 50,
+                })
+        holes.sort(key=lambda h: h["y"])
+        for i, h in enumerate(holes):
+            h["shot_num"] = i + 1
+        return holes
+
+    def detect_video_temporal(self, frames, fire_interval_ms=85.7,
+                              conf=0.25, progress_cb=None):
+        """逐帧 YOLO 检测 + 时序增量跟踪，保留射击顺序。
+
+        与帧差分不同: YOLO 在每帧独立识别弹孔，通过与已知集合比对发现新弹孔。
+        不需要干净墙面，不需要图像稳定。
+        """
+        if not self.available or len(frames) < 2:
+            return []
+
+        detected = []
+        known_positions = []
+        nms_dist = 15
+
+        sample_step = max(1, int(fire_interval_ms / 2 / 16.7))
+
+        for idx in range(0, len(frames), sample_step):
+            if progress_cb and idx % (sample_step * 5) == 0:
+                progress_cb(idx / len(frames))
+
+            cur_t, cur_bgr = frames[idx]
+            frame_holes = self.detect(cur_bgr, conf=conf)
+
+            for fh in frame_holes:
+                is_new = True
+                for kx, ky in known_positions:
+                    if abs(fh["x"] - kx) < nms_dist and abs(fh["y"] - ky) < nms_dist:
+                        is_new = False
+                        break
+                if is_new:
+                    fh["timestamp"] = cur_t
+                    fh["frame_idx"] = idx
+                    detected.append(fh)
+                    known_positions.append((fh["x"], fh["y"]))
+
+        detected.sort(key=lambda h: h.get("timestamp", 0))
+        for i, h in enumerate(detected):
+            h["shot_num"] = i + 1
+
+        if progress_cb:
+            progress_cb(1.0)
+
+        log.info("YOLO 时序检测: %d 个弹孔", len(detected))
+        return detected
+
+
+def find_yolo_model():
+    """在常见路径查找训练好的 YOLO 弹孔模型。"""
+    candidates = [
+        Path("models/bullet_hole_best.pt"),
+        Path("models/best.pt"),
+        Path("calibration/models/best.pt"),
+        Path(__file__).resolve().parent / "models" / "best.pt",
+        Path(__file__).resolve().parent.parent / "models" / "bullet_hole_best.pt",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return str(p)
+    return None
+
+
+# ═══════════════════════════════════════════
 # 录屏器
 # ═══════════════════════════════════════════
 
 class ScreenRecorder:
-    """高速屏幕捕获，支持 F6/F7 热键控制 + 视频保存。"""
+    """高速屏幕捕获 + 视频文件加载，支持 F6/F7 热键。"""
 
     def __init__(self, capture_region=None, target_fps=60):
         self.capture_region = capture_region
@@ -57,6 +192,7 @@ class ScreenRecorder:
         self._thread = None
         self._hotkey_listener = None
         self.actual_region = None
+        self.source_path = None
 
     @property
     def recording(self):
@@ -77,11 +213,14 @@ class ScreenRecorder:
                 "width": cw, "height": ch,
             }
 
+    # ── 实时录制 ──
+
     def start(self):
         if self._recording:
             return
         self._recording = True
         self.frames = []
+        self.source_path = None
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         log.info("录制开始 (目标 %d fps)", self.target_fps)
@@ -119,17 +258,52 @@ class ScreenRecorder:
                 if sleep_t > 0:
                     time.sleep(sleep_t)
 
+    # ── 视频文件加载 ──
+
+    def load_video(self, path):
+        """从视频文件加载帧序列，替代实时录制。
+
+        Returns: 加载的帧数
+        """
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            log.error("无法打开视频: %s", path)
+            return 0
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        self.frames = []
+        idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            t = idx / fps
+            self.frames.append((t, frame))
+            idx += 1
+        cap.release()
+
+        self.source_path = str(path)
+        log.info("视频加载: %s (%d 帧, %.1f fps)", path, len(self.frames), fps)
+        return len(self.frames)
+
+    # ── 帧访问 ──
+
     def get_reference_frame(self):
         return self.frames[0][1].copy() if self.frames else None
 
     def get_last_frame(self):
         return self.frames[-1][1].copy() if self.frames else None
 
+    def get_frame_at(self, index):
+        if 0 <= index < len(self.frames):
+            return self.frames[index][1].copy()
+        return None
+
+    # ── 保存 ──
+
     def save_video(self, path=None):
-        """将录制帧保存为 .avi 视频文件，返回保存路径。"""
         if len(self.frames) < 2:
             return None
-
         if path is None:
             out_dir = Path("calibration_results")
             out_dir.mkdir(exist_ok=True)
@@ -138,14 +312,14 @@ class ScreenRecorder:
 
         h, w = self.frames[0][1].shape[:2]
         dur = self.frames[-1][0] - self.frames[0][0]
-        fps = len(self.frames) / max(0.01, dur)
+        fps = len(self.frames) / max(0.01, dur) if dur > 0 else 30
 
         fourcc = cv2.VideoWriter_fourcc(*"MJPG")
         writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
         for _, frame in self.frames:
             writer.write(frame)
         writer.release()
-        log.info("视频已保存: %s (%d帧, %.1ffps)", path, len(self.frames), fps)
+        log.info("视频保存: %s (%d帧, %.1ffps)", path, len(self.frames), fps)
         return path
 
     # ── 热键 ──
@@ -175,7 +349,7 @@ class ScreenRecorder:
         self._hotkey_listener = kb.Listener(on_press=_on_press)
         self._hotkey_listener.daemon = True
         self._hotkey_listener.start()
-        log.info("热键: %s=开始录制, %s=停止录制", start_key.upper(), stop_key.upper())
+        log.info("热键: %s=开始, %s=停止", start_key.upper(), stop_key.upper())
 
     def stop_hotkey_listener(self):
         if self._hotkey_listener:
@@ -184,15 +358,11 @@ class ScreenRecorder:
 
 
 # ═══════════════════════════════════════════
-# 帧分析器 (仅用于 initial 模式的时序检测)
+# 帧分析器 (传统帧差分, 仅限干净墙面)
 # ═══════════════════════════════════════════
 
 class FrameAnalyzer:
-    """逐帧差分 + 图像稳定 + 增量弹孔检测。
-
-    适用于 initial 模式 (弹孔分散, 时序有价值)。
-    不适用于 refine 模式 (弹孔重叠, 帧差分无法区分)。
-    """
+    """逐帧差分 + 图像稳定 + 增量弹孔检测 (传统 CV)。"""
 
     def __init__(self, diff_threshold=25, stabilize=True,
                  min_area_ratio=5e-6, max_area_ratio=8e-4):
@@ -203,12 +373,6 @@ class FrameAnalyzer:
         self.debug_frames = []
 
     def analyze(self, frames, fire_interval_ms=85.7, progress_cb=None):
-        """分析录制帧序列，返回按时间排序的弹孔列表。
-
-        Returns:
-            [{"x": int, "y": int, "timestamp": float, "shot_num": int,
-              "frame_idx": int}, ...]
-        """
         if len(frames) < 5:
             return []
 
@@ -221,15 +385,13 @@ class FrameAnalyzer:
         max_a = int(pixels * self.max_area_ratio)
         nms_r = max(8, int(min(h, w) * 0.01))
 
-        ref_kp, ref_des = None, None
-        orb = None
+        ref_kp, ref_des, orb = None, None, None
         if self.stabilize:
             orb = cv2.ORB_create(nfeatures=1500)
             ref_kp, ref_des = orb.detectAndCompute(ref_gray, None)
 
         detected = []
         known = set()
-
         sample_step = max(1, int(fire_interval_ms / 2 / 16.7))
 
         for idx in range(sample_step, len(frames), sample_step):
@@ -238,7 +400,6 @@ class FrameAnalyzer:
 
             cur_t, cur_bgr = frames[idx]
             cur_gray = cv2.cvtColor(cur_bgr, cv2.COLOR_BGR2GRAY)
-
             aligned = cur_gray
             if self.stabilize and ref_des is not None and orb is not None:
                 aligned = self._align(cur_gray, ref_gray, ref_kp, ref_des, orb)
@@ -251,7 +412,6 @@ class FrameAnalyzer:
 
             contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL,
                                            cv2.CHAIN_APPROX_SIMPLE)
-
             new_in_frame = []
             for cnt in contours:
                 area = cv2.contourArea(cnt)
@@ -262,7 +422,6 @@ class FrameAnalyzer:
                     continue
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
-
                 gk = (cx // nms_r, cy // nms_r)
                 is_new = all(
                     (gk[0] + dx, gk[1] + dy) not in known
@@ -276,10 +435,8 @@ class FrameAnalyzer:
 
             if new_in_frame:
                 self.debug_frames.append({
-                    "frame_idx": idx,
-                    "timestamp": cur_t,
-                    "diff_image": diff.copy(),
-                    "binary_image": bw.copy(),
+                    "frame_idx": idx, "timestamp": cur_t,
+                    "diff_image": diff.copy(), "binary_image": bw.copy(),
                     "new_holes": list(new_in_frame),
                 })
 
@@ -289,7 +446,7 @@ class FrameAnalyzer:
 
         if progress_cb:
             progress_cb(1.0)
-        log.info("帧差分检测到 %d 个弹孔 (分析了 %d 关键帧)", len(detected), len(self.debug_frames))
+        log.info("帧差分: %d 个弹孔", len(detected))
         return detected
 
     @staticmethod
@@ -319,7 +476,7 @@ class FrameAnalyzer:
 # ═══════════════════════════════════════════
 
 def annotate_frame(frame_bgr, holes, title=""):
-    """在帧图像上绘制弹孔标注 (编号 + 轨迹线 + 颜色分段)，返回标注后的副本。"""
+    """在帧上绘制弹孔标注 (编号 + 轨迹线 + confidence + bbox)。"""
     canvas = frame_bgr.copy()
     h, w = canvas.shape[:2]
     n = len(holes)
@@ -347,13 +504,19 @@ def annotate_frame(frame_bgr, holes, title=""):
         else:
             color = (0, 200, 0)
 
-        cv2.circle(canvas, (hole["x"], hole["y"]), radius, color, thickness + 1,
-                   cv2.LINE_AA)
+        bbox = hole.get("bbox")
+        if bbox:
+            cv2.rectangle(canvas, (bbox[0], bbox[1]), (bbox[2], bbox[3]),
+                          color, thickness, cv2.LINE_AA)
+        else:
+            cv2.circle(canvas, (hole["x"], hole["y"]), radius, color,
+                       thickness + 1, cv2.LINE_AA)
+
         cv2.circle(canvas, (hole["x"], hole["y"]), max(2, radius // 3),
                    color, -1, cv2.LINE_AA)
 
-        label = str(sn)
-        (tw, th_), _ = cv2.getTextSize(label, font, font_scale, thickness)
+        conf = hole.get("confidence")
+        label = f"{sn}" if conf is None else f"{sn} ({conf:.0%})"
         lx = hole["x"] + radius + 3
         ly = hole["y"] - radius
         cv2.putText(canvas, label, (lx, ly), font, font_scale,
@@ -361,10 +524,7 @@ def annotate_frame(frame_bgr, holes, title=""):
         cv2.putText(canvas, label, (lx, ly), font, font_scale,
                     color, thickness, cv2.LINE_AA)
 
-    info_lines = [
-        f"Holes: {n}",
-        f"Red=early  Orange=mid  Green=late",
-    ]
+    info_lines = [f"Holes: {n}", "Red=early  Orange=mid  Green=late"]
     if title:
         info_lines.insert(0, title)
     for i, line in enumerate(info_lines):
@@ -380,25 +540,35 @@ def annotate_frame(frame_bgr, holes, title=""):
 # ═══════════════════════════════════════════
 
 class VideoCalibrator:
-    """视频校准主控器 (v2 — 透明化)
+    """视频校准主控器 (v3)
 
-    典型工作流::
+    支持三种检测后端 + 两种输入源::
 
-        vc = VideoCalibrator("m416", "A0B0C0")
-        vc.enable_hotkeys()
+        vc = VideoCalibrator("m416")
 
-        # 用户按 F6 → 射击 → F7
-        video_path = vc.save_recording()       # 保存录屏
-        frame, holes = vc.detect_holes("initial")  # 检测弹孔
-        annotated = vc.get_annotated_frame(holes)   # 生成标注图
+        # 输入方式 1: 实时录屏
+        vc.start_recording()
+        # ... 射击 ...
+        vc.stop_recording()
 
-        # → 加载到 BulletCanvas 供手动审核调整
-        # → 用户确认后用 BulletParamGenerator / IterativeCorrector 计算
+        # 输入方式 2: 加载视频文件
+        vc.load_video("recording.avi")
+
+        # 检测弹孔 (三种后端)
+        frame, holes = vc.detect_holes("yolo")       # YOLO 模型
+        frame, holes = vc.detect_holes("yolo_temporal")  # YOLO + 时序
+        frame, holes = vc.detect_holes("frame_diff")  # 传统帧差分
+        frame, holes = vc.detect_holes("static")      # 传统静态
+
+        # 标注 → 加载到画布 → 手动确认
     """
+
+    BACKENDS = ("yolo", "yolo_temporal", "frame_diff", "static")
 
     def __init__(self, gun_name, acc_code="A0B0C0",
                  scope_val=1.0, posture_val=1.0,
-                 capture_region=None, gun_data_dir=None):
+                 capture_region=None, gun_data_dir=None,
+                 yolo_model_path=None):
         self.gun_name = gun_name
         self.acc_code = acc_code
         self.scope_val = scope_val
@@ -414,13 +584,29 @@ class VideoCalibrator:
         self.magazine = meta.get("mag", 40)
         self.ticks_per_shot = max(1, round(self.fire_interval_ms / 9))
 
-    # ── 录制控制 ──
+        self._yolo = None
+        yp = yolo_model_path or find_yolo_model()
+        if yp:
+            self._yolo = YOLOHoleDetector.get_or_create(yp)
+
+    @property
+    def yolo_available(self):
+        return self._yolo is not None and self._yolo.available
+
+    def set_yolo_model(self, model_path):
+        self._yolo = YOLOHoleDetector.get_or_create(model_path)
+
+    # ── 输入 ──
 
     def start_recording(self):
         self.recorder.start()
 
     def stop_recording(self):
         return self.recorder.stop()
+
+    def load_video(self, path):
+        """从视频文件加载帧 (替代实时录屏)。"""
+        return self.recorder.load_video(path)
 
     def enable_hotkeys(self, on_start=None, on_stop=None):
         self.recorder.start_hotkey_listener("f6", "f7", on_start, on_stop)
@@ -431,80 +617,97 @@ class VideoCalibrator:
     def save_recording(self, path=None):
         return self.recorder.save_video(path)
 
-    # ── 弹孔检测 ──
+    # ── 弹孔检测 (多后端) ──
 
-    def detect_holes(self, mode="initial", progress_cb=None):
+    def detect_holes(self, backend="yolo", progress_cb=None):
         """检测弹孔，返回 (base_frame_bgr, holes_list)。
 
-        mode:
-            "initial" — 帧差分时序检测 (弹孔分散, 保留射击顺序)
-            "refine"  — 最后一帧静态检测 (弹孔密集/重叠, 用 BulletDetector)
-
-        holes_list 格式: [{"x", "y", "shot_num", ...}, ...]
-        可直接加载到 BulletCanvas 供手动调整。
+        backend:
+            "yolo"          — YOLO 在最后一帧检测 (推荐, 最高精度)
+            "yolo_temporal"  — YOLO 逐帧扫描 + 时序追踪 (保留射击顺序)
+            "frame_diff"    — 传统帧差分 (需干净墙面)
+            "static"        — 传统 BulletDetector 静态检测
         """
-        if self.recorder.frame_count < 5:
+        if self.recorder.frame_count < 2:
             log.warning("帧数不足 (%d)", self.recorder.frame_count)
             return None, []
 
-        if mode == "initial":
+        if backend == "yolo":
+            return self._detect_yolo_static(progress_cb)
+        elif backend == "yolo_temporal":
+            return self._detect_yolo_temporal(progress_cb)
+        elif backend == "frame_diff":
             return self._detect_frame_diff(progress_cb)
+        elif backend == "static":
+            return self._detect_traditional_static(progress_cb)
         else:
-            return self._detect_static(progress_cb)
+            log.error("未知后端: %s", backend)
+            return None, []
+
+    def _detect_yolo_static(self, progress_cb):
+        """YOLO 在最后一帧做静态检测。"""
+        last = self.recorder.get_last_frame()
+        if last is None:
+            return None, []
+        if not self.yolo_available:
+            log.warning("YOLO 不可用，回退到传统静态检测")
+            return self._detect_traditional_static(progress_cb)
+
+        if progress_cb:
+            progress_cb(0.1)
+        holes = self._yolo.detect(last)
+        if progress_cb:
+            progress_cb(1.0)
+        log.info("YOLO 静态: %d 个弹孔", len(holes))
+        return last, holes
+
+    def _detect_yolo_temporal(self, progress_cb):
+        """YOLO 逐帧检测 + 时序追踪。"""
+        if not self.yolo_available:
+            log.warning("YOLO 不可用，回退到帧差分")
+            return self._detect_frame_diff(progress_cb)
+
+        holes = self._yolo.detect_video_temporal(
+            self.recorder.frames, self.fire_interval_ms,
+            progress_cb=progress_cb)
+        last = self.recorder.get_last_frame()
+        log.info("YOLO 时序: %d 个弹孔", len(holes))
+        return last, holes
 
     def _detect_frame_diff(self, progress_cb):
-        """initial 模式: 帧差分时序检测。"""
+        """传统帧差分时序检测。"""
         holes = self.frame_analyzer.analyze(
             self.recorder.frames, self.fire_interval_ms, progress_cb)
-
-        last_frame = self.recorder.get_last_frame()
-        if last_frame is None:
-            return None, holes
-
+        last = self.recorder.get_last_frame()
         for h in holes:
             h.setdefault("area", 100)
             h.setdefault("circularity", 1.0)
             h.setdefault("color_diff", 50)
+        return last, holes
 
-        log.info("initial 帧差分: %d 个弹孔, %d 个调试帧",
-                 len(holes), len(self.frame_analyzer.debug_frames))
-        return last_frame, holes
-
-    def _detect_static(self, progress_cb):
-        """refine 模式: 用 BulletDetector 在最后一帧做静态检测。
-
-        比帧差分更适合弹孔密集/重叠的情况。
-        """
-        last_frame = self.recorder.get_last_frame()
-        if last_frame is None:
+    def _detect_traditional_static(self, progress_cb):
+        """传统 BulletDetector 最后一帧静态检测。"""
+        last = self.recorder.get_last_frame()
+        if last is None:
             return None, []
-
         if BulletDetector is None:
             log.error("BulletDetector 不可用")
-            return last_frame, []
-
+            return last, []
         if progress_cb:
             progress_cb(0.1)
-
         detector = BulletDetector(sensitivity="high")
-        holes = detector.detect_single(last_frame)
-
-        if progress_cb:
-            progress_cb(0.8)
-
+        holes = detector.detect_single(last)
         if holes:
             holes.sort(key=lambda h: h["y"])
             for i, h in enumerate(holes):
                 h["shot_num"] = i + 1
-
         if progress_cb:
             progress_cb(1.0)
+        return last, holes
 
-        log.info("refine 静态检测: %d 个弹孔", len(holes))
-        return last_frame, holes
+    # ── 标注 ──
 
     def get_annotated_frame(self, holes, title=None):
-        """生成标注图 (在最后一帧上绘制弹孔标号 + 轨迹线)。"""
         last = self.recorder.get_last_frame()
         if last is None:
             return None
@@ -512,7 +715,6 @@ class VideoCalibrator:
         return annotate_frame(last, holes, title=t)
 
     def save_annotated_frame(self, holes, path=None):
-        """保存标注图到文件，返回路径。"""
         img = self.get_annotated_frame(holes)
         if img is None:
             return None
@@ -522,17 +724,13 @@ class VideoCalibrator:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = str(out_dir / f"annotated_{self.gun_name}_{ts}.png")
         cv2.imwrite(path, img)
-        log.info("标注图已保存: %s", path)
+        log.info("标注图: %s", path)
         return path
 
     def get_debug_frames(self):
-        """获取帧差分过程中的关键帧 (仅 initial 模式有效)。
-
-        Returns: [{"frame_idx", "diff_image", "binary_image", "new_holes"}, ...]
-        """
         return self.frame_analyzer.debug_frames
 
-    # ── GunData 交互 ──
+    # ── GunData ──
 
     def load_prev_data(self):
         gp = self.gun_data_dir / f"{self.gun_name}.json"
@@ -548,49 +746,42 @@ class VideoCalibrator:
             return None
 
     def write_to_gundata(self, y_array, x_array=None, backup=True):
-        """直接将 per-shot 数组写入 GunData v2 JSON。"""
         gp = self.gun_data_dir / f"{self.gun_name}.json"
         if not gp.exists():
-            log.error("文件不存在: %s", gp)
             return False
-
         with open(gp, encoding="utf-8") as f:
             gd = json.load(f)
         if gd.get("version") != 2:
-            log.error("非 v2 格式")
             return False
-
         if backup:
             bak = gp.with_suffix(f".{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak")
             with open(bak, "w", encoding="utf-8") as f:
                 json.dump(gd, f, ensure_ascii=False, indent=4)
-
         if x_array is None:
             x_array = [0.0] * len(y_array)
-
-        gd.setdefault("recoil", {})[self.acc_code] = {
-            "y": y_array, "x": x_array,
-        }
+        gd.setdefault("recoil", {})[self.acc_code] = {"y": y_array, "x": x_array}
         with open(gp, "w", encoding="utf-8") as f:
             json.dump(gd, f, ensure_ascii=False, indent=4)
-
         log.info("写入 %s [%s]: %d 发", self.gun_name, self.acc_code, len(y_array))
         return True
 
 
 # ═══════════════════════════════════════════
-# CLI 入口
+# CLI
 # ═══════════════════════════════════════════
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="PUBG 视频校准工具 (v2)")
-    parser.add_argument("gun", help="枪械名 (m416, akm, ...)")
-    parser.add_argument("--acc", default="A0B0C0", help="配件码")
-    parser.add_argument("--scope", type=float, default=1.0, help="倍镜灵敏度")
-    parser.add_argument("--posture", type=float, default=1.0, help="姿态系数")
-    parser.add_argument("--mode", choices=["initial", "refine"], default="initial")
-    parser.add_argument("--region", help="捕获区域 left,top,width,height")
+    parser = argparse.ArgumentParser(description="PUBG 视频校准 v3 (YOLO)")
+    parser.add_argument("gun", help="枪械名")
+    parser.add_argument("--acc", default="A0B0C0")
+    parser.add_argument("--backend", choices=VideoCalibrator.BACKENDS,
+                        default="yolo", help="检测后端")
+    parser.add_argument("--video", help="加载视频文件 (替代实时录屏)")
+    parser.add_argument("--model", help="YOLO 模型路径 (.pt)")
+    parser.add_argument("--scope", type=float, default=1.0)
+    parser.add_argument("--posture", type=float, default=1.0)
+    parser.add_argument("--region", help="捕获区域 left,top,w,h")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -598,13 +789,34 @@ def main():
 
     region = tuple(int(x) for x in args.region.split(",")) if args.region else None
     vc = VideoCalibrator(args.gun, args.acc, args.scope, args.posture,
-                         capture_region=region)
+                         capture_region=region, yolo_model_path=args.model)
 
-    print(f"\n{'='*44}")
-    print(f"  PUBG 视频校准 v2 (透明化)")
+    print(f"\n{'='*48}")
+    print(f"  PUBG 视频校准 v3")
     print(f"  枪械: {args.gun} [{args.acc}]")
-    print(f"  模式: {'初始生成 (帧差分)' if args.mode == 'initial' else '迭代修正 (静态检测)'}")
-    print(f"{'='*44}")
+    print(f"  后端: {args.backend}")
+    print(f"  YOLO: {'可用' if vc.yolo_available else '不可用 (需要模型文件)'}")
+    print(f"{'='*48}")
+
+    if args.video:
+        n = vc.load_video(args.video)
+        print(f"\n  已加载视频: {args.video} ({n} 帧)")
+        if n < 2:
+            print("  帧数不足"); return
+
+        frame, holes = vc.detect_holes(args.backend)
+        if not holes:
+            print("  未检测到弹孔"); return
+
+        print(f"  检测到 {len(holes)} 个弹孔:")
+        for h in holes:
+            conf = f" conf={h['confidence']:.0%}" if "confidence" in h else ""
+            print(f"    #{h['shot_num']:2d}  ({h['x']:4d}, {h['y']:4d}){conf}")
+
+        ann_path = vc.save_annotated_frame(holes)
+        print(f"  标注图: {ann_path}")
+        return
+
     print(f"\n  按 F6 开始录制 → 对墙射击 → 按 F7 停止")
     print(f"  Ctrl+C 退出\n")
 
@@ -615,37 +827,27 @@ def main():
 
     def on_stop():
         n = vc.recorder.frame_count
-        print(f"\n  录制结束: {n} 帧")
+        print(f"\n  录制: {n} 帧")
         if n < 10:
-            print("  帧数不足, 请重试")
-            return
+            print("  帧数不足"); return
 
-        video_path = vc.save_recording()
-        print(f"  录屏已保存: {video_path}")
+        vp = vc.save_recording()
+        print(f"  视频: {vp}")
 
-        print("  分析中 ...")
-        frame, holes = vc.detect_holes(
-            args.mode,
-            lambda p: print(f"\r  进度: {p*100:.0f}%", end="", flush=True))
-        print()
-
+        frame, holes = vc.detect_holes(args.backend)
         if not holes:
-            print("  未检测到弹孔")
-            done.set()
-            return
+            print("  未检测到弹孔"); done.set(); return
 
-        print(f"  检测到 {len(holes)} 个弹孔:")
+        print(f"  {len(holes)} 个弹孔:")
         for h in holes:
-            print(f"    #{h['shot_num']:2d}  ({h['x']:4d}, {h['y']:4d})")
+            conf = f" conf={h['confidence']:.0%}" if "confidence" in h else ""
+            print(f"    #{h['shot_num']:2d}  ({h['x']:4d}, {h['y']:4d}){conf}")
 
-        ann_path = vc.save_annotated_frame(holes)
-        print(f"  标注图已保存: {ann_path}")
-        print(f"\n  请在 GUI 中打开标注图确认弹孔位置，手动调整后再计算参数")
-
+        ann = vc.save_annotated_frame(holes)
+        print(f"  标注图: {ann}")
         done.set()
 
     vc.enable_hotkeys(on_start, on_stop)
-
     try:
         while not done.wait(timeout=1):
             pass

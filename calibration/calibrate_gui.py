@@ -1152,21 +1152,17 @@ def _build_iteration_html(iter_result):
 
 
 # ═══════════════════════════════════════════
-# 视频校准对话框 (v2 — 透明化)
+# 视频校准对话框 (v3 — YOLO + 视频加载)
 # ═══════════════════════════════════════════
 
 class VideoCalibrationDialog(QDialog):
-    """视频校准对话框 — 录屏 → 弹孔检测 → 预览标注图 → 加载到主画布手动调整。
-
-    不再自动计算 per-shot / 修正值。
-    分析结果加载到主窗口 BulletCanvas 后，由用户手动确认 → 分析参数/迭代修正。
-    """
+    """视频校准对话框 — 录屏/加载视频 → 多后端弹孔检测 → 预览 → 加载到画布。"""
 
     def __init__(self, gun_name, acc_code, scope_val, posture_val,
                  gun_data_dir, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("视频校准 (v2)")
-        self.resize(900, 700)
+        self.setWindowTitle("视频校准 v3 (YOLO / 传统)")
+        self.resize(960, 740)
         self._vc = VideoCalibrator(
             gun_name, acc_code, scope_val, posture_val,
             gun_data_dir=gun_data_dir)
@@ -1183,89 +1179,100 @@ class VideoCalibrationDialog(QDialog):
     def _init_ui(self):
         lo = QVBoxLayout(self)
 
-        # ── 配置 ──
-        info = QGroupBox("枪械配置")
+        # ── 配置行 ──
+        info = QGroupBox("枪械")
         ig = QGridLayout(info)
         vc = self._vc
         ig.addWidget(QLabel(f"枪械: {vc.gun_name}"), 0, 0)
         ig.addWidget(QLabel(f"配件: {vc.acc_code}"), 0, 1)
-        ig.addWidget(QLabel(f"倍镜: {vc.scope_val}"), 0, 2)
-        ig.addWidget(QLabel(f"姿态: {vc.posture_val}"), 1, 0)
-        ig.addWidget(QLabel(f"射速: {round(60/vc.fire_interval)} RPM"), 1, 1)
-        ig.addWidget(QLabel(f"弹匣: {vc.magazine}"), 1, 2)
+        ig.addWidget(QLabel(f"倍镜: {vc.scope_val}  姿态: {vc.posture_val}"), 0, 2)
+        ig.addWidget(QLabel(f"射速: {round(60/vc.fire_interval)} RPM  弹匣: {vc.magazine}"), 0, 3)
         lo.addWidget(info)
 
-        # ── 模式选择 ──
+        # ── 检测后端 ──
         from PyQt5.QtWidgets import QRadioButton, QButtonGroup
-        mode_box = QGroupBox("检测模式")
-        mlo = QHBoxLayout(mode_box)
+        backend_box = QGroupBox("检测后端")
+        blo = QGridLayout(backend_box)
         self._bg = QButtonGroup(self)
-        self._rb_init = QRadioButton("初始生成 — 帧差分时序 (无宏, 弹孔分散)")
-        self._rb_refine = QRadioButton("迭代修正 — 静态检测 (有宏, 弹孔密集)")
-        self._rb_init.setChecked(True)
-        self._bg.addButton(self._rb_init)
-        self._bg.addButton(self._rb_refine)
-        mlo.addWidget(self._rb_init)
-        mlo.addWidget(self._rb_refine)
-        lo.addWidget(mode_box)
+        self._rb_yolo = QRadioButton("YOLO 模型 (推荐, 高精度)")
+        self._rb_yolo_t = QRadioButton("YOLO + 时序追踪 (保留射击顺序)")
+        self._rb_fdiff = QRadioButton("帧差分 (传统, 需干净墙面)")
+        self._rb_static = QRadioButton("静态检测 (传统 BulletDetector)")
+        for rb in (self._rb_yolo, self._rb_yolo_t, self._rb_fdiff, self._rb_static):
+            self._bg.addButton(rb)
+        self._rb_yolo.setChecked(True)
+        blo.addWidget(self._rb_yolo, 0, 0)
+        blo.addWidget(self._rb_yolo_t, 0, 1)
+        blo.addWidget(self._rb_fdiff, 1, 0)
+        blo.addWidget(self._rb_static, 1, 1)
 
-        # ── 录制控制 ──
-        ctrl = QHBoxLayout()
+        model_row = QHBoxLayout()
+        self._lbl_model = QLabel(
+            f"YOLO: {'已加载' if vc.yolo_available else '未加载 (选择模型文件)'}")
+        self._lbl_model.setStyleSheet(
+            f"color:{'#66cc66' if vc.yolo_available else '#ff8800'};font-size:12px;")
+        self._btn_model = QPushButton("选择模型 (.pt)")
+        self._btn_model.setMaximumWidth(140)
+        model_row.addWidget(self._lbl_model, 1)
+        model_row.addWidget(self._btn_model)
+        blo.addLayout(model_row, 2, 0, 1, 2)
+        lo.addWidget(backend_box)
+
+        # ── 输入控制: 录屏 / 加载视频 ──
+        input_box = QGroupBox("输入")
+        ilo = QHBoxLayout(input_box)
         self._btn_start = QPushButton("开始录制 (F6)")
-        self._btn_start.setStyleSheet(
-            "background:#22aa44;color:white;padding:8px 20px;font-size:14px;")
-        self._btn_stop = QPushButton("停止录制 (F7)")
-        self._btn_stop.setStyleSheet(
-            "background:#cc3333;color:white;padding:8px 20px;font-size:14px;")
+        self._btn_start.setStyleSheet("background:#22aa44;color:white;padding:6px 16px;")
+        self._btn_stop = QPushButton("停止 (F7)")
+        self._btn_stop.setStyleSheet("background:#cc3333;color:white;padding:6px 16px;")
         self._btn_stop.setEnabled(False)
-        ctrl.addWidget(self._btn_start)
-        ctrl.addWidget(self._btn_stop)
-        lo.addLayout(ctrl)
+        self._btn_load_video = QPushButton("加载视频文件")
+        self._btn_load_video.setStyleSheet("background:#336699;color:white;padding:6px 16px;")
+        ilo.addWidget(self._btn_start)
+        ilo.addWidget(self._btn_stop)
+        ilo.addWidget(QLabel("  |  "))
+        ilo.addWidget(self._btn_load_video)
+        lo.addWidget(input_box)
 
         # ── 状态 ──
-        self._lbl_status = QLabel("就绪 — 点击「开始录制」或按 F6，对墙射击后按 F7 停止")
-        self._lbl_status.setStyleSheet(
-            "font-size:13px;padding:6px;background:#222;color:#aaa;")
+        self._lbl_status = QLabel("就绪 — 录屏 (F6/F7) 或加载已有视频文件")
+        self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#222;color:#aaa;")
         self._lbl_status.setAlignment(Qt.AlignCenter)
         self._lbl_status.setWordWrap(True)
         lo.addWidget(self._lbl_status)
 
-        # ── 预览图 + 弹孔列表 (水平分栏) ──
+        # ── 预览 + 弹孔列表 ──
         preview_split = QSplitter(Qt.Horizontal)
 
-        self._preview_label = QLabel("标注预览将在录制分析后显示")
+        self._preview_label = QLabel("标注预览")
         self._preview_label.setAlignment(Qt.AlignCenter)
-        self._preview_label.setStyleSheet(
-            "background:#111;color:#666;min-height:300px;")
-        self._preview_label.setScaledContents(False)
+        self._preview_label.setStyleSheet("background:#111;color:#666;min-height:280px;")
         preview_split.addWidget(self._preview_label)
 
         right_panel = QWidget()
         rlo = QVBoxLayout(right_panel)
         rlo.setContentsMargins(0, 0, 0, 0)
-        rlo.addWidget(QLabel("检测到的弹孔:"))
+        rlo.addWidget(QLabel("弹孔列表:"))
         self._hole_list = QTextEdit()
         self._hole_list.setReadOnly(True)
         self._hole_list.setStyleSheet("background:#1a1a1a;color:#ddd;font-size:12px;")
         rlo.addWidget(self._hole_list, 1)
-
         self._lbl_paths = QLabel("")
         self._lbl_paths.setWordWrap(True)
         self._lbl_paths.setStyleSheet("color:#888;font-size:11px;")
         rlo.addWidget(self._lbl_paths)
         preview_split.addWidget(right_panel)
-
         preview_split.setStretchFactor(0, 3)
         preview_split.setStretchFactor(1, 2)
         lo.addWidget(preview_split, 1)
 
-        # ── 底部按钮 ──
+        # ── 底部 ──
         bot = QHBoxLayout()
         self._btn_load_canvas = QPushButton("加载到主画布 (手动审核)")
         self._btn_load_canvas.setStyleSheet(
             "font-weight:bold;background:#2266cc;color:white;padding:8px 16px;font-size:13px;")
         self._btn_load_canvas.setEnabled(False)
-        self._btn_open_video = QPushButton("打开录屏文件")
+        self._btn_open_video = QPushButton("打开视频")
         self._btn_open_video.setEnabled(False)
         self._btn_close = QPushButton("关闭")
         bot.addWidget(self._btn_load_canvas)
@@ -1277,11 +1284,36 @@ class VideoCalibrationDialog(QDialog):
         # ── 信号 ──
         self._btn_start.clicked.connect(self._on_start)
         self._btn_stop.clicked.connect(self._on_stop)
+        self._btn_load_video.clicked.connect(self._on_load_video)
+        self._btn_model.clicked.connect(self._on_pick_model)
         self._btn_load_canvas.clicked.connect(self._on_load_canvas)
         self._btn_open_video.clicked.connect(self._on_open_video)
         self._btn_close.clicked.connect(self.reject)
 
         self._vc.enable_hotkeys(on_start=self._hotkey_start, on_stop=self._hotkey_stop)
+
+    def _selected_backend(self):
+        if self._rb_yolo.isChecked():
+            return "yolo"
+        if self._rb_yolo_t.isChecked():
+            return "yolo_temporal"
+        if self._rb_fdiff.isChecked():
+            return "frame_diff"
+        return "static"
+
+    # ── 模型选择 ──
+
+    def _on_pick_model(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 YOLO 模型文件", "", "PyTorch 模型 (*.pt)")
+        if not path:
+            return
+        self._vc.set_yolo_model(path)
+        ok = self._vc.yolo_available
+        self._lbl_model.setText(f"YOLO: {'已加载' if ok else '加载失败'} — {Path(path).name}")
+        self._lbl_model.setStyleSheet(f"color:{'#66cc66' if ok else '#ff4444'};font-size:12px;")
+
+    # ── 录制 ──
 
     def _hotkey_start(self):
         QTimer.singleShot(0, self._on_start)
@@ -1295,11 +1327,10 @@ class VideoCalibrationDialog(QDialog):
         self._vc.start_recording()
         self._btn_start.setEnabled(False)
         self._btn_stop.setEnabled(True)
+        self._btn_load_video.setEnabled(False)
         self._btn_load_canvas.setEnabled(False)
-        self._btn_open_video.setEnabled(False)
-        self._lbl_status.setText("录制中 … 对墙射击，完毕后按 F7 停止")
-        self._lbl_status.setStyleSheet(
-            "font-size:13px;padding:6px;background:#442222;color:#ff6666;")
+        self._lbl_status.setText("录制中 … 对墙射击，完毕后按 F7")
+        self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#442222;color:#ff6666;")
         self._timer.start(200)
 
     def _tick(self):
@@ -1317,25 +1348,54 @@ class VideoCalibrationDialog(QDialog):
         count = self._vc.stop_recording()
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._btn_load_video.setEnabled(True)
 
-        if count < 10:
-            self._lbl_status.setText("帧数不足 (需 >10)，请重新录制")
-            self._lbl_status.setStyleSheet(
-                "font-size:13px;padding:6px;background:#222;color:#aaa;")
+        if count < 5:
+            self._lbl_status.setText("帧数不足")
+            self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#222;color:#aaa;")
             return
 
-        self._lbl_status.setText(f"录制 {count} 帧 — 保存视频 + 分析中 …")
-        self._lbl_status.setStyleSheet(
-            "font-size:13px;padding:6px;background:#222;color:#aaa;")
+        self._video_path = self._vc.save_recording()
+        self._run_detection(count)
+
+    # ── 视频文件加载 ──
+
+    def _on_load_video(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择视频文件", "", "视频 (*.avi *.mp4 *.mkv *.mov);;所有文件 (*)")
+        if not path:
+            return
+        self._lbl_status.setText(f"加载视频: {Path(path).name} …")
         QApplication.processEvents()
 
-        self._video_path = self._vc.save_recording()
+        count = self._vc.load_video(path)
+        if count < 2:
+            self._lbl_status.setText("视频加载失败或无帧")
+            return
+        self._video_path = path
+        self._run_detection(count)
 
-        mode = "initial" if self._rb_init.isChecked() else "refine"
-        self.result_frame, self.result_holes = self._vc.detect_holes(mode=mode)
+    # ── 检测 ──
+
+    def _run_detection(self, count):
+        backend = self._selected_backend()
+
+        if backend in ("yolo", "yolo_temporal") and not self._vc.yolo_available:
+            self._lbl_status.setText(
+                f"{count} 帧 — YOLO 模型未加载, 请先选择 .pt 模型文件, 或切换到传统后端")
+            self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#332200;color:#ff8800;")
+            self._btn_open_video.setEnabled(self._video_path is not None)
+            self._update_paths()
+            return
+
+        self._lbl_status.setText(f"{count} 帧 — 使用 [{backend}] 检测中 …")
+        self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#222;color:#aaa;")
+        QApplication.processEvents()
+
+        self.result_frame, self.result_holes = self._vc.detect_holes(backend=backend)
 
         if not self.result_holes:
-            self._lbl_status.setText("未检测到弹孔，请重试 (换用另一模式 / 调整距离 / 重新射击)")
+            self._lbl_status.setText("未检测到弹孔 — 请换后端/调距离/换墙面重试")
             self._preview_label.setText("未检测到弹孔")
             self._hole_list.setHtml("<p style='color:#ff6666;'>无结果</p>")
             self._btn_open_video.setEnabled(self._video_path is not None)
@@ -1343,11 +1403,9 @@ class VideoCalibrationDialog(QDialog):
             return
 
         self._annotated_path = self._vc.save_annotated_frame(self.result_holes)
-        self._show_preview()
+        self._show_preview(backend)
 
-    def _show_preview(self):
-        """显示标注预览图和弹孔列表。"""
-        from calibration.video_calibrator import annotate_frame
+    def _show_preview(self, backend=""):
         ann = self._vc.get_annotated_frame(self.result_holes)
         if ann is not None:
             pm = _cv2_to_pixmap(ann)
@@ -1357,23 +1415,23 @@ class VideoCalibrationDialog(QDialog):
                 self._preview_label.setPixmap(scaled)
 
         n = len(self.result_holes)
-        html = f"<p style='color:#44cc44;'>检测到 <b>{n}</b> 个弹孔</p>"
+        html = f"<p style='color:#44cc44;'><b>{n}</b> 个弹孔 [{backend}]</p>"
         html += "<table style='border-collapse:collapse;font-size:12px;width:100%;'>"
-        html += "<tr style='background:#333;color:white;'><th>#</th><th>X</th><th>Y</th></tr>"
+        html += "<tr style='background:#333;color:white;'><th>#</th><th>X</th><th>Y</th><th>Conf</th></tr>"
         for h in sorted(self.result_holes, key=lambda x: x.get("shot_num", 0)):
             sn = h.get("shot_num", 0)
+            conf = h.get("confidence")
+            conf_str = f"{conf:.0%}" if conf is not None else "-"
             html += (f"<tr><td style='text-align:center;'>{sn}</td>"
                      f"<td style='text-align:center;'>{h['x']}</td>"
-                     f"<td style='text-align:center;'>{h['y']}</td></tr>")
+                     f"<td style='text-align:center;'>{h['y']}</td>"
+                     f"<td style='text-align:center;'>{conf_str}</td></tr>")
         html += "</table>"
         self._hole_list.setHtml(html)
 
-        mode_txt = "帧差分时序" if self._rb_init.isChecked() else "静态检测"
         self._lbl_status.setText(
-            f"检测完成 ({mode_txt}): {n} 个弹孔 — 点击「加载到主画布」审核调整")
-        self._lbl_status.setStyleSheet(
-            "font-size:13px;padding:6px;background:#223322;color:#66cc66;")
-
+            f"[{backend}] {n} 个弹孔 — 点击「加载到主画布」审核调整")
+        self._lbl_status.setStyleSheet("font-size:13px;padding:6px;background:#223322;color:#66cc66;")
         self._btn_load_canvas.setEnabled(True)
         self._btn_open_video.setEnabled(self._video_path is not None)
         self._update_paths()
@@ -1381,13 +1439,12 @@ class VideoCalibrationDialog(QDialog):
     def _update_paths(self):
         parts = []
         if self._video_path:
-            parts.append(f"录屏: {self._video_path}")
+            parts.append(f"视频: {self._video_path}")
         if self._annotated_path:
-            parts.append(f"标注图: {self._annotated_path}")
+            parts.append(f"标注: {self._annotated_path}")
         self._lbl_paths.setText("\n".join(parts))
 
     def _on_load_canvas(self):
-        """将检测结果传回主窗口 BulletCanvas，关闭对话框。"""
         if self.result_frame is not None and self.result_holes:
             self.accept()
 
