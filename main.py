@@ -32,6 +32,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.Init_UI_GunsData()  # 初始化枪械数据
         self.ResolutionSelect.setCurrentText(PC.Monitor)  # 设置分辨率选择
         self.Init_UI_Sensitivity()  # 初始化灵敏度
+        self.Init_UI_RecoilVersion()  # 初始化压枪版本选择
         self.Init_UI_Btn()  # 初始化按钮
         self.Init_UI_LOG("程序初始化完成.....")  # 初始化完成日志
         # 初始化 HUD 浮窗
@@ -43,6 +44,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.Pausebtn.clicked.connect(self.pause)  # 绑定暂停按钮事件
         self.ResolutionBtn.clicked.connect(self.Save_Config_Resolution)  # 绑定分辨率保存按钮事件
         self.SensitivityBtn.clicked.connect(self.Save_Config_Sensitivity)  # 绑定灵敏度保存按钮事件
+        self.RecoilVersionBtn.clicked.connect(self.Save_Config_RecoilVersion)  # 绑定压枪版本保存按钮事件
         self.OpenScope.clicked.connect(lambda: self.Btn_click("ScopeOpen", True))  # 绑定开镜按钮事件
         self.CloseScope.clicked.connect(lambda: self.Btn_click("ScopeOpen", False))  # 绑定关镜按钮事件
         self.TwoGuns.clicked.connect(lambda: self.Btn_click("Guns", 2))  # 绑定双枪按钮事件
@@ -187,7 +189,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
     
     def Save_Config_Resolution(self):  # 保存分辨率设置
         PC.Monitor = self.ResolutionSelect.currentText()  # 获取当前选择的分辨率
-        PC.save_config_data(True, PC.Monitor)  # 保存配置
+        PC.save_config_data('resolution', PC.Monitor)  # 保存配置
         self.message_Info("保存分辨率设置成功！！")  # 显示成功消息
     
     def Save_Config_Sensitivity(self):  # 保存灵敏度设置
@@ -200,9 +202,24 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         SensitivitySelect = self.SensitivitySelect.currentText()  # 获取当前选择的灵敏度类型
         Text = self.TextValue[SensitivitySelect]  # 获取文本值
         PC.ScopeData[Text] = SensitivityText  # 更新灵敏度数据
-        PC.save_config_data(0, PC.ScopeData)  # 保存配置
+        PC.save_config_data('sensitivity', PC.ScopeData)  # 保存配置
         self.message_Info("保存灵敏度设置成功！！")  # 显示成功消息
     
+    def Save_Config_RecoilVersion(self):  # 保存压枪版本设置
+        version_idx = self.RecoilVersionSelect.currentIndex()  # 获取当前选择索引
+        recoil_version = 3 if version_idx == 0 else 2  # 0=v3, 1=v2
+        PC.recoil_version = recoil_version  # 更新运行时版本
+        PC.save_config_data('recoil_version', recoil_version)  # 保存到配置文件
+        version_name = "v3 (Lua弹道+ABCD编码)" if recoil_version == 3 else "v2 (自校准+A*B*C*编码)"
+        self.message_Info(f"压枪版本已切换为 {version_name}，下次开火生效")  # 显示成功消息
+
+    def Init_UI_RecoilVersion(self):  # 初始化压枪版本选择
+        recoil_version = PC.recoil_version
+        if recoil_version == 3:
+            self.RecoilVersionSelect.setCurrentIndex(0)  # v3
+        else:
+            self.RecoilVersionSelect.setCurrentIndex(1)  # v2
+
     def message_Info(self, message, title="提示信息"):  # 显示消息框
         message_box = QMessageBox()  # 创建消息框
         message_box.setWindowTitle(title)  # 设置标题
