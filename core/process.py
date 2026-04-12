@@ -43,6 +43,9 @@ class ProcessClass:
         self.firstPerson = False # 是否第一人称
         self.shift_pressed = False  # 记录 Shift 键是否按下
         self.ScopeData = self.get_config_data('s')
+        self.ScopeFactorV3 = self.get_config_data('sf3')  # v3 倍镜系数
+        self.PostureV3 = self.get_config_data('p3')  # v3 姿态系数
+        self.GunRatioV3 = self.get_config_data('gr3')  # v3 独立压枪系数
         self.GunsName = None
         self.added = False
         self.op = OP()
@@ -64,6 +67,12 @@ class ProcessClass:
                 return Config_data['sensitivity']
             elif mode == 'v':
                 return Config_data.get('recoil_version', 3)  # 默认v3
+            elif mode == 'sf3':
+                return Config_data.get('scope_factor_v3', {})
+            elif mode == 'p3':
+                return Config_data.get('posture_v3', {})
+            elif mode == 'gr3':
+                return Config_data.get('gun_ratio_v3', {})
             elif mode == 'a':
                 return Config_data
 
@@ -75,6 +84,12 @@ class ProcessClass:
             save_data['sensitivity'] = data
         elif mode == 'recoil_version':
             save_data['recoil_version'] = data
+        elif mode == 'scope_factor_v3':
+            save_data['scope_factor_v3'] = data
+        elif mode == 'posture_v3':
+            save_data['posture_v3'] = data
+        elif mode == 'gun_ratio_v3':
+            save_data['gun_ratio_v3'] = data
         with open('./Config/config.json', "w", encoding='utf-8') as Config:
             Config.write(json.dumps(save_data))
 
@@ -380,16 +395,32 @@ class ProcessClass:
         if not y_array:
             return Emit("l", ("弹道数据为空",))
 
-        # gun_ratio: 每把枪的独立压枪系数（来自 Lua 脚本）
-        gun_ratio = gun.get("gun_ratio", 1.0)
+        # gun_ratio: 独立压枪系数
+        # 优先使用 config.json 的 gun_ratio_v3（用户可在UI调整），
+        # 否则使用 JSON 内的 gun_ratio（Lua 默认值）
+        weapon_name = gun.get("weapon", "")
+        if self.GunRatioV3 and weapon_name in self.GunRatioV3:
+            gun_ratio = self.GunRatioV3[weapon_name]
+        else:
+            gun_ratio = gun.get("gun_ratio", 1.0)
 
-        # scope_factor: 倍镜系数（来自 Lua 脚本的 ratiobj）
+        # scope_factor: 倍镜系数
+        # 优先使用 config.json 的 scope_factor_v3（用户可在UI调整），
+        # 否则使用 JSON 内的 scope_map（Lua 默认值），最后回退到 SCOPE_FACTOR
         scope_name = guns_info.get("Scope", "None").lower()
-        scope_factor = gun.get("scope_map", SCOPE_FACTOR).get(scope_name, 1.0)
+        if self.ScopeFactorV3 and scope_name in self.ScopeFactorV3:
+            scope_factor = self.ScopeFactorV3[scope_name]
+        else:
+            scope_factor = gun.get("scope_map", SCOPE_FACTOR).get(scope_name, 1.0)
 
-        # posture_factor: 姿态系数（来自 Lua 脚本的 dra/zhan）
+        # posture_factor: 姿态系数
+        # 优先使用 config.json 的 posture_v3（用户可在UI调整），
+        # 否则使用 JSON 内的 posture（Lua 默认值）
         posture_key = self.Current_posture.lower()
-        posture_factor = gun.get("posture", {}).get(posture_key, 1.0)
+        if self.PostureV3 and posture_key in self.PostureV3:
+            posture_factor = self.PostureV3[posture_key]
+        else:
+            posture_factor = gun.get("posture", {}).get(posture_key, 1.0)
 
         # tick_ms 和 has_variable_d
         tick_ms = gun.get("tick_ms", 28)

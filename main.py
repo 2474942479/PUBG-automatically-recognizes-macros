@@ -33,6 +33,8 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.ResolutionSelect.setCurrentText(PC.Monitor)  # 设置分辨率选择
         self.Init_UI_Sensitivity()  # 初始化灵敏度
         self.Init_UI_RecoilVersion()  # 初始化压枪版本选择
+        self.Init_UI_PostureV3()  # 初始化姿态系数
+        self.Init_UI_GunRatioV3()  # 初始化枪械系数
         self.Init_UI_Btn()  # 初始化按钮
         self.Init_UI_LOG("程序初始化完成.....")  # 初始化完成日志
         # 初始化 HUD 浮窗
@@ -45,6 +47,10 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.ResolutionBtn.clicked.connect(self.Save_Config_Resolution)  # 绑定分辨率保存按钮事件
         self.SensitivityBtn.clicked.connect(self.Save_Config_Sensitivity)  # 绑定灵敏度保存按钮事件
         self.RecoilVersionBtn.clicked.connect(self.Save_Config_RecoilVersion)  # 绑定压枪版本保存按钮事件
+        self.PostureBtn.clicked.connect(self.Save_Config_PostureV3)  # 绑定姿态系数保存按钮事件
+        self.PostureSelect.currentIndexChanged[int].connect(self.Change_Posture_label)  # 绑定姿态选择变化
+        self.GunRatioBtn.clicked.connect(self.Save_Config_GunRatioV3)  # 绑定枪械系数保存按钮事件
+        self.GunRatioSelect.currentIndexChanged[int].connect(self.Change_GunRatio_label)  # 绑定枪械选择变化
         self.OpenScope.clicked.connect(lambda: self.Btn_click("ScopeOpen", True))  # 绑定开镜按钮事件
         self.CloseScope.clicked.connect(lambda: self.Btn_click("ScopeOpen", False))  # 绑定关镜按钮事件
         self.TwoGuns.clicked.connect(lambda: self.Btn_click("Guns", 2))  # 绑定双枪按钮事件
@@ -184,7 +190,11 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
     
     def Change_Sensitivity_label(self, SelectValue):  # 更新灵敏度标签
         Text = self.TextValue  # 获取文本值映射
-        Select = PC.ScopeData.get(Text[SelectValue], '1')  # 获取灵敏度值
+        # 根据压枪版本选择不同数据源
+        if PC.recoil_version == 3:
+            Select = PC.ScopeFactorV3.get(Text[SelectValue], '1')  # v3: scope_factor
+        else:
+            Select = PC.ScopeData.get(Text[SelectValue], '1')  # v2: sensitivity
         self.SensitivityText.setText(str(Select))  # 设置灵敏度标签
     
     def Save_Config_Resolution(self):  # 保存分辨率设置
@@ -201,9 +211,17 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         
         SensitivitySelect = self.SensitivitySelect.currentText()  # 获取当前选择的灵敏度类型
         Text = self.TextValue[SensitivitySelect]  # 获取文本值
-        PC.ScopeData[Text] = SensitivityText  # 更新灵敏度数据
-        PC.save_config_data('sensitivity', PC.ScopeData)  # 保存配置
-        self.message_Info("保存灵敏度设置成功！！")  # 显示成功消息
+
+        if PC.recoil_version == 3:
+            # v3: 保存到 scope_factor_v3
+            PC.ScopeFactorV3[Text] = SensitivityText
+            PC.save_config_data('scope_factor_v3', PC.ScopeFactorV3)
+            self.message_Info("v3 倍镜系数保存成功！！")
+        else:
+            # v2: 保存到 sensitivity
+            PC.ScopeData[Text] = SensitivityText
+            PC.save_config_data('sensitivity', PC.ScopeData)
+            self.message_Info("v2 灵敏度保存成功！！")
     
     def Save_Config_RecoilVersion(self):  # 保存压枪版本设置
         version_idx = self.RecoilVersionSelect.currentIndex()  # 获取当前选择索引
@@ -211,6 +229,8 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         PC.recoil_version = recoil_version  # 更新运行时版本
         PC.save_config_data('recoil_version', recoil_version)  # 保存到配置文件
         version_name = "v3 (Lua弹道+ABCD编码)" if recoil_version == 3 else "v2 (自校准+A*B*C*编码)"
+        # 切换版本后刷新灵敏度显示
+        self.Change_Sensitivity_label(self.SensitivitySelect.currentText())
         self.message_Info(f"压枪版本已切换为 {version_name}，下次开火生效")  # 显示成功消息
 
     def Init_UI_RecoilVersion(self):  # 初始化压枪版本选择
@@ -219,6 +239,79 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
             self.RecoilVersionSelect.setCurrentIndex(0)  # v3
         else:
             self.RecoilVersionSelect.setCurrentIndex(1)  # v2
+
+    # ═══════════════════════════════════════════
+    # 姿态系数 (v3) 配置
+    # ═══════════════════════════════════════════
+
+    # 姿态名 → config key 映射
+    PostureKeyMap = {0: "c", 1: "z"}  # 0=蹲下, 1=趴下
+
+    def Init_UI_PostureV3(self):  # 初始化姿态系数显示
+        self.Change_Posture_label(self.PostureSelect.currentIndex())
+
+    def Change_Posture_label(self, idx):  # 更新姿态系数标签
+        key = self.PostureKeyMap.get(idx, "c")
+        value = PC.PostureV3.get(key, 1.0)
+        self.PostureText.setText(str(value))
+
+    def Save_Config_PostureV3(self):  # 保存姿态系数设置
+        PostureText = self.PostureText.text()  # 获取输入
+        PostureText = self.is_numeric(PostureText)  # 检查是否为数字
+        if not PostureText:
+            self.message_Info("输入框只能输入数字！！", '警告')
+            return
+        idx = self.PostureSelect.currentIndex()
+        key = self.PostureKeyMap.get(idx, "c")
+        PC.PostureV3[key] = PostureText
+        PC.save_config_data('posture_v3', PC.PostureV3)
+        posture_name = "蹲下" if key == "c" else "趴下"
+        self.message_Info(f"v3 姿态系数保存成功！{posture_name}={PostureText}")
+
+    # ═══════════════════════════════════════════
+    # 枪械独立压枪系数 (v3) 配置
+    # ═══════════════════════════════════════════
+
+    # 枪械中文名 → 武器文件名 映射
+    GUN_NAME_MAP = {
+        "AKM": "akm", "M762": "m762", "G36C": "g36c", "M416": "m416",
+        "SCAR-L": "scar-l", "QBZ": "qbz", "AUG": "aug", "Groza": "groza",
+        "ACE32": "ace32", "K2": "k2", "PP19": "pp19", "汤姆逊": "tangmuxunchongfengqiang",
+        "UMP45": "ump45", "UZI": "uzi", "Vector": "vector", "MP5K": "mp5k",
+        "P90": "p90", "JS9": "js9", "DP28": "dp28", "M249": "m249",
+        "MG3": "mg3", "MK14": "mk14", "FAMAS": "famas", "MP9": "mp9",
+        "VSS": "vss", "MK47": "mk47", "德拉贡诺夫": "delagongnuofu",
+        "QBU": "qbu", "MK12": "mk12", "Mini14": "mini14", "SKS": "sks",
+        "自动装填": "zidongzhuangtianbuqiang",
+    }
+
+    def Init_UI_GunRatioV3(self):  # 初始化枪械系数
+        # 填充下拉框
+        self.GunRatioSelect.clear()
+        for cn_name in self.GUN_NAME_MAP:
+            self.GunRatioSelect.addItem(cn_name)
+        self.Change_GunRatio_label(self.GunRatioSelect.currentIndex())
+
+    def Change_GunRatio_label(self, idx):  # 更新枪械系数标签
+        cn_name = self.GunRatioSelect.currentText()
+        weapon_key = self.GUN_NAME_MAP.get(cn_name, "")
+        value = PC.GunRatioV3.get(weapon_key, 1.0)
+        self.GunRatioText.setText(str(value))
+
+    def Save_Config_GunRatioV3(self):  # 保存枪械系数设置
+        GunRatioText = self.GunRatioText.text()  # 获取输入
+        GunRatioText = self.is_numeric(GunRatioText)  # 检查是否为数字
+        if not GunRatioText:
+            self.message_Info("输入框只能输入数字！！", '警告')
+            return
+        cn_name = self.GunRatioSelect.currentText()
+        weapon_key = self.GUN_NAME_MAP.get(cn_name, "")
+        if not weapon_key:
+            self.message_Info("未选择枪械！！", '警告')
+            return
+        PC.GunRatioV3[weapon_key] = GunRatioText
+        PC.save_config_data('gun_ratio_v3', PC.GunRatioV3)
+        self.message_Info(f"v3 枪械系数保存成功！{cn_name}={GunRatioText}")
 
     def message_Info(self, message, title="提示信息"):  # 显示消息框
         message_box = QMessageBox()  # 创建消息框
