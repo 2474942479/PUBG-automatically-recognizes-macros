@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+    # -*- coding: utf-8 -*-
 """游戏内 HUD 悬浮窗 — 三档可切换 + 可配置 + 可拖动
 用法：from ui.overlay_hud import GameHUD; hud = GameHUD(PC); hud.show_hud()
 Tab  → 临时隐藏/恢复（配合背包识别）
@@ -185,8 +185,8 @@ def _attach_cn(name):
     return ATTACH_CN.get(str(name).lower(), str(name))
 
 
-MODE_MINIMAL, MODE_COMPACT, MODE_FULL = 0, 1, 2
-_MODE_NAMES = {MODE_MINIMAL: 'minimal', MODE_COMPACT: 'compact', MODE_FULL: 'full'}
+MODE_MINIMAL, MODE_COMPACT, MODE_FULL, MODE_BAR = 0, 1, 2, 3
+_MODE_NAMES = {MODE_MINIMAL: 'minimal', MODE_COMPACT: 'compact', MODE_FULL: 'full', MODE_BAR: 'bar'}
 
 
 class _KeyListener(QThread):
@@ -227,9 +227,9 @@ class _KeyListener(QThread):
 
 
 class GameHUD(QWidget):
-    """三档游戏内 HUD — 可配置/可拖动
+    """四档游戏内 HUD — 可配置/可拖动
     Tab  = 临时隐藏/恢复（背包识别期间不挡视线）
-    F9   = 极简 → 紧凑 → 完整 → 极简
+    F9   = 极简 → 紧凑 → 横向白色 → 完整 → 极简
     F10  = 切换拖动模式（拖动改位置后自动保存到配置）
     """
 
@@ -238,7 +238,7 @@ class GameHUD(QWidget):
         self._pc = pc
         self._cfg = _load_config()
         self._mode = {'minimal': MODE_MINIMAL, 'compact': MODE_COMPACT,
-                      'full': MODE_FULL}.get(self._cfg.get('default_mode', 'minimal'), MODE_MINIMAL)
+                      'full': MODE_FULL, 'bar': MODE_BAR}.get(self._cfg.get('default_mode', 'minimal'), MODE_MINIMAL)
         self._visible = True
         self._tab_hidden = False
         self._drag_mode = False
@@ -290,15 +290,38 @@ class GameHUD(QWidget):
 
     def _position_from_config(self):
         pos = self._cfg.get('position', {})
-        x = pos.get('x', -1)
-        y = pos.get('y', 20)
-
+        anchor = pos.get('anchor', 'custom')
         scr = QApplication.primaryScreen()
-        if scr and x < 0:
-            g = scr.geometry()
+        
+        if not scr:
+            return
+            
+        g = scr.geometry()
+        hud_w, hud_h = self.width(), self.height()
+        
+        # 根据锚点计算位置
+        if anchor == 'bottom_left':
+            margin_left = pos.get('margin_left', 20)
+            margin_bottom = pos.get('margin_bottom', 30)
+            x = margin_left
+            y = g.height() - hud_h - margin_bottom
+        elif anchor == 'top-right':
             margin_r = pos.get('margin_right', 20)
-            x = g.width() - self.width() - margin_r
-
+            x = g.width() - hud_w - margin_r
+            y = pos.get('y', 20)
+        elif anchor == 'custom':
+            # 自定义绝对位置（拖动后保存的位置）
+            x = pos.get('x', -1)
+            y = pos.get('y', 20)
+            if x < 0:
+                margin_r = pos.get('margin_right', 20)
+                x = g.width() - hud_w - margin_r
+        else:
+            # 默认右上角
+            margin_r = pos.get('margin_right', 20)
+            x = g.width() - hud_w - margin_r
+            y = pos.get('y', 20)
+        
         self.move(x, y)
         if not self._drag_mode:
             _make_click_through(int(self.winId()))
@@ -328,15 +351,27 @@ class GameHUD(QWidget):
     def _on_mode_switch(self):
         if not self._visible:
             return
-        self._mode = (self._mode + 1) % 3
+        self._mode = (self._mode + 1) % 4
         self._apply_size()
+        
+        # 根据锚点重新定位
         pos = self._cfg.get('position', {})
-        if pos.get('anchor') == 'top-right':
-            scr = QApplication.primaryScreen()
-            if scr:
-                g = scr.geometry()
+        anchor = pos.get('anchor', 'custom')
+        scr = QApplication.primaryScreen()
+        if scr:
+            g = scr.geometry()
+            hud_w, hud_h = self.width(), self.height()
+            
+            if anchor == 'bottom_left':
+                margin_left = pos.get('margin_left', 20)
+                margin_bottom = pos.get('margin_bottom', 30)
+                x = margin_left
+                y = g.height() - hud_h - margin_bottom
+                self.move(x, y)
+            elif anchor == 'top-right':
                 margin_r = pos.get('margin_right', 20)
-                self.move(g.width() - self.width() - margin_r, self.y())
+                self.move(g.width() - hud_w - margin_r, self.y())
+        
         self.update()
 
     def _on_drag_toggle(self):
@@ -394,6 +429,8 @@ class GameHUD(QWidget):
             self._paint_minimal(p)
         elif self._mode == MODE_COMPACT:
             self._paint_compact(p)
+        elif self._mode == MODE_BAR:
+            self._paint_bar(p)
         else:
             self._paint_full(p)
         p.end()
@@ -451,6 +488,96 @@ class GameHUD(QWidget):
         hint_font = self._font('hint')
         p.setFont(hint_font)
         p.setPen(QPen(self._COL_DIM))
+        mode_key = self._cfg.get('hotkey_mode_switch', 'F9')
+        hint = f'拖动中' if self._drag_mode else f'{mode_key}切换'
+        p.drawText(w - QFontMetrics(hint_font).horizontalAdvance(hint) - 8, 20, hint)
+
+    def _paint_bar(self, p):
+        """横向白色模式 - 显示枪械名字、姿势和配件信息，白色字体，无背景无边框"""
+        pc = self._pc
+        w, h = self.width(), self.height()
+
+        # 不绘制背景，直接绘制文字
+
+        gun, slot = self._get_current_gun()
+        posture = POSTURE_CN.get(pc.Current_posture, '站')
+        
+        # 获取枪械信息
+        gun_name = _gun_cn(gun.get('Name')) if gun else '—'
+        scope = _scope_cn(gun.get('Scope')) if gun else '—'
+        muzzle = _attach_cn(gun.get('Muzzle')) if gun else '—'
+        grip = _attach_cn(gun.get('Grip')) if gun else '—'
+        stock = _attach_cn(gun.get('Stock')) if gun else '—'
+
+        font = self._font('minimal', QFont.Bold)
+        p.setFont(font)
+        fm = QFontMetrics(font)
+
+        x = 10
+        # 枪械名字 - 金色
+        p.setPen(QPen(self._COL_GOLD))
+        p.drawText(x, 20, gun_name)
+        x += fm.horizontalAdvance(gun_name) + 8
+        
+        # 分隔符
+        p.setPen(QPen(QColor(255, 255, 255, 100)))
+        p.drawText(x, 20, '|')
+        x += 12
+
+        # 姿势 - 白色
+        p.setPen(QPen(self._COL_WHITE))
+        p.drawText(x, 20, posture)
+        x += fm.horizontalAdvance(posture) + 8
+
+        # 分隔符
+        p.setPen(QPen(QColor(255, 255, 255, 100)))
+        p.drawText(x, 20, '|')
+        x += 12
+
+        # 瞄具
+        scope_color = self._COL_GREEN if (gun and gun.get('Scope', 'none').lower() != 'none') else self._COL_WHITE
+        p.setPen(QPen(scope_color))
+        p.drawText(x, 20, scope)
+        x += fm.horizontalAdvance(scope) + 6
+
+        # 枪口
+        if gun and gun.get('Muzzle', 'none').lower() != 'none':
+            p.setPen(QPen(QColor(255, 255, 255, 100)))
+            p.drawText(x, 20, '|')
+            x += 12
+            p.setPen(QPen(self._COL_WHITE))
+            p.drawText(x, 20, muzzle)
+            x += fm.horizontalAdvance(muzzle) + 6
+
+        # 握把
+        if gun and gun.get('Grip', 'none').lower() != 'none':
+            p.setPen(QPen(QColor(255, 255, 255, 100)))
+            p.drawText(x, 20, '|')
+            x += 12
+            p.setPen(QPen(self._COL_WHITE))
+            p.drawText(x, 20, grip)
+            x += fm.horizontalAdvance(grip) + 6
+
+        # 枪托
+        if gun and gun.get('Stock', 'none').lower() != 'none':
+            p.setPen(QPen(QColor(255, 255, 255, 100)))
+            p.drawText(x, 20, '|')
+            x += 12
+            p.setPen(QPen(self._COL_WHITE))
+            p.drawText(x, 20, stock)
+            x += fm.horizontalAdvance(stock) + 6
+
+        # 开镜状态
+        p.setPen(QPen(QColor(255, 255, 255, 100)))
+        p.drawText(x, 20, '|')
+        x += 12
+        p.setPen(QPen(self._COL_GREEN if pc.StartFire else self._COL_WHITE))
+        p.drawText(x, 20, '开镜' if pc.StartFire else '未开镜')
+
+        # 提示文字
+        hint_font = self._font('hint')
+        p.setFont(hint_font)
+        p.setPen(QPen(QColor(255, 255, 255, 120)))
         mode_key = self._cfg.get('hotkey_mode_switch', 'F9')
         hint = f'拖动中' if self._drag_mode else f'{mode_key}切换'
         p.drawText(w - QFontMetrics(hint_font).horizontalAdvance(hint) - 8, 20, hint)
@@ -636,7 +763,7 @@ class GameHUD(QWidget):
         self._tab_hidden = False
         default_mode = self._cfg.get('default_mode', 'minimal')
         self._mode = {'minimal': MODE_MINIMAL, 'compact': MODE_COMPACT,
-                      'full': MODE_FULL}.get(default_mode, MODE_MINIMAL)
+                      'full': MODE_FULL, 'bar': MODE_BAR}.get(default_mode, MODE_MINIMAL)
         self._apply_size()
         self._position_from_config()
         self.show()
