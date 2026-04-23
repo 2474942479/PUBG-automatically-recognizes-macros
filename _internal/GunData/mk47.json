@@ -17,7 +17,9 @@
         "renchengxiang4bei": 4.0,
         "6bei": 5.76,
         "8bei": 5.76,
-        "15bei": 5.76
+        "15bei": 5.76,
+        "duobei1": 1.0,
+        "duobei4": 5.76
     },
     "posture": {
         "none": 1.0,

@@ -14,9 +14,12 @@ from ui.pubg_ui import Ui_PUBG
 from input.mouse_listener import AppMainMouseListener
 from input.key_listener import AppMainKeyListener
 from ui.overlay_hud import GameHUD
+from ui.roi_config_dialog import ROIConfigDialog
+from data.resolution_setting import RESOLUTION_SETTINGS
 
 VERSION = "1.0.0"
 logger = logging.getLogger(__name__)
+PC = None  # 全局 ProcessClass 实例
 
 
 def setup_logging():
@@ -32,8 +35,12 @@ def setup_logging():
         '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     ))
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.INFO)  # ✅ 默认 INFO 级别
     root.addHandler(handler)
+    
+    # ✅ 全局 Debug 开关（可通过 F11 切换）
+    global DEBUG_MODE
+    DEBUG_MODE = False
 
 
 def setup_exception_handler():
@@ -55,6 +62,36 @@ def setup_exception_handler():
         msg.exec_()
     sys.excepthook = handler
 
+
+def toggle_debug_mode():
+    """
+    切换 Debug 模式（通过 F11 键）
+    """
+    global DEBUG_MODE
+    DEBUG_MODE = not DEBUG_MODE
+    
+    root = logging.getLogger()
+    if DEBUG_MODE:
+        root.setLevel(logging.DEBUG)
+        logger.info("✅ Debug 模式已开启 - 将显示详细日志")
+        # ✅ 更新 UI 显示
+        try:
+            from core.process import PC as ProcessPC
+            if hasattr(ProcessPC, '_ui_log_callback') and ProcessPC._ui_log_callback:
+                ProcessPC._ui_log_callback("📝 Debug 模式: ON (F11 关闭)")
+        except Exception:
+            pass
+    else:
+        root.setLevel(logging.INFO)
+        logger.info("ℹ️  Debug 模式已关闭 - 仅显示重要信息")
+        # ✅ 更新 UI 显示
+        try:
+            from core.process import PC as ProcessPC
+            if hasattr(ProcessPC, '_ui_log_callback') and ProcessPC._ui_log_callback:
+                ProcessPC._ui_log_callback("📝 Debug 模式: OFF (F11 开启)")
+        except Exception:
+            pass
+
 class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidget和UI类
     def __init__(self):  # 初始化方法
         super().__init__()  # 调用父类的初始化方法
@@ -63,7 +100,14 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.my_key_thread = None  # 初始化键盘线程
         self.pauses = True  # 初始化暂停状态
         self.TextValue = {'无': 'none', '红点': 'hongdian', '全息': "quanxi", '2倍': '2bei',  # 定义文本值映射
-                          '3倍': '3bei', '4倍': "4bei", '6倍': '6bei', '8倍': '8bei', '15倍': '15bei', 'shift': 'shift'}
+                          '3倍': '3bei', '4倍': "4bei", '6倍': '6bei', '8倍': '8bei', '15倍': '15bei',
+                          '多倍低': 'duobei1', '多倍高': 'duobei4',
+                          '红点(Shift)': 'hongdian_shift', '全息(Shift)': 'quanxi_shift',
+                          '多倍低(Shift)': 'duobei1_shift', '2倍(Shift)': '2bei_shift',
+                          '3倍(Shift)': '3bei_shift', '4倍(Shift)': '4bei_shift',
+                          '多倍高(Shift)': 'duobei4_shift', '6倍(Shift)': '6bei_shift',
+                          '8倍(Shift)': '8bei_shift', '15倍(Shift)': '15bei_shift',
+                          'shift': 'shift'}
         self.init_ui()  # 调用初始化UI方法
 
     def init_ui(self):
@@ -92,12 +136,17 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.Init_UI_GunRatioV3()
         self.Init_UI_Btn()
         self.Init_UI_LOG("程序初始化完成")
+        
+        # ═══ 设置 UI 日志回调 ═══
+        PC._ui_log_callback = self.Init_UI_LOG
+        
         self._hud = GameHUD(PC)
     
     def Init_UI_Btn(self):  # 初始化按钮事件
         self.Startbtn.clicked.connect(self.start)  # 绑定开始按钮事件
         self.Stopbtn.clicked.connect(self.stop)  # 绑定停止按钮事件
         self.Pausebtn.clicked.connect(self.pause)  # 绑定暂停按钮事件
+        self.ROIConfigBtn.clicked.connect(self.open_roi_config)  # 绑定 ROI 配置按钮事件
         self.ResolutionBtn.clicked.connect(self.Save_Config_Resolution)  # 绑定分辨率保存按钮事件
         self.SensitivityBtn.clicked.connect(self.Save_Config_Sensitivity)  # 绑定灵敏度保存按钮事件
         self.PostureBtn.clicked.connect(self.Save_Config_PostureV3)  # 绑定姿态系数保存按钮事件
@@ -199,10 +248,13 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         修改UI当前是否开镜数据
         :param Open: 是否开镜数据
         """
+        # ✅ 修复：必须同时设置两个按钮的状态，确保互斥
         if Open:  # 如果开镜
-            self.OpenScope.setChecked(True)  # 设置开镜按钮选中
+            self.OpenScope.setChecked(True)   # 设置开镜按钮选中
+            self.CloseScope.setChecked(False)  # ✅ 取消关镜按钮选中
         else:  # 如果不开镜
-            self.CloseScope.setChecked(True)  # 设置关镜按钮选中
+            self.OpenScope.setChecked(False)   # ✅ 取消开镜按钮选中
+            self.CloseScope.setChecked(True)   # 设置关镜按钮选中
 
     def Init_UI_firstPerson(self, model):
         if model:  # 如果是第一人称
@@ -219,12 +271,21 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         """
         results = PC.get_guns_result()  # 获取枪械识别结果
         for idx, result in enumerate(results, start=1):  # 遍历结果
-            if result:  # 如果有结果
-                self.__getattribute__(f"Name{idx}Name").setText(self.Get_GUNS_CH(result["Name"], "Name"))  # 设置枪械名称
-                self.__getattribute__(f"Scope{idx}Name").setText(self.Get_GUNS_CH(result["Scope"], "Scope"))  # 设置镜类型
-                self.__getattribute__(f"Muzzle{idx}Name").setText(self.Get_GUNS_CH(result["Muzzle"], "Muzzle"))  # 设置枪口类型
-                self.__getattribute__(f"Grip{idx}Name").setText(self.Get_GUNS_CH(result["Grip"], "Grip"))  # 设置握把类型
-                self.__getattribute__(f"Butt{idx}Name").setText(self.Get_GUNS_CH(result["Stock"], "Stock"))  # 设置枪托类型
+            # ✅ 修复：只要 result 不是 None 就更新 UI（包括包含 "None" 值的字典）
+            if result is not None:  # 如果有结果（即使是空状态）
+                self.__getattribute__(f"Name{idx}Name").setText(self.Get_GUNS_CH(result.get("Name", "None"), "Name"))  # 设置枪械名称
+                
+                # ✅ 修复：使用 get_current_scope() 获取正确的倍镜模式（支持双模式切换）
+                # 临时保存当前枪械槽位，让 get_current_scope() 知道查询哪把枪
+                old_firearms = PC.Current_firearms
+                PC.Current_firearms = idx
+                scope_name = PC.get_current_scope()
+                PC.Current_firearms = old_firearms
+                
+                self.__getattribute__(f"Scope{idx}Name").setText(self.Get_GUNS_CH(scope_name, "Scope"))  # 设置镜类型
+                self.__getattribute__(f"Muzzle{idx}Name").setText(self.Get_GUNS_CH(result.get("Muzzle", "none"), "Muzzle"))  # 设置枪口类型
+                self.__getattribute__(f"Grip{idx}Name").setText(self.Get_GUNS_CH(result.get("Grip", "none"), "Grip"))  # 设置握把类型
+                self.__getattribute__(f"Butt{idx}Name").setText(self.Get_GUNS_CH(result.get("Stock", "none"), "Stock"))  # 设置枪托类型
     
     def Init_UI_Sensitivity(self):  # 初始化UI灵敏度
         SelectValue = self.SensitivitySelect.currentText()  # 获取当前选择的灵敏度
@@ -358,11 +419,18 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
     def start(self):  # 开始程序
         self.my_key_thread = AppMainKeyListener(PC)  # 创建键盘监听线程
         self.my_mouse_thread = AppMainMouseListener(PC)  # 创建鼠标监听线程
+        
+        # 设置键盘监听器引用，用于Alt+右键检测
+        self.my_mouse_thread.key_listener = self.my_key_thread
+        # 设置鼠标监听器引用，用于调试模式切换
+        PC.mouse_listener = self.my_mouse_thread
+        
         self.my_key_thread.start()  # 启动键盘监听线程
         self.my_mouse_thread.start()  # 启动鼠标监听线程
         
         self.my_key_thread.keyInfo.connect(self.onKeyPressed)  # 绑定键盘事件
         self.my_mouse_thread.mouseClicked.connect(self.onKeyPressed)  # 绑定鼠标事件
+        self.my_key_thread.roi_config_requested.connect(self.open_roi_config)  # 绑定 ROI 配置快捷键
         
         self.SetStatus()  # 设置状态
         self.StatusInfo.setText('程序运行中.....')  # 更新状态信息
@@ -418,6 +486,117 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         action, args = actions.get(key, (None, None))  # 获取事件处理函数和参数
         if action:  # 如果有处理函数
             action(*args)  # 调用处理函数
+    
+    def open_roi_config(self):
+        """打开 ROI 配置对话框"""
+        try:
+            resolution = PC.Monitor
+            
+            # 获取当前分辨率的所有 ROI 配置
+            current_rois = {}
+            if resolution in RESOLUTION_SETTINGS:
+                current_rois = RESOLUTION_SETTINGS[resolution].copy()
+            
+            # 创建对话框
+            dialog = ROIConfigDialog(resolution, current_rois, self)
+            
+            # 连接保存信号
+            dialog.roi_saved.connect(self._on_roi_saved)
+            
+            # 显示对话框
+            dialog.exec_()
+            
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            logger.error(f"打开 ROI 配置失败: {error_msg}")
+            QMessageBox.critical(self, "错误", f"打开 ROI 配置失败:\n{e}")
+    
+    def _on_roi_saved(self, roi_type, roi_coords):
+        """ROI 保存成功回调"""
+        try:
+            resolution = PC.Monitor
+            
+            # 更新内存中的配置
+            if resolution not in RESOLUTION_SETTINGS:
+                RESOLUTION_SETTINGS[resolution] = {}
+            
+            RESOLUTION_SETTINGS[resolution][roi_type] = list(roi_coords)
+            
+            # 如果是姿势 ROI，同时更新 ProcessClass
+            if roi_type == 'posture_roi':
+                PC.posture_roi = roi_coords
+                logger.info(f"姿势识别 ROI 已更新: {roi_coords}")
+            
+            # 保存到文件
+            self._save_resolution_setting_file()
+            
+            # 显示提示
+            roi_names = {
+                'posture_roi': '姿势识别',
+                'Name_1': '1号枪-名称',
+                'Scope_1': '1号枪-倍镜',
+                'Muzzle_1': '1号枪-枪口',
+                'Grip_1': '1号枪-握把',
+                'Stock_1': '1号枪-枪托',
+                'Name_2': '2号枪-名称',
+                'Scope_2': '2号枪-倍镜',
+                'Muzzle_2': '2号枪-枪口',
+                'Grip_2': '2号枪-握把',
+                'Stock_2': '2号枪-枪托',
+            }
+            roi_name = roi_names.get(roi_type, roi_type)
+            self.Init_UI_LOG(f"✅ {roi_name} ROI 已保存: {roi_coords}")
+            
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            logger.error(f"保存 ROI 失败: {error_msg}")
+            QMessageBox.critical(self, "错误", f"保存 ROI 失败:\n{e}")
+    
+    def _save_resolution_setting_file(self):
+        """保存 resolution_setting.py 文件"""
+        import os
+        import re
+        
+        setting_file = res_path('data', 'resolution_setting.py')
+        
+        try:
+            # 读取原文件
+            with open(setting_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 为每个分辨率生成新的字典内容
+            resolution = PC.Monitor
+            if resolution in RESOLUTION_SETTINGS:
+                # 构建新的分辨率配置字符串
+                new_config = self._build_resolution_config(resolution, RESOLUTION_SETTINGS[resolution])
+                
+                # 使用正则表达式替换对应分辨率的配置
+                pattern = rf"('{resolution}'\s*:\s*\{{)[^}}]*(\}},?)"
+                replacement = f"\\1\n{new_config}\n    \\2"
+                new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+                
+                if new_content != content:
+                    with open(setting_file, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                    logger.info(f"配置文件已更新: {setting_file}")
+                else:
+                    logger.warning("未能更新配置文件，请手动检查")
+        
+        except Exception as e:
+            logger.error(f"保存配置文件失败: {e}")
+            raise
+    
+    def _build_resolution_config(self, resolution, config_dict):
+        """构建分辨率配置字符串"""
+        lines = []
+        for key, value in config_dict.items():
+            if isinstance(value, (list, tuple)):
+                lines.append(f"        '{key}': {list(value)},")
+            else:
+                lines.append(f"        '{key}': {value},")
+        return '\n'.join(lines)
 
 if __name__ == '__main__':
     setup_logging()

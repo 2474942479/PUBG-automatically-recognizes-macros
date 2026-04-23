@@ -1,70 +1,177 @@
 from threading import Thread  # 导入线程模块，用于多线程操作
 from PyQt5.QtCore import QThread, pyqtSignal  # 导入PyQt5的线程和信号模块
-from pynput import keyboard  # 导入pynput键盘模块，用于监听键盘事件
-from pynput.keyboard import Key  # 导入pynput键盘模块中的Key类，用于处理特殊按键
+import keyboard  # 导入keyboard库，用于全局键盘事件监听
+import logging  # 导入日志模块
+
+logger = logging.getLogger(__name__)  # 创建 logger 实例
 
 class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThread
     keyInfo = pyqtSignal(str, tuple)  # 定义信号，用于发送键盘事件信息
+    roi_config_requested = pyqtSignal()  # 定义信号，用于请求打开 ROI 配置
 
     def __init__(self, PCdata):  # 初始化方法
         super().__init__()  # 调用父类的初始化方法
         self.KeyHook = None  # 初始化键盘钩子
         self.PC = PCdata  # 保存PC对象引用
+        self.alt_pressed = False  # Alt键状态标记
 
-    def on_key_pressed(self, key):  # 键盘按下事件处理方法
-        Keys = str(key.name if isinstance(key, Key) else key.char)  # 获取按键名称
+    def on_key_pressed(self, event):  # 键盘按下事件处理方法
+        try:
+            Keys = event.name  # 获取按键名称
+            if Keys:
+                Keys = Keys.lower()  # 统一转换为小写，避免 Shift 导致的大小写问题
+        except Exception:
+            return
+        
+        if not Keys:
+            return
+        
+        # 只处理必要的按键，其他按键立即返回
+        # ✅ 添加 Tab 键防抖，避免快速切换导致状态混乱
         if Keys == "tab":  # 如果按下Tab键
+            import time
+            current_time = time.time()
+            
+            # 检查是否在防抖时间内（500ms）
+            if hasattr(self, '_last_tab_time') and (current_time - self._last_tab_time) < 0.5:
+                logger.debug(f"Tab 键防抖：忽略过快点击")
+                return  # 忽略过快的点击
+            
+            self._last_tab_time = current_time
+            
+            # 切换背包状态
+            self.PC.TabKey = not self.PC.TabKey
+            
+            if self.PC.TabKey:
+                # 第一次按 Tab：打开背包，进行识别
+                self.PC.StartFire = False  # 设置开镜状态为False
+                self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
+                self.keyInfo.emit('l', ("📦 背包已打开，等待UI渲染...",))
+                
+                # ✅ 先清空旧数据，再启动识别
+                self.PC._Result1 = {"Name": "None", "Scope": "none", "Muzzle": "none", "Grip": "none", "Stock": "none"}
+                self.PC._Result2 = {"Name": "None", "Scope": "none", "Muzzle": "none", "Grip": "none", "Stock": "none"}
+                self.keyInfo.emit('g', (None,))  # 触发 UI 刷新显示空状态
+                
+                # ✅ 启动识别线程，线程内部会等待游戏UI渲染完成
+                Thread(target=self.PC.recognize_all_guns_info, args=(self.keyInfo.emit,)).start()
+            else:
+                # 第二次按 Tab：关闭背包，✅ 不清空识别结果，保留已识别的枪械信息
+                self.keyInfo.emit('l', ("📦 背包已关闭",))
+        elif Keys in "12!@":  # 如果按下1、2或Shift+1(!)、Shift+2(@)
+            # 将特殊符号映射回数字
+            key_map = {'!': '1', '@': '2'}
+            actual_key = key_map.get(Keys, Keys)
             self.PC.StartFire = False  # 设置开镜状态为False
-            Thread(target=self.PC.recognize_all_guns_info, args=(self.keyInfo.emit,)).start()  # 启动枪械识别线程
             self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
-        elif Keys in "12":  # 如果按下1或2键
-            self.PC.StartFire = False  # 设置开镜状态为False
-            self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
-            self.PC.Change_firearms(Keys)  # 更改枪械
+            self.PC.Change_firearms(actual_key)  # 更改枪械
             self.keyInfo.emit('e', (self.PC.Current_firearms,))  # 发送枪械信息信号
-        elif Keys in "345gx":  # 如果按下3、4、5、g或x键
+        elif Keys in "345gx#$":  # 如果按下3、4、5、g、x或Shift+3(#)、Shift+4($)
             self.PC.StartFire = False  # 设置开镜状态为False
             self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
-        elif Keys in "~":  # 如果按下波浪号键
+        elif Keys in "~`":  # 如果按下波浪号键（包括Shift+`）
             self.PC.StartFire = False  # 设置开镜状态为False
             self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
         elif Keys in "zc" or Keys == "space":  # 如果按下z、c或空格键
             self.PC.Change_posture(Keys)  # 更改姿态
             self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
-        elif Keys in "v":  # 切换视角
+        elif Keys == "v":  # 切换视角
             self.PC.firstPerson = not self.PC.firstPerson  # 更改视角
             self.keyInfo.emit('v', (self.PC.firstPerson,))  # 发送视角信息信号
         elif Keys == "insert":  # 如果按下Insert键
             self.PC.reduction_data()  # 重置数据
             self.keyInfo.emit('c', (None,))  # 发送重置数据信号
+            self.keyInfo.emit('l', ("🔄 已重置所有状态（包括背包关闭）",))
+        elif Keys == "delete":  # 如果按下Delete键
+            # 只重置双模式倍镜状态，不影响其他设置
+            self.PC.reset_duobei_scope()
+            self.keyInfo.emit('l', ("倍镜模式已重置为默认(低倍)",))
         elif Keys == "home":  # 如果按下Home键
             self.keyInfo.emit('t', (None,))  # 发送切换窗口信号
+        elif Keys == "f8":  # 如果按下F8键
+            self.roi_config_requested.emit()  # 发送 ROI 配置请求信号
+        elif Keys == "f9":  # 如果按下F9键
+            # 切换姿势识别调试模式
+            if hasattr(self.PC, 'mouse_listener') and self.PC.mouse_listener:
+                self.PC.mouse_listener.debug_mode = not self.PC.mouse_listener.debug_mode
+                mode_str = "开启" if self.PC.mouse_listener.debug_mode else "关闭"
+                self.keyInfo.emit('l', (f"🔧 姿势识别调试模式已{mode_str}（截图保存在 logs/posture_debug/）",))
+                
+                # 如果开启调试模式，立即执行一次姿势识别测试
+                if self.PC.mouse_listener.debug_mode:
+                    Thread(target=self._test_posture_recognition).start()
+        elif Keys == "f11":  # ✅ 如果按下F11键 - 切换 Debug 日志模式
+            try:
+                from main import toggle_debug_mode
+                toggle_debug_mode()
+                # 获取当前日志级别
+                import logging
+                root = logging.getLogger()
+                level_name = "DEBUG" if root.level == logging.DEBUG else "INFO"
+                self.keyInfo.emit('l', (f"📝 日志级别: {level_name}",))
+            except Exception as e:
+                self.keyInfo.emit('l', (f"⚠️ 切换日志级别失败: {e}",))
         elif Keys == "ctrl_l":  # 如果按下左Ctrl键
             self.PC.Current_posture = "c"  # 设置姿态为趴下
             self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
-        elif Keys == "shift":  # 如果按下Shift键
-            self.PC.on_shift_pressed()  # 处理Shift按下事件
-            self.keyInfo.emit('e', (self.PC.Current_firearms,))  # 发送枪械信息信号
+        elif Keys in ("alt_l", "alt_r"):  # 如果按下Alt键
+            self.alt_pressed = True  # 标记Alt键按下
 
-    def on_key_release(self, key):  # 键盘释放事件处理方法
-        Keys = str(key.name if isinstance(key, Key) else key.char)  # 获取按键名称
+    def _test_posture_recognition(self):
+        """
+        测试姿势识别（在独立线程中执行）
+        """
+        import time
+        time.sleep(0.5)  # 稍微延迟，让用户准备好
+        
+        try:
+            # 执行姿势识别（调试模式会自动保存截图）
+            posture = self.PC.capture_and_recognize_posture(debug=True)
+            
+            if posture:
+                mode_name = {"None": "站立", "c": "蹲下", "z": "趴下"}.get(posture, "未知")
+                self.keyInfo.emit('l', (f"✅ 姿势识别测试成功: {mode_name}",))
+                self.keyInfo.emit('p', (posture,))
+            else:
+                self.keyInfo.emit('l', ("⚠️ 姿势识别测试失败，请查看 logs/posture_debug/ 目录中的截图",))
+        except Exception as e:
+            self.keyInfo.emit('l', (f"❌ 姿势识别测试异常: {e}",))
+
+    def on_key_release(self, event):  # 键盘释放事件处理方法
+        try:
+            Keys = event.name  # 获取按键名称
+        except:
+            return
+        
+        if not Keys:
+            return
         if Keys == "ctrl_l":  # 如果释放左Ctrl键
             self.PC.Current_posture = "None"  # 设置姿态为站立
             self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
-        elif Keys == "shift":  # 如果释放Shift键
-            self.PC.on_shift_released()  # 处理Shift释放事件
-            self.keyInfo.emit('e', (self.PC.Current_firearms,))  # 发送枪械信息信号
+        elif Keys == "alt_l" or Keys == "alt_r":  # 如果释放Alt键
+            self.alt_pressed = False  # 标记Alt键释放
 
     def run(self):  # 线程运行方法
         self.rerun()  # 调用rerun方法
 
     def rerun(self):  # 重新启动键盘监听
-        self.KeyHook = keyboard.Listener(on_press=self.on_key_pressed, on_release=self.on_key_release)  # 创建键盘监听器
-        self.KeyHook.start()  # 启动键盘监听器
-        self.keyInfo.emit('l', ("键盘监听已启动...",))  # 发送启动信号
+        try:
+            # 清除之前的钩子
+            if self.KeyHook:
+                keyboard.unhook_all()
+            
+            # 注册按键事件 - 只观察，不拦截
+            self.KeyHook = keyboard.hook(lambda e: self.on_key_pressed(e) if e.event_type == 'down' else self.on_key_release(e))
+            self.keyInfo.emit('l', ("键盘监听已启动...",))  # 发送启动信号
+        except Exception as e:
+            error_msg = f"键盘监听启动失败: {e}"
+            self.keyInfo.emit('l', (error_msg,))
 
     def stop_listener(self):  # 停止键盘监听
         if self.KeyHook:  # 如果键盘钩子存在
-            self.KeyHook.stop()  # 停止键盘监听器
-            self.KeyHook = None  # 清除键盘钩子
+            try:
+                keyboard.unhook_all()  # 取消所有钩子
+                self.KeyHook = None  # 清除键盘钩子
+            except:
+                pass
             self.keyInfo.emit('l', ("键盘监听已停止.....",))  # 发送停止信号

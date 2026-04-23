@@ -89,8 +89,8 @@ _CONFIG_PATH = Path(res_path('Config', 'hud_config.json'))
 
 _DEFAULT_CONFIG = {
     "position": {"x": -1, "y": 20, "anchor": "top-right", "margin_right": 20},
-    "font_family": "Microsoft YaHei",
-    "font_size": {"main": 10, "hint": 7},
+    "font_family": "Microsoft YaHei",  # ✅ 确保使用支持中文的字体
+    "font_size": {"main": 11, "hint": 7},  # ✅ 稍微增大字体
     "colors": {
         "background": [12, 12, 12, 220], "border": [255, 186, 8, 100],
         "gold": [255, 186, 8, 255], "green": [74, 229, 74, 255],
@@ -98,7 +98,7 @@ _DEFAULT_CONFIG = {
         "white": [255, 255, 255, 255], "gray": [140, 140, 140, 255],
         "dim": [80, 80, 80, 255],
     },
-    "size": [290, 30],
+    "size": [650, 32],  # ✅ 增加宽度到 650px，高度 32px，确保配件信息显示完整
     "opacity": 0.9,
     "refresh_ms": 250,
 }
@@ -168,8 +168,45 @@ SCOPE_SHORT = {
     '2bei': '2x', '3bei': '3x', '4bei': '4x',
     '6bei': '6x', '8bei': '8x', '15bei': '15x',
     'renchengxiang4bei': '热4x',
+    # ✅ 双模式倍镜
+    'duobei1': '多倍(低)',
+    'duobei4': '多倍(高)',
 }
 POSTURE_CN = {'None': '站', 'space': '站', 'z': '卧', 'c': '蹲'}
+
+# ✅ 配件翻译表（完整版）
+MUZZLE_CN = {
+    'none': '', 
+    'xiaoyin': '消音', 
+    'buchang': '补偿',
+    'yazui': '鸭嘴', 
+    'eliu': '扼流',
+    'buqiangbuchang': '步枪补偿',
+    'buqiangxiaoyan': '步枪消焰',
+    'chongfengqiangbuchang': '冲锋枪补偿',
+    'chongfengqiangxiaoyan': '冲锋枪消焰',
+    'jujiqiangbuchang': '机枪补偿',
+    'yazuiqiangkou': '鸭嘴枪口',
+    'eliuquan': '扼流圈',
+}
+GRIP_CN = {
+    'none': '', 
+    'chuizhi': '垂直', 
+    'jiaodu': '直角',
+    'banjieshi': '半截', 
+    'qingxing': '轻型',
+    'muZhi': '拇指',
+    'xiexiang': '斜角',
+    'zhijiao': '直角',
+}
+STOCK_CN = {
+    'none': '', 
+    'tuosaiban': '托腮板', 
+    'zhanshu': '战术',
+    'zhedieshiqiangtuo': '折叠枪托',
+    'zhongxinqiangtuo': '重心枪托',
+    'zidandai': '子弹袋',
+}
 
 
 def _gun_cn(name):
@@ -182,6 +219,28 @@ def _scope_cn(name):
     if not name or str(name).lower() == 'none':
         return '机瞄'
     return SCOPE_SHORT.get(str(name).lower(), str(name))
+
+
+def _accessory_cn(name, accessory_type='muzzle'):
+    """
+    配件名称翻译
+    :param name: 配件英文名
+    :param accessory_type: 配件类型 ('muzzle', 'grip', 'stock')
+    :return: 中文名称
+    """
+    if not name or str(name).lower() == 'none':
+        return ''
+    
+    name_lower = str(name).lower()
+    
+    if accessory_type == 'muzzle':
+        return MUZZLE_CN.get(name_lower, name)
+    elif accessory_type == 'grip':
+        return GRIP_CN.get(name_lower, name)
+    elif accessory_type == 'stock':
+        return STOCK_CN.get(name_lower, name)
+    
+    return name
 
 
 class _KeyListener(QThread):
@@ -394,57 +453,108 @@ class GameHUD(QWidget):
         pc = self._pc
         w, h = self.width(), self.height()
 
-        grad = QLinearGradient(0, 0, w, 0)
-        grad.setColorAt(0, QColor(self._COL_BG.red(), self._COL_BG.green(), self._COL_BG.blue(), 210))
-        grad.setColorAt(1, QColor(self._COL_BG.red(), self._COL_BG.green(), self._COL_BG.blue(), 160))
-        p.setBrush(QBrush(grad))
-        border_pen = QPen(self._COL_BORDER, 1)
-        if self._drag_mode:
-            border_pen = QPen(QColor(255, 100, 100), 2)
-        p.setPen(border_pen)
-        p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 4, 4)
+        # ✅ 透明背景：不绘制任何背景和边框
+        # 直接绘制文字，实现完全透明效果
 
         gun, slot = self._get_current_gun()
         gun_name = _gun_cn(gun.get('Name')) if gun else '—'
-        scope = _scope_cn(gun.get('Scope')) if gun else '—'
+        
+        # ✅ 使用 get_current_scope() 获取正确的倍镜模式（支持双模式切换）
+        scope_raw = pc.get_current_scope() if gun else 'none'
+        scope = _scope_cn(scope_raw)
+        
         posture = POSTURE_CN.get(pc.Current_posture, '站')
+        
+        # ✅ 获取配件信息
+        muzzle = _accessory_cn(gun.get('Muzzle'), 'muzzle') if gun else ''
+        grip = _accessory_cn(gun.get('Grip'), 'grip') if gun else ''
+        stock = _accessory_cn(gun.get('Stock'), 'stock') if gun else ''
 
         font = self._font('main', QFont.Bold)
         p.setFont(font)
         fm = QFontMetrics(font)
 
         x = 10
-        p.setPen(QPen(self._COL_GOLD))
-        p.drawText(x, 20, gun_name)
-        x += fm.horizontalAdvance(gun_name) + 6
-
-        p.setPen(QPen(self._COL_DIM))
-        p.drawText(x, 20, '|')
-        x += 12
-
-        p.setPen(QPen(self._COL_GREEN if scope != '机瞄' else self._COL_GRAY))
-        p.drawText(x, 20, scope)
-        x += fm.horizontalAdvance(scope) + 6
-
-        p.setPen(QPen(self._COL_DIM))
-        p.drawText(x, 20, '|')
-        x += 12
-
+        y_pos = 22  # ✅ 调整垂直位置，适应 32px 高度
+        max_width = w - 25  # ✅ 最大可用宽度（只留出状态灯的空间）
+        
+        # ✅ 1. 姿势优先显示 - 白色加粗
         p.setPen(QPen(self._COL_WHITE))
-        p.drawText(x, 20, posture)
-        x += fm.horizontalAdvance(posture) + 8
+        p.drawText(x, y_pos, posture)
+        x += fm.horizontalAdvance(posture) + 6
+        
+        # 分隔符
+        p.setPen(QPen(QColor(255, 255, 255, 100)))  # 半透明白色
+        p.drawText(x, y_pos, '|')
+        x += 8
+        
+        # ✅ 2. 枪械名称 - 金色
+        p.setPen(QPen(self._COL_GOLD))
+        p.drawText(x, y_pos, gun_name)
+        x += fm.horizontalAdvance(gun_name) + 6
+        
+        # 分隔符
+        p.setPen(QPen(QColor(255, 255, 255, 100)))
+        p.drawText(x, y_pos, '|')
+        x += 8
 
+        # ✅ 3. 倍镜 - 绿色/灰色
+        p.setPen(QPen(self._COL_GREEN if scope != '机瞄' else self._COL_GRAY))
+        scope_width = fm.horizontalAdvance(scope)
+        if x + scope_width < max_width:
+            p.drawText(x, y_pos, scope)
+            x += scope_width + 6
+        
+        # ✅ 4. 配件信息（如果有）- 浅蓝色
+        accessories = []
+        if muzzle:
+            accessories.append(muzzle)
+        if grip:
+            accessories.append(grip)
+        if stock:
+            accessories.append(stock)
+        
+        if accessories:
+            # 分隔符
+            if x + 8 < max_width:
+                p.setPen(QPen(QColor(255, 255, 255, 100)))
+                p.drawText(x, y_pos, '|')
+                x += 8
+            
+            # 配件列表 - 浅蓝色
+            acc_text = ' '.join(accessories)
+            acc_width = fm.horizontalAdvance(acc_text)
+            
+            # ✅ 如果超出宽度，截断并添加省略号
+            if x + acc_width > max_width:
+                # 计算可以显示的最大长度
+                available_width = max_width - x
+                # ✅ 确保至少有 20px 的空间才显示省略号，否则完全不显示
+                if available_width > 20:
+                    acc_text = fm.elidedText(acc_text, Qt.ElideRight, int(available_width))
+                else:
+                    # 空间不够，不显示配件信息
+                    acc_text = ''
+            
+            if acc_text:  # ✅ 只有有内容时才绘制
+                p.setPen(QPen(QColor(100, 200, 255, 220)))  # 浅蓝色
+                p.drawText(int(x), y_pos, acc_text)
+                x += fm.horizontalAdvance(acc_text) + 10
+
+        # ✅ 5. 状态指示灯
         dot_color = self._COL_RED if getattr(pc, 'mouse_one', False) else \
             self._COL_YELLOW if pc.StartFire else self._COL_GREEN
         p.setBrush(QBrush(dot_color))
         p.setPen(Qt.NoPen)
-        p.drawEllipse(x, 10, 10, 10)
+        p.drawEllipse(int(x), 11, 10, 10)  # ✅ 调整圆点垂直位置
 
-        hint_font = self._font('hint')
-        p.setFont(hint_font)
-        p.setPen(QPen(self._COL_DIM))
-        hint = '拖动中(F10锁定)' if self._drag_mode else 'F10拖动'
-        p.drawText(w - QFontMetrics(hint_font).horizontalAdvance(hint) - 8, 20, hint)
+        # 拖动提示（仅拖动模式显示）
+        if self._drag_mode:
+            hint_font = self._font('hint')
+            p.setFont(hint_font)
+            p.setPen(QPen(QColor(255, 100, 100, 180)))  # 半透明红色
+            hint = '🖱️ 拖动中 (F10锁定)'
+            p.drawText(w - QFontMetrics(hint_font).horizontalAdvance(hint) - 8, 20, hint)
 
     # ── Public API ──
     def show_hud(self):

@@ -116,6 +116,10 @@ def step_nuitka():
         "--enable-plugin=pyqt5",
         "--assume-yes-for-downloads",
         "--remove-output",
+        "--include-package=input",
+        "--include-package=ui",
+        "--include-package=data",
+        "--include-package=core",
     ]
 
     if IS_WINDOWS:
@@ -200,13 +204,14 @@ def step_zip():
 
 
 def main():
+    global VERSION
+    
     parser = argparse.ArgumentParser(description=f"{APP_NAME} 构建脚本")
     parser.add_argument("--skip-cython", action="store_true", help="跳过 Cython 预编译")
     parser.add_argument("--zip-only", action="store_true", help="仅打包已有产物为 zip")
     parser.add_argument("--version", default=VERSION, help=f"版本号 (默认: {VERSION})")
     args = parser.parse_args()
 
-    global VERSION
     VERSION = args.version
 
     log(f"{APP_NAME} 构建开始 — v{VERSION}")

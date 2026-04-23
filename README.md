@@ -149,7 +149,3 @@ pyinstaller main.spec
 ```
 
 生成的 exe 位于 `dist/` 目录。
-
-## 程序界面
-
-![img.png](img.png)

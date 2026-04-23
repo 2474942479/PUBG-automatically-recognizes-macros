@@ -16,9 +16,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     "resolution": "1920x1080",
-    "sensitivity": {"none": 1, "hongdian": 1, "quanxi": 2, "2bei": 1.7,
-                     "3bei": 5.5, "4bei": 11.5, "6bei": 5, "8bei": 5.7,
-                     "15bei": 10, "shift": 1.5},
     "scope_factor_v3": {},
     "posture_v3": {},
     "gun_ratio_v3": {},
@@ -55,17 +52,33 @@ class ProcessClass:
         self.RightClick = True  # 右键按下模式 False 单击 True 长按
         self.clicking = False
         self.firstPerson = False # 是否第一人称
-        self.shift_pressed = False  # 记录 Shift 键是否按下
-        self.ScopeData = self.get_config_data('s')
         self.ScopeFactorV3 = self.get_config_data('sf3')  # v3 倍镜系数
         self.PostureV3 = self.get_config_data('p3')  # v3 姿态系数
         self.GunRatioV3 = self.get_config_data('gr3')  # v3 独立压枪系数
         self.GunsName = None
-        self.added = False
         self.recoil_version = 3
         # 全局压枪系数（对应Lua的all_ratio）
         # 默认1.0，3号位武器时降为0.9
         self.all_ratio = 1.0
+        
+        # ═══ 双模式倍镜状态管理 ═══
+        # 用于跟踪 duobei 倍镜的当前模式 (duobei1=低倍, duobei4=高倍)
+        # 当识别到 duobei 倍镜时，默认是 duobei1(低倍/红点模式)
+        # 通过 Alt+鼠标右键 切换为 duobei4(高倍模式)
+        self.duobei_scope_mode = {}  # {gun_slot: 'duobei1' or 'duobei4'}
+        
+        # ═══ 姿势图片识别配置 ═══
+        self.posture_roi = None  # 姿势识别 ROI 区域 (left, top, right, bottom)
+        self.posture_templates = {}  # 姿势模板图片缓存
+        
+        # 从 resolution_setting 加载当前分辨率的姿势 ROI
+        self._load_posture_roi_from_resolution()
+        
+        # ✅ 预加载姿势模板，避免首次识别时的延迟
+        self.load_posture_templates()
+        
+        # ═══ UI 日志回调 ═══
+        self._ui_log_callback = None  # 用于将日志输出到 UI
 
     def move_mouse(self, x, y):
         self._gd.mouse_R(x, y)
@@ -87,8 +100,6 @@ class ProcessClass:
 
         if mode == 'r':
             return Config_data.get("resolution", "1920x1080")
-        elif mode == 's':
-            return Config_data.get('sensitivity', DEFAULT_CONFIG['sensitivity'])
         elif mode == 'sf3':
             return Config_data.get('scope_factor_v3', {})
         elif mode == 'p3':
@@ -102,8 +113,6 @@ class ProcessClass:
         save_data = self.get_config_data('a')
         if mode == 'resolution':
             save_data['resolution'] = data
-        elif mode == 'sensitivity':
-            save_data['sensitivity'] = data
         elif mode == 'scope_factor_v3':
             save_data['scope_factor_v3'] = data
         elif mode == 'posture_v3':
@@ -126,6 +135,8 @@ class ProcessClass:
         self.TabKey = False
         self._Result1 = {}
         self._Result2 = {}
+        # 重置双模式倍镜状态
+        self.duobei_scope_mode = {}
 
     def read_gun_data(self, fileName) -> dict:
         """读取 v3 枪械数据 JSON（_internal/GunData）。"""
@@ -136,40 +147,352 @@ class ProcessClass:
             return json.loads(f.read())
 
     def get_current_scope(self):
+        """
+        获取当前倍镜名称，支持双模式倍镜(duobei)的状态跟踪
+        :return: 倍镜名称字符串
+        """
         result = self.get_guns_info()
         if result is None:
             return "none"
+        
+        scope_name = result.get("Scope", "none")
+        
+        # 如果是 duobei 倍镜，返回当前模式
+        if scope_name in ("duobei1", "duobei4"):
+            gun_slot = self.Current_firearms
+            if gun_slot and gun_slot in self.duobei_scope_mode:
+                return self.duobei_scope_mode[gun_slot]
+            # 默认返回低倍模式
+            return "duobei1"
+        
+        return scope_name
+    
+    def toggle_duobei_scope(self, gun_slot=None):
+        """
+        切换双模式倍镜 (duobei) 的模式
+        :param gun_slot: 枪械槽位 (1或2)，如果不指定则使用当前枪械
+        :return: 切换后的倍镜模式名称
+        """
+        if gun_slot is None:
+            gun_slot = self.Current_firearms
+        
+        if not gun_slot:
+            return None
+        
+        # 获取当前识别的倍镜类型
+        result = self._Result1 if gun_slot == 1 else self._Result2
+        if not result:
+            return None
+        
+        scope_name = result.get("Scope", "none")
+        
+        # 只对 duobei 倍镜进行切换
+        if scope_name not in ("duobei1", "duobei4"):
+            return None
+        
+        # 切换模式
+        current_mode = self.duobei_scope_mode.get(gun_slot, "duobei1")
+        new_mode = "duobei4" if current_mode == "duobei1" else "duobei1"
+        self.duobei_scope_mode[gun_slot] = new_mode
+        
+        logger.info(f"枪械{gun_slot} 倍镜切换: {current_mode} -> {new_mode}")
+        return new_mode
+    
+    def reset_duobei_scope(self, gun_slot=None):
+        """
+        重置双模式倍镜到默认状态(低倍模式)
+        :param gun_slot: 枪械槽位，不指定则重置所有
+        """
+        if gun_slot:
+            if gun_slot in self.duobei_scope_mode:
+                del self.duobei_scope_mode[gun_slot]
+                logger.info(f"枪械{gun_slot} 倍镜已重置为默认(低倍)")
         else:
-            return result["Scope"]
-
-    def shift_multiplier(self):
-        # 读取配置文件中的 shift 变量
-
-        shift_scpoe = float(self.ScopeData.get('shift', 0))
-        # 判断 Shift 键是否按下
-        if self.shift_pressed and shift_scpoe:
-            # 增加长按shift的倍率
-            if self.Current_firearms and self.StartFire:
-                if not self.added:
-                    # 判断当前是否装备了枪械并且正在开镜
-                    accessor_scope = self.get_current_scope()
-                    if accessor_scope == 'hongdian':  # 如果当前是红点
-                        self.ScopeData['hongdian'] += shift_scpoe  # 增加红点倍率
-                    elif accessor_scope == 'quanxi':  # 如果当前是全息
-                        self.ScopeData['quanxi'] += shift_scpoe  # 增加全息镜倍率
-                    elif accessor_scope == 'none':  # 如果当前是机瞄
-                        self.ScopeData['none'] += shift_scpoe  # 增加机瞄倍率
-                    self.added=True
-
-    def on_shift_pressed(self):
-        self.shift_pressed = True
-        self.shift_multiplier()
-
-    def on_shift_released(self):
-        self.shift_pressed = False
-        sensitivity_data = self.get_config_data('s')
-        self.ScopeData = sensitivity_data
-        self.added=False
+            self.duobei_scope_mode.clear()
+            logger.info("所有枪械倍镜已重置为默认(低倍)")
+    
+    def _load_posture_roi_from_resolution(self):
+        """
+        从 resolution_setting 中加载当前分辨率的姿势 ROI
+        """
+        try:
+            from data.resolution_setting import RESOLUTION_SETTINGS
+            
+            if self.Monitor in RESOLUTION_SETTINGS:
+                resolution_config = RESOLUTION_SETTINGS[self.Monitor]
+                posture_roi = resolution_config.get('posture_roi')
+                
+                if posture_roi:
+                    self.posture_roi = tuple(posture_roi)
+                    logger.info(f"从分辨率配置加载姿势 ROI: {self.Monitor} -> {self.posture_roi}")
+                else:
+                    logger.debug(f"分辨率 {self.Monitor} 未配置姿势 ROI")
+            else:
+                logger.warning(f"未找到分辨率 {self.Monitor} 的配置")
+        except Exception as e:
+            logger.error(f"加载姿势 ROI 失败: {e}")
+    
+    def load_posture_templates(self):
+        """
+        加载姿势模板图片
+        :return: 是否加载成功
+        """
+        try:
+            import cv2
+            import os
+            from core.paths import res_path
+            
+            template_dir = res_path('_internal', 'data', 'firearms', 'zishi')
+            if not os.path.exists(template_dir):
+                logger.warning(f"姿势模板目录不存在: {template_dir}")
+                return False
+            
+            # 加载三个姿势模板: None(站立), c(蹲下), z(趴下)
+            posture_names = {'None': 'None.png', 'c': 'c.png', 'z': 'z.png'}
+            
+            for key, filename in posture_names.items():
+                template_path = os.path.join(template_dir, filename)
+                if os.path.exists(template_path):
+                    template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+                    if template is not None:
+                        self.posture_templates[key] = template
+                        logger.info(f"加载姿势模板: {key} ({template.shape})")
+                    else:
+                        logger.warning(f"无法读取姿势模板: {template_path}")
+                else:
+                    logger.warning(f"姿势模板文件不存在: {template_path}")
+            
+            return len(self.posture_templates) > 0
+        except Exception as e:
+            logger.error(f"加载姿势模板失败: {e}")
+            return False
+    
+    def _save_debug_screenshot(self, screenshot, best_match, best_score, match_scores):
+        """
+        保存调试截图到文件
+        :param screenshot: 原始截图 (BGR)
+        :param best_match: 最佳匹配的姿势名称
+        :param best_score: 最佳匹配分数
+        :param match_scores: 所有匹配分数
+        """
+        try:
+            import cv2
+            import os
+            from datetime import datetime
+            from core.paths import res_path
+            
+            # 创建调试目录
+            debug_dir = res_path('logs', 'posture_debug')
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            # 生成文件名
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # 精确到毫秒
+            result_str = best_match if best_match else 'None'
+            filename = f"posture_{result_str}_{best_score:.3f}_{timestamp}.png"
+            filepath = os.path.join(debug_dir, filename)
+            
+            # 在图片上绘制匹配信息
+            img_with_info = screenshot.copy() if len(screenshot.shape) == 3 else cv2.cvtColor(screenshot, cv2.COLOR_GRAY2BGR)
+            
+            # 添加文字信息
+            y_offset = 30
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            font_color = (0, 255, 0) if best_score >= 0.7 else (0, 165, 255)  # 绿色或橙色
+            
+            # 标题
+            cv2.putText(img_with_info, f"Result: {result_str} ({best_score:.4f})", 
+                       (10, y_offset), font, font_scale, font_color, 2)
+            y_offset += 30
+            
+            # 详细分数
+            for name, score in match_scores.items():
+                color = (0, 255, 0) if score >= 0.7 else (100, 100, 255)  # 绿色或红色
+                marker = "[BEST]" if name == best_match else ""
+                text = f"{name}: {score:.4f} {marker}"
+                cv2.putText(img_with_info, text, (10, y_offset), font, 0.5, color, 1)
+                y_offset += 25
+            
+            # 保存带标注的图片
+            cv2.imwrite(filepath, img_with_info)
+            logger.info(f"📸 调试截图已保存: {filepath}")
+            
+            # 同时保存原始灰度图（用于分析）
+            if len(screenshot.shape) == 3:
+                gray_path = filepath.replace('.png', '_gray.png')
+                gray_img = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+                cv2.imwrite(gray_path, gray_img)
+                logger.debug(f"灰度图已保存: {gray_path}")
+            
+        except Exception as e:
+            logger.error(f"保存调试截图失败: {e}")
+    
+    def recognize_posture_from_image(self, screenshot_roi, debug=False):
+        """
+        从截图区域识别姿势
+        :param screenshot_roi: ROI 区域的截图 (numpy array, grayscale)
+        :param debug: 是否启用调试模式（保存截图和详细日志）
+        :return: 姿势名称 ('None', 'c', 'z') 或 None
+        """
+        try:
+            import cv2
+            
+            # ✅ 模板已在 __init__ 中预加载，这里只检查是否为空
+            if not self.posture_templates:
+                logger.warning("⚠️ 姿势模板未加载，请检查模板文件是否存在")
+                return None
+            
+            if screenshot_roi is None or screenshot_roi.size == 0:
+                logger.warning("⚠️ 截图为空")
+                return None
+            
+            # 确保是灰度图
+            if len(screenshot_roi.shape) == 3:
+                screenshot_roi_gray = cv2.cvtColor(screenshot_roi, cv2.COLOR_BGR2GRAY)
+            else:
+                screenshot_roi_gray = screenshot_roi
+            
+            logger.debug(f"📊 开始模板匹配，截图尺寸: {screenshot_roi_gray.shape}")
+            
+            best_match = None
+            best_score = -1
+            match_scores = {}  # 记录所有匹配分数
+            
+            # 使用模板匹配
+            for posture_name, template in self.posture_templates.items():
+                # 如果模板比截图大，跳过
+                if template.shape[0] > screenshot_roi_gray.shape[0] or template.shape[1] > screenshot_roi_gray.shape[1]:
+                    logger.debug(f"模板 {posture_name} 比截图大，跳过")
+                    continue
+                
+                # 执行模板匹配
+                result = cv2.matchTemplate(screenshot_roi_gray, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                
+                # 记录分数
+                match_scores[posture_name] = max_val
+                
+                # 记录最佳匹配
+                if max_val > best_score:
+                    best_score = max_val
+                    best_match = posture_name
+            
+            # 输出详细的匹配信息
+            threshold = 0.5  # ✅ 降低阈值，提高识别率（游戏 UI 有抗锯齿和半透明）
+            logger.debug("=" * 50)
+            logger.debug("姿势识别结果详情:")
+            for name, score in match_scores.items():
+                status = "✓" if score >= threshold else "✗"
+                logger.debug(f"  {status} {name}: {score:.4f} {'(最佳)' if name == best_match else ''}")
+            logger.debug(f"  阈值: {threshold}, 最终结果: {best_match if best_score >= threshold else 'None'}")
+            logger.debug("=" * 50)
+            
+            # 发送详细日志到 UI（仅 debug 模式）
+            if debug and hasattr(self, '_ui_log_callback') and self._ui_log_callback:
+                summary_lines = ["姿势识别详情:"]
+                for name, score in match_scores.items():
+                    marker = " ← 最佳" if name == best_match else ""
+                    summary_lines.append(f"  {name}: {score:.4f}{marker}")
+                result_str = f"{best_match} ({best_score:.4f})" if best_score >= threshold else "None"
+                summary_lines.append(f"结果: {result_str}")
+                self._ui_log_callback("\n".join(summary_lines))
+            
+            # 调试模式：保存截图
+            if debug:
+                self._save_debug_screenshot(screenshot_roi, best_match, best_score, match_scores)
+            
+            # 设置阈值，只有置信度足够高才认为匹配成功
+            if best_score >= threshold and best_match:
+                logger.info(f"✅ 姿势识别成功: {best_match} (置信度: {best_score:.4f})")
+                return best_match
+            else:
+                logger.debug(f"⚠️ 姿势识别失败: 最佳匹配 {best_match} 置信度 {best_score:.4f} < 阈值 {threshold}")
+                return None
+                
+        except Exception as e:
+            import traceback
+            logger.error(f"姿势识别失败: {e}\n{traceback.format_exc()}")
+            return None
+    
+    def capture_and_recognize_posture(self, debug=False):
+        """
+        截取 ROI 区域并识别姿势
+        :param debug: 是否启用调试模式（保存截图）
+        :return: 识别到的姿势名称或 None
+        """
+        try:
+            import mss
+            import numpy as np
+            import cv2  # 导入 OpenCV
+            
+            if not self.posture_roi:
+                logger.warning("⚠️ 姿势识别 ROI 未配置")
+                # 输出到 UI
+                if hasattr(self, '_ui_log_callback') and self._ui_log_callback:
+                    self._ui_log_callback("⚠️ 姿势识别 ROI 未配置，请使用 F8 配置姿势 ROI")
+                return None
+            
+            left, top, right, bottom = self.posture_roi
+            width = right - left
+            height = bottom - top
+            
+            if width <= 0 or height <= 0:
+                logger.warning(f"⚠️ 无效的 ROI 区域: {self.posture_roi}")
+                if hasattr(self, '_ui_log_callback') and self._ui_log_callback:
+                    self._ui_log_callback(f"⚠️ 无效的 ROI 区域: {self.posture_roi}")
+                return None
+            
+            logger.info(f"📷 开始姿势识别 (ROI: {self.posture_roi}, 调试: {debug})")
+            
+            # 输出到 UI
+            if hasattr(self, '_ui_log_callback') and self._ui_log_callback:
+                self._ui_log_callback(f"📷 开始姿势识别...")
+            
+            # 截取屏幕区域
+            with mss.mss() as sct:
+                monitor = {"top": top, "left": left, "width": width, "height": height}
+                screenshot = sct.grab(monitor)
+                
+                # 转换为 numpy array (BGR格式)
+                img = np.array(screenshot)
+                # mss 默认是 BGRA 格式，转换为 BGR
+                if img.shape[2] == 4:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                
+                # 识别姿势
+                posture = self.recognize_posture_from_image(img, debug=debug)
+                
+                # 如果识别失败且是调试模式，输出提示
+                if posture is None and debug:
+                    if hasattr(self, '_ui_log_callback') and self._ui_log_callback:
+                        self._ui_log_callback("⚠️ 姿势识别失败，请查看 logs/posture_debug/ 目录中的截图")
+                
+                return posture
+                
+        except Exception as e:
+            import traceback
+            logger.error(f"截取并识别姿势失败: {e}\n{traceback.format_exc()}")
+            if hasattr(self, '_ui_log_callback') and self._ui_log_callback:
+                self._ui_log_callback(f"❌ 姿势识别异常: {e}")
+            return None
+    
+    def Change_posture(self, keyWord):
+        """
+        姿态切换（兼容按键和图片识别两种方式）
+        :param keyWord: 姿态键值 ('space'/'None'=站立, 'z'=趴下, 'c'=蹲下)
+        """
+        if keyWord == "space":
+            self.Current_posture = "None"
+        elif keyWord == "z":
+            self.Current_posture = "z"
+        elif keyWord == "c":
+            self.Current_posture = "c"
+        else:
+            # 支持直接传入识别结果
+            if keyWord in ("None", "z", "c"):
+                self.Current_posture = keyWord
+        
+        logger.info(f"姿态切换为: {self.Current_posture}")
     def get_window_version(self):
         if not hasattr(sys, 'getwindowsversion'):
             return False
@@ -190,7 +513,28 @@ class ProcessClass:
         枪械配件识别
         :return:
         """
+        # ✅ 检查背包状态，如果已经关闭则不更新结果
+        if not self.TabKey:
+            logger.debug("背包已关闭，取消识别结果更新")
+            return
+        
+        # ✅ 等待游戏UI渲染完成（背包打开动画通常需要 100-200ms）
+        import time
+        logger.debug("等待游戏UI渲染...")
+        time.sleep(0.01)  # 等待 10ms
+        
+        # ✅ 再次检查背包状态（防止在等待过程中被关闭）
+        if not self.TabKey:
+            logger.debug("等待过程中背包被关闭，取消识别")
+            return
+        
         Data = asyncio.run(capture_all_positions_thread(self.Monitor))
+        
+        # ✅ 再次检查背包状态（防止在识别过程中被关闭）
+        if not self.TabKey:
+            logger.debug("识别过程中背包被关闭，丢弃结果")
+            return
+        
         self._Result1 = Data[0]
         self._Result2 = Data[1]
         Emit('g', (None,))
@@ -362,11 +706,32 @@ class ProcessClass:
         # scope_factor: 倍镜系数
         # 优先使用 config.json 的 scope_factor_v3（用户可在UI调整），
         # 否则使用 JSON 内的 scope_map（Lua 默认值），最后回退到 SCOPE_FACTOR
-        scope_name = guns_info.get("Scope", "None").lower()
+        # 注意：使用 get_current_scope() 获取切换后的倍镜模式（支持双模式倍镜）
+        scope_name = self.get_current_scope().lower()
+        
+        # 获取基础scope_factor
         if self.ScopeFactorV3 and scope_name in self.ScopeFactorV3:
             scope_factor = self.ScopeFactorV3[scope_name]
         else:
             scope_factor = gun.get("scope_map", SCOPE_FACTOR).get(scope_name, 1.0)
+        
+        # 如果Shift按下，应用该倍镜对应的Shift倍率 - 使用Windows API实时检测
+        try:
+            import ctypes
+            # 使用Windows API检测Shift键状态 (VK_SHIFT = 0x10)
+            shift_pressed = ctypes.windll.user32.GetKeyState(0x10) & 0x8000 != 0
+            
+            if shift_pressed and self.ScopeFactorV3:
+                # 从 scope_factor_v3 中读取对应倍镜的 shift 系数
+                # 命名规则: {scope_name}_shift (例如: hongdian_shift, 4bei_shift)
+                shift_key = f"{scope_name}_shift"
+                if shift_key in self.ScopeFactorV3:
+                    shift_multiplier = float(self.ScopeFactorV3[shift_key])
+                    # 使用乘法，默认1.0表示无变化
+                    scope_factor *= shift_multiplier
+        except Exception:
+            # 如果检测失败，忽略Shift倍率
+            pass
 
         # posture_factor: 姿态系数
         # 优先使用 config.json 的 posture_v3（用户可在UI调整），
@@ -436,9 +801,8 @@ class ProcessClass:
                 y_move = math.ceil(all_ratio * gun_ratio * scope_factor * posture_factor * y_array[i])
 
             # ── 水平补偿 ──
-            # Lua 模式2: MoveMouseRelative(math.random(-1,1), ymove)
-            # data.txt 中的 x 数据在 Lua 压枪时被忽略，只用纯随机偏移
-            x_move = random.randint(-1, 1)
+            # 固定为0,不使用随机偏移
+            x_move = 0
 
             self._gd.mouse_R(x_move, y_move)
             recoil_list.append(y_move)

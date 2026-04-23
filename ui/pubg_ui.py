@@ -396,7 +396,9 @@ class Ui_PUBG(object):
         sg_layout = QtWidgets.QHBoxLayout(sens_group)
         sg_layout.setContentsMargins(6, 2, 6, 2)
         self.SensitivitySelect = QtWidgets.QComboBox(sens_group)
-        for s in ["无", "红点", "全息", "2倍", "3倍", "4倍", "6倍", "8倍", "15倍", "shift"]:
+        for s in ["无", "红点", "全息", "2倍", "3倍", "4倍", "6倍", "8倍", "15倍", "多倍低", "多倍高",
+                  "红点(Shift)", "全息(Shift)", "2倍(Shift)", "3倍(Shift)", "4倍(Shift)",
+                  "多倍低(Shift)", "多倍高(Shift)", "6倍(Shift)", "8倍(Shift)", "15倍(Shift)"]:
             self.SensitivitySelect.addItem(s)
         sg_layout.addWidget(self.SensitivitySelect, 1)
         self.SensitivityText = QtWidgets.QLineEdit(sens_group)
@@ -445,9 +447,11 @@ class Ui_PUBG(object):
         log_layout.setContentsMargins(4, 4, 4, 4)
         self.Info = QtWidgets.QTextEdit(log_group)
         self.Info.setReadOnly(True)
-        self.Info.setMaximumHeight(100)
+        # 移除最大高度限制，让日志框可以自适应拉伸
+        # self.Info.setMaximumHeight(100)  # 已注释，允许自由拉伸
+        self.Info.setMinimumHeight(80)  # 设置最小高度
         log_layout.addWidget(self.Info)
-        content_layout.addWidget(log_group)
+        content_layout.addWidget(log_group, 1)  # 添加 stretch=1，让日志区可以拉伸
 
         # ═══ 底部按钮 ═══
         btn_row = QtWidgets.QHBoxLayout()
@@ -458,6 +462,10 @@ class Ui_PUBG(object):
         self.StatusInfo.setReadOnly(True)
         self.StatusInfo.setText("未启动...")
         btn_row.addWidget(self.StatusInfo, 3)
+
+        self.ROIConfigBtn = QtWidgets.QPushButton("ROI 配置", content)
+        self.ROIConfigBtn.setToolTip("按 F8 快速打开 ROI 配置工具")
+        btn_row.addWidget(self.ROIConfigBtn, 1)
 
         self.Startbtn = QtWidgets.QPushButton("启动", content)
         self.Startbtn.setObjectName("Startbtn")

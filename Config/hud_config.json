@@ -1,21 +1,21 @@
 {
     "position": {
-        "x": 609,
-        "y": 944,
+        "x": 1576,
+        "y": 953,
         "anchor": "custom",
         "margin_right": 20,
         "margin_bottom": 30,
         "margin_left": 20
     },
-    "default_mode": "minimal",
     "font_family": "Microsoft YaHei",
     "font_size": {
+        "main": 10,
+        "hint": 7,
         "minimal": 10,
         "compact_header": 9,
         "compact_body": 9,
         "full_header": 9,
-        "full_body": 9,
-        "hint": 7
+        "full_body": 9
     },
     "colors": {
         "background": [
@@ -75,8 +75,8 @@
     },
     "size": {
         "minimal": [
-            290,
-            30
+            650,
+            32
         ],
         "compact": [
             260,
@@ -87,11 +87,12 @@
             260
         ],
         "bar": [
-            500,
-            30
+            650,
+            32
         ]
     },
     "opacity": 0.9,
     "refresh_ms": 250,
+    "default_mode": "minimal",
     "hotkey_mode_switch": "F9"
 }
