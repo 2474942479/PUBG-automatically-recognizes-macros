@@ -246,8 +246,10 @@ class GameHUD(QWidget):
 
         self._load_colors()
 
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        # 使用Dialog而非Tool，确保鼠标事件正常（特别是在4K高分屏上）
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Dialog)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)  # 显示时不激活，避免抢焦点
         self._apply_size()
         self._position_from_config()
 
@@ -316,6 +318,9 @@ class GameHUD(QWidget):
             if x < 0:
                 margin_r = pos.get('margin_right', 20)
                 x = g.width() - hud_w - margin_r
+            # 确保坐标不超出屏幕范围（适配不同分辨率）
+            x = max(0, min(x, g.width() - hud_w))
+            y = max(0, min(y, g.height() - hud_h))
         else:
             # 默认右上角
             margin_r = pos.get('margin_right', 20)
@@ -378,9 +383,16 @@ class GameHUD(QWidget):
         self._drag_mode = not self._drag_mode
         hwnd = int(self.winId())
         if self._drag_mode:
+            # 退出点击穿透模式，允许接收鼠标事件
             _remove_click_through(hwnd)
             self.setCursor(Qt.SizeAllCursor)
+            # 进入拖动模式时，确保窗口可见且可交互
+            self.raise_()
+            self.activateWindow()
+            # 强制更新窗口属性
+            self.setWindowOpacity(self._cfg.get('opacity', 0.9))
         else:
+            # 恢复点击穿透
             _make_click_through(hwnd)
             self.setCursor(Qt.ArrowCursor)
             self._save_position()
@@ -392,11 +404,24 @@ class GameHUD(QWidget):
         if self._drag_mode and event.button() == Qt.LeftButton:
             self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
             event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._drag_mode and self._drag_pos is not None:
-            self.move(event.globalPos() - self._drag_pos)
+            new_pos = event.globalPos() - self._drag_pos
+            # 限制窗口不拖出屏幕
+            scr = QApplication.primaryScreen()
+            if scr:
+                g = scr.geometry()
+                new_x = max(0, min(new_pos.x(), g.width() - self.width()))
+                new_y = max(0, min(new_pos.y(), g.height() - self.height()))
+                self.move(new_x, new_y)
+            else:
+                self.move(new_pos)
             event.accept()
+        else:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self._drag_mode:
