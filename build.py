@@ -19,11 +19,14 @@ PUBG 宏识别工具 — Nuitka 一键构建脚本
 
 import os
 import sys
+import platform
 import shutil
 import subprocess
 import argparse
 import zipfile
 from pathlib import Path
+
+IS_WINDOWS = platform.system() == "Windows"
 
 VERSION = "1.0.0"
 APP_NAME = "PUBG宏识别工具"
@@ -43,12 +46,7 @@ CORE_MODULES_FOR_CYTHON = [
 EXCLUDE_MODULES = [
     "calibration",
     "tools",
-    "data.bullet_data",
-    "main_new",
-    "ui.modern_ui",
-    "ui.ingame_display",
-    "test_pose",
-    "migrate_gundata",
+    "crypto",
 ]
 
 INCLUDE_DATA_DIRS = [
@@ -109,20 +107,22 @@ def step_nuitka():
     log("Step 2: Nuitka 编译")
     log("=" * 60)
 
+    exe_suffix = ".exe" if IS_WINDOWS else ""
     cmd_parts = [
         f'"{sys.executable}" -m nuitka',
         "--standalone",
-        "--windows-console-mode=disable",
         f"--output-dir={DIST_DIR}",
-        f'--output-filename="{APP_NAME}.exe"',
+        f'--output-filename="{APP_NAME}{exe_suffix}"',
         "--enable-plugin=pyqt5",
         "--assume-yes-for-downloads",
         "--remove-output",
     ]
 
-    icon_path = PROJECT_ROOT / "icon.ico"
-    if icon_path.exists():
-        cmd_parts.append(f"--windows-icon-from-ico={icon_path}")
+    if IS_WINDOWS:
+        cmd_parts.append("--windows-console-mode=disable")
+        icon_path = PROJECT_ROOT / "icon.ico"
+        if icon_path.exists():
+            cmd_parts.append(f"--windows-icon-from-ico={icon_path}")
 
     for src_rel, dst_rel in INCLUDE_DATA_DIRS:
         src_abs = PROJECT_ROOT / src_rel
