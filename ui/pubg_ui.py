@@ -1,831 +1,526 @@
+"""PUBG 宏识别工具 — 现代暗色主题 UI"""
 from PyQt5 import QtCore, QtGui, QtWidgets
-import os
+from core.paths import res_path
+
+# ═══════════════════════════════════════════════════════════
+# 全局暗色主题 QSS
+# ═══════════════════════════════════════════════════════════
+
+DARK_STYLE = """
+/* ── 全局 ── */
+QWidget {
+    background-color: #1a1a2e;
+    color: #e0e0e0;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 10pt;
+}
+QWidget#Container {
+    background-color: #1a1a2e;
+    border-radius: 8px;
+}
+
+/* ── 自定义标题栏 ── */
+QWidget#TitleBar {
+    background-color: #16213e;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    min-height: 32px;
+}
+QLabel#TitleLabel {
+    color: #ffba08;
+    font-size: 12pt;
+    font-weight: bold;
+    padding-left: 8px;
+}
+QLabel#VersionLabel {
+    color: #7a7a9a;
+    font-size: 8pt;
+    padding-right: 8px;
+}
+
+/* ── GroupBox ── */
+QGroupBox {
+    border: 1px solid #2a2a4a;
+    border-radius: 6px;
+    margin-top: 12px;
+    padding: 6px 4px 4px 4px;
+    font-weight: bold;
+    color: #c0c0d0;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 6px;
+    color: #ffba08;
+    font-size: 9pt;
+}
+
+/* ── 按钮 ── */
+QPushButton {
+    background-color: #2a2a4a;
+    color: #e0e0e0;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    padding: 5px 12px;
+    font-weight: bold;
+    min-height: 22px;
+}
+QPushButton:hover {
+    background-color: #3a3a5a;
+    border-color: #ffba08;
+}
+QPushButton:pressed {
+    background-color: #ffba08;
+    color: #1a1a2e;
+}
+QPushButton:disabled {
+    background-color: #1a1a2e;
+    color: #4a4a5a;
+    border-color: #2a2a3a;
+}
+QPushButton#Startbtn {
+    background-color: #0f7b3f;
+    border-color: #0f7b3f;
+    color: #ffffff;
+}
+QPushButton#Startbtn:hover {
+    background-color: #14a050;
+}
+QPushButton#Startbtn:disabled {
+    background-color: #1a1a2e;
+    color: #4a4a5a;
+    border-color: #2a2a3a;
+}
+QPushButton#Stopbtn {
+    background-color: #8b1a1a;
+    border-color: #8b1a1a;
+    color: #ffffff;
+}
+QPushButton#Stopbtn:hover {
+    background-color: #b22222;
+}
+QPushButton#Stopbtn:disabled {
+    background-color: #1a1a2e;
+    color: #4a4a5a;
+    border-color: #2a2a3a;
+}
+
+/* ── RadioButton ── */
+QRadioButton {
+    spacing: 4px;
+    color: #c0c0d0;
+    font-size: 9pt;
+}
+QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    border: 2px solid #4a4a6a;
+    background-color: #1a1a2e;
+}
+QRadioButton::indicator:checked {
+    background-color: #ffba08;
+    border-color: #ffba08;
+}
+QRadioButton::indicator:hover {
+    border-color: #ffba08;
+}
+
+/* ── ComboBox ── */
+QComboBox {
+    background-color: #2a2a4a;
+    color: #e0e0e0;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    padding: 3px 8px;
+    min-height: 20px;
+}
+QComboBox:hover {
+    border-color: #ffba08;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QComboBox::down-arrow {
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 6px solid #c0c0d0;
+    margin-right: 6px;
+}
+QComboBox QAbstractItemView {
+    background-color: #2a2a4a;
+    color: #e0e0e0;
+    selection-background-color: #ffba08;
+    selection-color: #1a1a2e;
+    border: 1px solid #3a3a5a;
+}
+
+/* ── LineEdit ── */
+QLineEdit {
+    background-color: #2a2a4a;
+    color: #e0e0e0;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    padding: 3px 8px;
+    min-height: 20px;
+}
+QLineEdit:focus {
+    border-color: #ffba08;
+}
+QLineEdit:read-only {
+    background-color: #1a1a2e;
+    color: #a0a0b0;
+    border-color: #2a2a3a;
+}
+
+/* ── TextEdit (日志) ── */
+QTextEdit {
+    background-color: #0f0f1a;
+    color: #a0e0a0;
+    border: 1px solid #2a2a4a;
+    border-radius: 4px;
+    padding: 4px;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 9pt;
+}
+
+/* ── 枪械信息标签 ── */
+QLabel {
+    color: #c0c0d0;
+}
+QLabel.gun-name {
+    color: #ffba08;
+    font-size: 11pt;
+    font-weight: bold;
+}
+QLabel.accessory-scope {
+    color: #ff4444;
+    font-weight: bold;
+}
+QLabel.accessory-muzzle {
+    color: #4ae04a;
+    font-weight: bold;
+}
+QLabel.accessory-grip {
+    color: #e0a040;
+    font-weight: bold;
+}
+QLabel.accessory-stock {
+    color: #4a9eff;
+    font-weight: bold;
+}
+
+/* ── StatusInfo ── */
+QLineEdit#StatusInfo {
+    background-color: #0f0f1a;
+    color: #ffba08;
+    border: 1px solid #2a2a4a;
+    font-weight: bold;
+    font-size: 9pt;
+}
+"""
+
 
 class Ui_PUBG(object):
+
+    # ── 自定义窗口拖动支持 ──
+
+    _drag_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and event.y() < 36:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None:
+            self.move(event.globalPos() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+
+    # ── UI 构建 ──
+
     def setupUi(self, PUBG):
         PUBG.setObjectName("PUBG")
-        PUBG.setWindowModality(QtCore.Qt.ApplicationModal)
-        PUBG.resize(543, 300)
-        # 设置窗口背景透明
-        PUBG.setStyleSheet("background-color: rgba(255, 255, 255, 128); color: black;")
-        # 设置窗口无边框
-        PUBG.setWindowFlags(PUBG.windowFlags() | QtCore.Qt.FramelessWindowHint)
-        # 设置窗口透明度（0.0完全透明，1.0完全不透明）
-        PUBG.setWindowOpacity(0.8)
+        PUBG.resize(620, 480)
+        PUBG.setWindowFlags(
+            QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
+        )
+        PUBG.setStyleSheet(DARK_STYLE)
+        PUBG.setWindowOpacity(0.95)
+
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap("./_internal/GHUB.ico"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        ico_path = res_path('_internal', 'GHUB.ico')
+        icon.addPixmap(QtGui.QPixmap(ico_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
         PUBG.setWindowIcon(icon)
-        PUBG.setWindowFilePath("")
-        self.verticalLayout_3 = QtWidgets.QVBoxLayout(PUBG)
-        self.verticalLayout_3.setContentsMargins(0, 0, 0, 0)
-        self.verticalLayout_3.setObjectName("verticalLayout_3")
+
+        root_layout = QtWidgets.QVBoxLayout(PUBG)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
         self.Container = QtWidgets.QWidget(PUBG)
         self.Container.setObjectName("Container")
-        self.gridLayout = QtWidgets.QGridLayout(self.Container)
-        self.gridLayout.setContentsMargins(0, 0, 0, 0)
-        self.gridLayout.setSpacing(0)
-        self.gridLayout.setObjectName("gridLayout")
+        root_layout.addWidget(self.Container)
 
-        # self.TitleBox = QtWidgets.QWidget(self.Container)
-        # self.TitleBox.setObjectName("TitleBox")
-        # self.verticalLayout_4 = QtWidgets.QVBoxLayout(self.TitleBox)
-        # self.verticalLayout_4.setObjectName("verticalLayout_4")
+        main_layout = QtWidgets.QVBoxLayout(self.Container)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # self.Title = QtWidgets.QLabel(self.TitleBox)
-        # font = QtGui.QFont()
-        # font.setFamily("Agency FB")
-        # font.setPointSize(20)
-        # font.setBold(True)
-        # font.setWeight(75)
-        # self.Title.setFont(font)
-        # self.Title.setTabletTracking(False)
-        # self.Title.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.Title.setTextFormat(QtCore.Qt.RichText)
-        # self.Title.setScaledContents(False)
-        # self.Title.setAlignment(QtCore.Qt.AlignCenter)
-        # self.Title.setWordWrap(False)
-        # self.Title.setTextInteractionFlags(QtCore.Qt.LinksAccessibleByMouse)
-        # self.Title.setObjectName("Title")
-        # self.verticalLayout_4.addWidget(self.Title)
-        #
-        # self.WinVersion = QtWidgets.QLabel(self.TitleBox)
-        # self.WinVersion.setText("")
-        # self.WinVersion.setAlignment(QtCore.Qt.AlignCenter)
-        # self.WinVersion.setObjectName("WinVersion")
-        # self.verticalLayout_4.addWidget(self.WinVersion)
-        # self.gridLayout.addWidget(self.TitleBox, 0, 0, 1, 1)
+        # ────── 自定义标题栏 ──────
+        title_bar = QtWidgets.QWidget(self.Container)
+        title_bar.setObjectName("TitleBar")
+        title_bar.setFixedHeight(36)
+        tb_layout = QtWidgets.QHBoxLayout(title_bar)
+        tb_layout.setContentsMargins(10, 0, 10, 0)
 
-        # self.RemindBox = QtWidgets.QWidget(self.Container)
-        # self.RemindBox.setObjectName("RemindBox")
-        # self.horizontalLayout_2 = QtWidgets.QHBoxLayout(self.RemindBox)
-        # self.horizontalLayout_2.setContentsMargins(0, 0, 0, 0)
-        # self.horizontalLayout_2.setSpacing(0)
-        # self.horizontalLayout_2.setObjectName("horizontalLayout_2")
-        # self.Remind = QtWidgets.QTextEdit(self.RemindBox)
-        # self.Remind.setAutoFormatting(QtWidgets.QTextEdit.AutoNone)
-        # self.Remind.setUndoRedoEnabled(False)
-        # self.Remind.setReadOnly(True)
-        # self.Remind.setObjectName("Remind")
-        # self.horizontalLayout_2.addWidget(self.Remind)
-        # self.gridLayout.addWidget(self.RemindBox, 1, 0, 1, 1)
+        title_label = QtWidgets.QLabel("PUBG 宏识别工具", title_bar)
+        title_label.setObjectName("TitleLabel")
+        tb_layout.addWidget(title_label)
 
-        # 创建功能框小部件
-        self.FunctionBox = QtWidgets.QWidget(self.Container)
-        self.FunctionBox.setObjectName("FunctionBox")
-        self.gridLayout_2 = QtWidgets.QGridLayout(self.FunctionBox)
-        self.gridLayout_2.setContentsMargins(0, 0, 0, 0)
-        self.gridLayout_2.setSpacing(0)
-        self.gridLayout_2.setObjectName("gridLayout_2")
-        self.ScopeBox = QtWidgets.QWidget(self.FunctionBox)
-        self.ScopeBox.setObjectName("ScopeBox")
-        self.horizontalLayout_15 = QtWidgets.QHBoxLayout(self.ScopeBox)
-        self.horizontalLayout_15.setContentsMargins(0, 5, 0, 0)
-        self.horizontalLayout_15.setSpacing(0)
-        self.horizontalLayout_15.setObjectName("horizontalLayout_15")
-        self.ScopeMode = QtWidgets.QGroupBox(self.ScopeBox)
+        tb_layout.addStretch()
 
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.ScopeMode.setFont(font)
-        self.ScopeMode.setObjectName("ScopeMode")
-        self.horizontalLayout_16 = QtWidgets.QHBoxLayout(self.ScopeMode)
-        self.horizontalLayout_16.setContentsMargins(5, 0, 5, 0)
-        self.horizontalLayout_16.setSpacing(6)
-        self.horizontalLayout_16.setObjectName("horizontalLayout_16")
-        self.LongPress = QtWidgets.QRadioButton(self.ScopeMode)
-        self.LongPress.setObjectName("LongPress")
-        self.horizontalLayout_16.addWidget(self.LongPress)
-        self.ClickPress = QtWidgets.QRadioButton(self.ScopeMode)
-        self.ClickPress.setObjectName("ClickPress")
-        self.horizontalLayout_16.addWidget(self.ClickPress)
-        self.horizontalLayout_16.setStretch(0, 3)
-        self.horizontalLayout_16.setStretch(1, 2)
-        self.horizontalLayout_15.addWidget(self.ScopeMode)
-        self.IsScope = QtWidgets.QGroupBox(self.ScopeBox)
-        self.IsScope.setEnabled(False)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setItalic(False)
-        font.setUnderline(False)
-        font.setWeight(75)
-        font.setStrikeOut(False)
-        font.setKerning(False)
-        font.setStyleStrategy(QtGui.QFont.PreferDefault)
-        self.IsScope.setFont(font)
-        self.IsScope.setObjectName("IsScope")
-        self.horizontalLayout_17 = QtWidgets.QHBoxLayout(self.IsScope)
-        self.horizontalLayout_17.setContentsMargins(5, 0, 5, 0)
-        self.horizontalLayout_17.setSpacing(6)
-        self.horizontalLayout_17.setObjectName("horizontalLayout_17")
-        self.OpenScope = QtWidgets.QRadioButton(self.IsScope)
-        self.OpenScope.setObjectName("OpenScope")
-        self.horizontalLayout_17.addWidget(self.OpenScope)
-        self.CloseScope = QtWidgets.QRadioButton(self.IsScope)
-        self.CloseScope.setObjectName("CloseScope")
-        self.horizontalLayout_17.addWidget(self.CloseScope)
-        self.horizontalLayout_15.addWidget(self.IsScope)
-        self.horizontalLayout_15.setStretch(0, 1)
-        self.horizontalLayout_15.setStretch(1, 1)
-        self.gridLayout_2.addWidget(self.ScopeBox, 2, 0, 1, 1)
-        self.IdentifyBox = QtWidgets.QWidget(self.FunctionBox)
-        self.IdentifyBox.setObjectName("IdentifyBox")
-        self.horizontalLayout_4 = QtWidgets.QHBoxLayout(self.IdentifyBox)
-        self.horizontalLayout_4.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_4.setSpacing(0)
-        self.horizontalLayout_4.setObjectName("horizontalLayout_4")
-        self.OneGunsBox = QtWidgets.QGroupBox(self.IdentifyBox)
+        self._version_label = QtWidgets.QLabel("", title_bar)
+        self._version_label.setObjectName("VersionLabel")
+        tb_layout.addWidget(self._version_label)
 
-        self.ViewMode = QtWidgets.QGroupBox(self.ScopeBox)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.ViewMode.setFont(font)
-        self.ViewMode.setObjectName("ViewMode")
-        self.horizontalLayout_26 = QtWidgets.QHBoxLayout(self.ViewMode)
-        self.horizontalLayout_26.setContentsMargins(5, 0, 5, 0)
-        self.horizontalLayout_26.setSpacing(6)
-        self.horizontalLayout_26.setObjectName("horizontalLayout_26")
-        self.FirstPerson = QtWidgets.QRadioButton(self.ViewMode)
-        self.FirstPerson.setObjectName("FirstPerson")
-        self.horizontalLayout_26.addWidget(self.FirstPerson)
-        self.ThirdPerson = QtWidgets.QRadioButton(self.ViewMode)
-        self.ThirdPerson.setObjectName("ThirdPerson")
-        self.horizontalLayout_26.addWidget(self.ThirdPerson)
-        self.horizontalLayout_15.addWidget(self.ViewMode)
+        main_layout.addWidget(title_bar)
 
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.OneGunsBox.setFont(font)
-        self.OneGunsBox.setAlignment(QtCore.Qt.AlignCenter)
-        self.OneGunsBox.setFlat(True)
-        self.OneGunsBox.setObjectName("OneGunsBox")
-        self.verticalLayout = QtWidgets.QVBoxLayout(self.OneGunsBox)
-        self.verticalLayout.setContentsMargins(0, 0, 0, 0)
-        self.verticalLayout.setSpacing(0)
-        self.verticalLayout.setObjectName("verticalLayout")
-        self.Name1Box = QtWidgets.QWidget(self.OneGunsBox)
-        self.Name1Box.setObjectName("Name1Box")
-        self.horizontalLayout_5 = QtWidgets.QHBoxLayout(self.Name1Box)
-        self.horizontalLayout_5.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_5.setSpacing(0)
-        self.horizontalLayout_5.setObjectName("horizontalLayout_5")
-        self.Name1Lable = QtWidgets.QLabel(self.Name1Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Name1Lable.setFont(font)
-        self.Name1Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Name1Lable.setObjectName("Name1Lable")
-        self.horizontalLayout_5.addWidget(self.Name1Lable)
-        self.Name1Name = QtWidgets.QLabel(self.Name1Box)
-        self.Name1Name.setStyleSheet("color: rgb(56, 56, 56);\n"
-"font: 12pt \"Arial Rounded MT Bold\";")
-        self.Name1Name.setText("")
-        self.Name1Name.setObjectName("Name1Name")
-        self.horizontalLayout_5.addWidget(self.Name1Name)
-        self.verticalLayout.addWidget(self.Name1Box)
-        self.Muzzle1Box = QtWidgets.QWidget(self.OneGunsBox)
-        self.Muzzle1Box.setObjectName("Muzzle1Box")
-        self.horizontalLayout_6 = QtWidgets.QHBoxLayout(self.Muzzle1Box)
-        self.horizontalLayout_6.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_6.setSpacing(0)
-        self.horizontalLayout_6.setObjectName("horizontalLayout_6")
-        self.Muzzle1Lable = QtWidgets.QLabel(self.Muzzle1Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Muzzle1Lable.setFont(font)
-        self.Muzzle1Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Muzzle1Lable.setObjectName("Muzzle1Lable")
-        self.horizontalLayout_6.addWidget(self.Muzzle1Lable)
-        self.Muzzle1Name = QtWidgets.QLabel(self.Muzzle1Box)
-        font = QtGui.QFont()
-        font.setFamily("Arial")
-        font.setPointSize(10)
-        font.setBold(False)
-        font.setItalic(False)
-        font.setWeight(9)
-        self.Muzzle1Name.setFont(font)
-        self.Muzzle1Name.setStyleSheet("color: rgb(0, 134, 0);\n"
-"font: 75 10pt \"Arial\";")
-        self.Muzzle1Name.setText("")
-        self.Muzzle1Name.setObjectName("Muzzle1Name")
-        self.horizontalLayout_6.addWidget(self.Muzzle1Name)
-        self.verticalLayout.addWidget(self.Muzzle1Box)
-        self.Scope1Box = QtWidgets.QWidget(self.OneGunsBox)
-        self.Scope1Box.setObjectName("Scope1Box")
-        self.horizontalLayout_8 = QtWidgets.QHBoxLayout(self.Scope1Box)
-        self.horizontalLayout_8.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_8.setSpacing(0)
-        self.horizontalLayout_8.setObjectName("horizontalLayout_8")
-        self.Scope1Lable = QtWidgets.QLabel(self.Scope1Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Scope1Lable.setFont(font)
-        self.Scope1Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Scope1Lable.setObjectName("Scope1Lable")
-        self.horizontalLayout_8.addWidget(self.Scope1Lable)
-        self.Scope1Name = QtWidgets.QLabel(self.Scope1Box)
-        font = QtGui.QFont()
-        font.setFamily("Agency FB")
-        font.setPointSize(10)
-        font.setBold(False)
-        font.setItalic(False)
-        font.setWeight(9)
-        self.Scope1Name.setFont(font)
-        self.Scope1Name.setStyleSheet("color: rgb(255, 8, 45);\n"
-"font: 75 10pt \"Agency FB\";")
-        self.Scope1Name.setText("")
-        self.Scope1Name.setObjectName("Scope1Name")
-        self.horizontalLayout_8.addWidget(self.Scope1Name)
-        self.verticalLayout.addWidget(self.Scope1Box)
-        self.Grip1Box = QtWidgets.QWidget(self.OneGunsBox)
-        self.Grip1Box.setObjectName("Grip1Box")
-        self.horizontalLayout_7 = QtWidgets.QHBoxLayout(self.Grip1Box)
-        self.horizontalLayout_7.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_7.setSpacing(0)
-        self.horizontalLayout_7.setObjectName("horizontalLayout_7")
-        self.Grip1Lable = QtWidgets.QLabel(self.Grip1Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Grip1Lable.setFont(font)
-        self.Grip1Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Grip1Lable.setObjectName("Grip1Lable")
-        self.horizontalLayout_7.addWidget(self.Grip1Lable)
-        self.Grip1Name = QtWidgets.QLabel(self.Grip1Box)
-        font = QtGui.QFont()
-        font.setFamily("Arial")
-        font.setPointSize(10)
-        font.setBold(False)
-        font.setItalic(False)
-        font.setWeight(9)
-        self.Grip1Name.setFont(font)
-        self.Grip1Name.setStyleSheet("color: rgb(168, 84, 0);\n"
-"font: 75 10pt \"Arial\";")
-        self.Grip1Name.setText("")
-        self.Grip1Name.setObjectName("Grip1Name")
-        self.horizontalLayout_7.addWidget(self.Grip1Name)
-        self.verticalLayout.addWidget(self.Grip1Box)
-        self.Butt1Box = QtWidgets.QWidget(self.OneGunsBox)
-        self.Butt1Box.setObjectName("Butt1Box")
-        self.horizontalLayout_9 = QtWidgets.QHBoxLayout(self.Butt1Box)
-        self.horizontalLayout_9.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_9.setSpacing(0)
-        self.horizontalLayout_9.setObjectName("horizontalLayout_9")
-        self.Butt1Label = QtWidgets.QLabel(self.Butt1Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Butt1Label.setFont(font)
-        self.Butt1Label.setAlignment(QtCore.Qt.AlignCenter)
-        self.Butt1Label.setObjectName("Butt1Label")
-        self.horizontalLayout_9.addWidget(self.Butt1Label)
-        self.Butt1Name = QtWidgets.QLabel(self.Butt1Box)
-        self.Butt1Name.setStyleSheet("color:rgb(0, 85, 255);\n"
-"font: 75 10pt \"Arial\";")
-        self.Butt1Name.setText("")
-        self.Butt1Name.setObjectName("Butt1Name")
-        self.horizontalLayout_9.addWidget(self.Butt1Name)
-        self.verticalLayout.addWidget(self.Butt1Box)
-        self.horizontalLayout_4.addWidget(self.OneGunsBox)
-        self.TwoGunsBox = QtWidgets.QGroupBox(self.IdentifyBox)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.TwoGunsBox.setFont(font)
-        self.TwoGunsBox.setAlignment(QtCore.Qt.AlignCenter)
-        self.TwoGunsBox.setFlat(True)
-        self.TwoGunsBox.setObjectName("TwoGunsBox")
-        self.verticalLayout_2 = QtWidgets.QVBoxLayout(self.TwoGunsBox)
-        self.verticalLayout_2.setContentsMargins(0, 0, 0, 0)
-        self.verticalLayout_2.setSpacing(0)
-        self.verticalLayout_2.setObjectName("verticalLayout_2")
-        self.Name2Box = QtWidgets.QWidget(self.TwoGunsBox)
-        self.Name2Box.setObjectName("Name2Box")
-        self.horizontalLayout_10 = QtWidgets.QHBoxLayout(self.Name2Box)
-        self.horizontalLayout_10.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_10.setSpacing(0)
-        self.horizontalLayout_10.setObjectName("horizontalLayout_10")
-        self.Name2Lable = QtWidgets.QLabel(self.Name2Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Name2Lable.setFont(font)
-        self.Name2Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Name2Lable.setObjectName("Name2Lable")
-        self.horizontalLayout_10.addWidget(self.Name2Lable)
-        self.Name2Name = QtWidgets.QLabel(self.Name2Box)
-        self.Name2Name.setStyleSheet("color: rgb(56, 56, 56);\n"
-"font: 12pt \"Arial Rounded MT Bold\";")
-        self.Name2Name.setText("")
-        self.Name2Name.setObjectName("Name2Name")
-        self.horizontalLayout_10.addWidget(self.Name2Name)
-        self.verticalLayout_2.addWidget(self.Name2Box)
-        self.Muzzle2Box = QtWidgets.QWidget(self.TwoGunsBox)
-        self.Muzzle2Box.setObjectName("Muzzle2Box")
-        self.horizontalLayout_11 = QtWidgets.QHBoxLayout(self.Muzzle2Box)
-        self.horizontalLayout_11.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_11.setSpacing(0)
-        self.horizontalLayout_11.setObjectName("horizontalLayout_11")
-        self.Muzzle2Lable = QtWidgets.QLabel(self.Muzzle2Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Muzzle2Lable.setFont(font)
-        self.Muzzle2Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Muzzle2Lable.setObjectName("Muzzle2Lable")
-        self.horizontalLayout_11.addWidget(self.Muzzle2Lable)
-        self.Muzzle2Name = QtWidgets.QLabel(self.Muzzle2Box)
-        self.Muzzle2Name.setStyleSheet("color: rgb(0, 134, 0);\n"
-"font: 75 10pt \"Arial\";")
-        self.Muzzle2Name.setText("")
-        self.Muzzle2Name.setObjectName("Muzzle2Name")
-        self.horizontalLayout_11.addWidget(self.Muzzle2Name)
-        self.verticalLayout_2.addWidget(self.Muzzle2Box)
-        self.Scope2Box = QtWidgets.QWidget(self.TwoGunsBox)
-        self.Scope2Box.setObjectName("Scope2Box")
-        self.horizontalLayout_12 = QtWidgets.QHBoxLayout(self.Scope2Box)
-        self.horizontalLayout_12.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_12.setSpacing(0)
-        self.horizontalLayout_12.setObjectName("horizontalLayout_12")
-        self.Scope2Lable = QtWidgets.QLabel(self.Scope2Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Scope2Lable.setFont(font)
-        self.Scope2Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Scope2Lable.setObjectName("Scope2Lable")
-        self.horizontalLayout_12.addWidget(self.Scope2Lable)
-        self.Scope2Name = QtWidgets.QLabel(self.Scope2Box)
-        self.Scope2Name.setStyleSheet("color: rgb(255, 8, 45);\n"
-"font: 75 10pt \"Agency FB\";")
-        self.Scope2Name.setText("")
-        self.Scope2Name.setObjectName("Scope2Name")
-        self.horizontalLayout_12.addWidget(self.Scope2Name)
-        self.verticalLayout_2.addWidget(self.Scope2Box)
-        self.Grip2Box = QtWidgets.QWidget(self.TwoGunsBox)
-        self.Grip2Box.setObjectName("Grip2Box")
-        self.horizontalLayout_14 = QtWidgets.QHBoxLayout(self.Grip2Box)
-        self.horizontalLayout_14.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_14.setSpacing(0)
-        self.horizontalLayout_14.setObjectName("horizontalLayout_14")
-        self.Grip2Lable = QtWidgets.QLabel(self.Grip2Box)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Grip2Lable.setFont(font)
-        self.Grip2Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Grip2Lable.setObjectName("Grip2Lable")
-        self.horizontalLayout_14.addWidget(self.Grip2Lable)
-        self.Grip2Name = QtWidgets.QLabel(self.Grip2Box)
-        self.Grip2Name.setStyleSheet("color:rgb(0, 85, 255);\n"
-"font: 75 10pt \"Arial\";")
-        self.Grip2Name.setText("")
-        self.Grip2Name.setObjectName("Grip2Name")
-        self.horizontalLayout_14.addWidget(self.Grip2Name)
-        self.verticalLayout_2.addWidget(self.Grip2Box)
-        self.Butt2Box = QtWidgets.QWidget(self.TwoGunsBox)
-        self.Butt2Box.setObjectName("Butt2Box")
-        self.horizontalLayout_13 = QtWidgets.QHBoxLayout(self.Butt2Box)
-        self.horizontalLayout_13.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_13.setSpacing(0)
-        self.horizontalLayout_13.setObjectName("horizontalLayout_13")
-        self.Butt2Lable = QtWidgets.QLabel(self.Butt2Box)
-        font = QtGui.QFont()
-        font.setPointSize(9)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Butt2Lable.setFont(font)
-        self.Butt2Lable.setAlignment(QtCore.Qt.AlignCenter)
-        self.Butt2Lable.setObjectName("Butt2Lable")
-        self.horizontalLayout_13.addWidget(self.Butt2Lable)
-        self.Butt2Name = QtWidgets.QLabel(self.Butt2Box)
-        self.Butt2Name.setStyleSheet("color: rgb(168, 84, 0);\n"
-"font: 75 10pt \"Arial\";")
-        self.Butt2Name.setText("")
-        self.Butt2Name.setObjectName("Butt2Name")
-        self.horizontalLayout_13.addWidget(self.Butt2Name)
-        self.verticalLayout_2.addWidget(self.Butt2Box)
-        self.horizontalLayout_4.addWidget(self.TwoGunsBox)
-        self.gridLayout_2.addWidget(self.IdentifyBox, 0, 0, 1, 1)
-        self.InfoBox = QtWidgets.QWidget(self.FunctionBox)
-        self.InfoBox.setObjectName("InfoBox")
-        self.horizontalLayout_21 = QtWidgets.QHBoxLayout(self.InfoBox)
-        self.horizontalLayout_21.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_21.setSpacing(0)
-        self.horizontalLayout_21.setObjectName("horizontalLayout_21")
-        self.InfoBoxs = QtWidgets.QGroupBox(self.InfoBox)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.InfoBoxs.setFont(font)
-        self.InfoBoxs.setAlignment(QtCore.Qt.AlignCenter)
-        self.InfoBoxs.setObjectName("InfoBoxs")
-        self.horizontalLayout_22 = QtWidgets.QHBoxLayout(self.InfoBoxs)
-        self.horizontalLayout_22.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_22.setSpacing(0)
-        self.horizontalLayout_22.setObjectName("horizontalLayout_22")
-        self.Info = QtWidgets.QTextEdit(self.InfoBoxs)
-        self.Info.setReadOnly(True)
-        self.Info.setObjectName("Info")
-        self.horizontalLayout_22.addWidget(self.Info)
-        self.horizontalLayout_21.addWidget(self.InfoBoxs)
-        self.gridLayout_2.addWidget(self.InfoBox, 3, 0, 1, 1)
-        self.ParameterBox = QtWidgets.QWidget(self.FunctionBox)
-        self.ParameterBox.setObjectName("ParameterBox")
-        self.horizontalLayout_18 = QtWidgets.QHBoxLayout(self.ParameterBox)
-        self.horizontalLayout_18.setContentsMargins(0, 5, 0, 0)
-        self.horizontalLayout_18.setSpacing(0)
-        self.horizontalLayout_18.setObjectName("horizontalLayout_18")
-        self.EquipBox = QtWidgets.QGroupBox(self.ParameterBox)
+        # ────── 内容区 ──────
+        content = QtWidgets.QWidget(self.Container)
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(8, 4, 8, 8)
+        content_layout.setSpacing(4)
+
+        # ═══ 枪械识别区 ═══
+        guns_row = QtWidgets.QHBoxLayout()
+        guns_row.setSpacing(8)
+
+        self.OneGunsBox = self._build_gun_group(content, "1号枪", 1)
+        self.TwoGunsBox = self._build_gun_group(content, "2号枪", 2)
+        guns_row.addWidget(self.OneGunsBox)
+        guns_row.addWidget(self.TwoGunsBox)
+        content_layout.addLayout(guns_row)
+
+        # ═══ 状态控制区 ═══
+        ctrl_row = QtWidgets.QHBoxLayout()
+        ctrl_row.setSpacing(6)
+
+        # 当前装备
+        self.EquipBox = QtWidgets.QGroupBox("当前装备", content)
         self.EquipBox.setEnabled(False)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.EquipBox.setFont(font)
-        self.EquipBox.setFlat(False)
-        self.EquipBox.setObjectName("EquipBox")
-        self.horizontalLayout_20 = QtWidgets.QHBoxLayout(self.EquipBox)
-        self.horizontalLayout_20.setContentsMargins(5, 0, 5, 0)
-        self.horizontalLayout_20.setSpacing(6)
-        self.horizontalLayout_20.setObjectName("horizontalLayout_20")
-        self.OneGuns = QtWidgets.QRadioButton(self.EquipBox)
-        self.OneGuns.setStyleSheet("color: rgb(255, 0, 0);")
-        self.OneGuns.setObjectName("OneGuns")
-        self.horizontalLayout_20.addWidget(self.OneGuns)
-        self.TwoGuns = QtWidgets.QRadioButton(self.EquipBox)
-        self.TwoGuns.setStyleSheet("color: rgb(255, 0, 0);")
-        self.TwoGuns.setObjectName("TwoGuns")
-        self.horizontalLayout_20.addWidget(self.TwoGuns)
-        self.Orders = QtWidgets.QRadioButton(self.EquipBox)
-        self.Orders.setObjectName("Orders")
-        self.horizontalLayout_20.addWidget(self.Orders)
-        self.horizontalLayout_18.addWidget(self.EquipBox)
-        self.PoseBox = QtWidgets.QGroupBox(self.ParameterBox)
+        eq_layout = QtWidgets.QHBoxLayout(self.EquipBox)
+        eq_layout.setContentsMargins(6, 2, 6, 2)
+        self.OneGuns = QtWidgets.QRadioButton("1号枪", self.EquipBox)
+        self.TwoGuns = QtWidgets.QRadioButton("2号枪", self.EquipBox)
+        self.Orders = QtWidgets.QRadioButton("其他", self.EquipBox)
+        eq_layout.addWidget(self.OneGuns)
+        eq_layout.addWidget(self.TwoGuns)
+        eq_layout.addWidget(self.Orders)
+        ctrl_row.addWidget(self.EquipBox)
+
+        # 当前姿势
+        self.PoseBox = QtWidgets.QGroupBox("当前姿势", content)
         self.PoseBox.setEnabled(False)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.PoseBox.setFont(font)
-        self.PoseBox.setObjectName("PoseBox")
-        self.horizontalLayout_19 = QtWidgets.QHBoxLayout(self.PoseBox)
-        self.horizontalLayout_19.setContentsMargins(5, 0, 5, 0)
-        self.horizontalLayout_19.setSpacing(6)
-        self.horizontalLayout_19.setObjectName("horizontalLayout_19")
-        self.SquatDown = QtWidgets.QRadioButton(self.PoseBox)
-        self.SquatDown.setObjectName("SquatDown")
-        self.horizontalLayout_19.addWidget(self.SquatDown)
-        self.GetDown = QtWidgets.QRadioButton(self.PoseBox)
-        self.GetDown.setObjectName("GetDown")
-        self.horizontalLayout_19.addWidget(self.GetDown)
-        self.Stand = QtWidgets.QRadioButton(self.PoseBox)
-        self.Stand.setCheckable(True)
-        self.Stand.setChecked(False)
-        self.Stand.setAutoRepeat(False)
-        self.Stand.setObjectName("Stand")
-        self.horizontalLayout_19.addWidget(self.Stand)
-        self.horizontalLayout_18.addWidget(self.PoseBox)
-        self.horizontalLayout_18.setStretch(0, 1)
-        self.horizontalLayout_18.setStretch(1, 1)
-        self.gridLayout_2.addWidget(self.ParameterBox, 1, 0, 1, 1)
-        self.gridLayout_2.setRowStretch(0, 2)
-        self.gridLayout_2.setRowStretch(1, 1)
-        self.gridLayout_2.setRowStretch(2, 1)
-        self.gridLayout_2.setRowStretch(3, 2)
-        self.gridLayout.addWidget(self.FunctionBox, 2, 0, 1, 1)
-        self.ResolutionBox = QtWidgets.QWidget(self.Container)
-        self.ResolutionBox.setObjectName("ResolutionBox")
-        self.horizontalLayout_23 = QtWidgets.QHBoxLayout(self.ResolutionBox)
-        self.horizontalLayout_23.setContentsMargins(0, 0, 0, 0)
-        self.horizontalLayout_23.setSpacing(6)
-        self.horizontalLayout_23.setObjectName("horizontalLayout_23")
-        self.Resolution = QtWidgets.QGroupBox(self.ResolutionBox)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.Resolution.setFont(font)
-        self.Resolution.setAlignment(QtCore.Qt.AlignCenter)
-        self.Resolution.setFlat(True)
-        self.Resolution.setCheckable(False)
-        self.Resolution.setObjectName("Resolution")
-        self.horizontalLayout_24 = QtWidgets.QHBoxLayout(self.Resolution)
-        self.horizontalLayout_24.setObjectName("horizontalLayout_24")
+        pose_layout = QtWidgets.QHBoxLayout(self.PoseBox)
+        pose_layout.setContentsMargins(6, 2, 6, 2)
+        self.SquatDown = QtWidgets.QRadioButton("下蹲", self.PoseBox)
+        self.GetDown = QtWidgets.QRadioButton("趴下", self.PoseBox)
+        self.Stand = QtWidgets.QRadioButton("站立", self.PoseBox)
+        pose_layout.addWidget(self.SquatDown)
+        pose_layout.addWidget(self.GetDown)
+        pose_layout.addWidget(self.Stand)
+        ctrl_row.addWidget(self.PoseBox)
+
+        content_layout.addLayout(ctrl_row)
+
+        # ═══ 开镜 & 视角 ═══
+        scope_row = QtWidgets.QHBoxLayout()
+        scope_row.setSpacing(6)
+
+        # 开镜模式
+        self.ScopeMode = QtWidgets.QGroupBox("开镜模式", content)
+        sm_layout = QtWidgets.QHBoxLayout(self.ScopeMode)
+        sm_layout.setContentsMargins(6, 2, 6, 2)
+        self.LongPress = QtWidgets.QRadioButton("长按", self.ScopeMode)
+        self.ClickPress = QtWidgets.QRadioButton("单击", self.ScopeMode)
+        sm_layout.addWidget(self.LongPress)
+        sm_layout.addWidget(self.ClickPress)
+        scope_row.addWidget(self.ScopeMode)
+
+        # 是否开镜
+        self.IsScope = QtWidgets.QGroupBox("是否开镜", content)
+        self.IsScope.setEnabled(False)
+        is_layout = QtWidgets.QHBoxLayout(self.IsScope)
+        is_layout.setContentsMargins(6, 2, 6, 2)
+        self.OpenScope = QtWidgets.QRadioButton("开镜", self.IsScope)
+        self.CloseScope = QtWidgets.QRadioButton("未开镜", self.IsScope)
+        is_layout.addWidget(self.OpenScope)
+        is_layout.addWidget(self.CloseScope)
+        scope_row.addWidget(self.IsScope)
+
+        # 视角选择
+        self.ViewMode = QtWidgets.QGroupBox("视角选择", content)
+        vm_layout = QtWidgets.QHBoxLayout(self.ViewMode)
+        vm_layout.setContentsMargins(6, 2, 6, 2)
+        self.FirstPerson = QtWidgets.QRadioButton("第一人称", self.ViewMode)
+        self.ThirdPerson = QtWidgets.QRadioButton("第三人称", self.ViewMode)
+        vm_layout.addWidget(self.FirstPerson)
+        vm_layout.addWidget(self.ThirdPerson)
+        scope_row.addWidget(self.ViewMode)
+
+        content_layout.addLayout(scope_row)
+
+        # ═══ 参数设置区 ═══
+        param_row = QtWidgets.QHBoxLayout()
+        param_row.setSpacing(6)
 
         # 分辨率
-        self.ResolutionLabel = QtWidgets.QLabel(self.Resolution)
-        self.ResolutionLabel.setObjectName("ResolutionLabel")
-        self.horizontalLayout_24.addWidget(self.ResolutionLabel)
-        self.ResolutionSelect = QtWidgets.QComboBox(self.Resolution)
-        self.ResolutionSelect.setObjectName("ResolutionSelect")
-        self.ResolutionSelect.addItem("")
-        self.ResolutionSelect.setItemText(0, "3840x2160")
-        self.ResolutionSelect.addItem("")
-        self.ResolutionSelect.addItem("")
-        self.ResolutionSelect.addItem("")
-        self.ResolutionSelect.addItem("")
-        self.ResolutionSelect.addItem("")
-        self.ResolutionSelect.addItem("")
-        self.horizontalLayout_24.addWidget(self.ResolutionSelect)
-        self.ResolutionBtn = QtWidgets.QPushButton(self.Resolution)
-        self.ResolutionBtn.setObjectName("ResolutionBtn")
-        self.horizontalLayout_24.addWidget(self.ResolutionBtn)
-        self.horizontalLayout_24.setStretch(0, 1)
-        self.horizontalLayout_24.setStretch(1, 2)
-        self.horizontalLayout_24.setStretch(2, 1)
-        self.horizontalLayout_23.addWidget(self.Resolution)
-        self.Sensitivity = QtWidgets.QGroupBox(self.ResolutionBox)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.Sensitivity.setFont(font)
-        self.Sensitivity.setAlignment(QtCore.Qt.AlignCenter)
-        self.Sensitivity.setFlat(True)
-        self.Sensitivity.setObjectName("Sensitivity")
-        self.horizontalLayout_25 = QtWidgets.QHBoxLayout(self.Sensitivity)
-        self.horizontalLayout_25.setObjectName("horizontalLayout_25")
-        self.SensitivityLabel = QtWidgets.QLabel(self.Sensitivity)
-        self.SensitivityLabel.setObjectName("SensitivityLabel")
-        self.horizontalLayout_25.addWidget(self.SensitivityLabel)
-        self.SensitivitySelect = QtWidgets.QComboBox(self.Sensitivity)
-        self.SensitivitySelect.setObjectName("SensitivitySelect")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.SensitivitySelect.addItem("")
-        self.horizontalLayout_25.addWidget(self.SensitivitySelect)
-        self.SensitivityText = QtWidgets.QLineEdit(self.Sensitivity)
-        self.SensitivityText.setObjectName("SensitivityText")
-        self.horizontalLayout_25.addWidget(self.SensitivityText)
-        self.SensitivityBtn = QtWidgets.QPushButton(self.Sensitivity)
-        self.SensitivityBtn.setObjectName("SensitivityBtn")
-        self.horizontalLayout_25.addWidget(self.SensitivityBtn)
-        self.horizontalLayout_25.setStretch(0, 1)
-        self.horizontalLayout_25.setStretch(1, 1)
-        self.horizontalLayout_25.setStretch(2, 1)
-        self.horizontalLayout_25.setStretch(3, 1)
-        self.horizontalLayout_23.addWidget(self.Sensitivity)
+        res_group = QtWidgets.QGroupBox("分辨率", content)
+        rg_layout = QtWidgets.QHBoxLayout(res_group)
+        rg_layout.setContentsMargins(6, 2, 6, 2)
+        self.ResolutionSelect = QtWidgets.QComboBox(res_group)
+        for r in ["3840x2160", "3440x1440", "2560x1600", "2560x1440",
+                   "2304x1440", "2560x1080", "1920x1080", "1728x1080"]:
+            self.ResolutionSelect.addItem(r)
+        rg_layout.addWidget(self.ResolutionSelect, 2)
+        self.ResolutionBtn = QtWidgets.QPushButton("保存", res_group)
+        rg_layout.addWidget(self.ResolutionBtn, 1)
+        param_row.addWidget(res_group)
 
-        # 压枪版本选择
-        self.RecoilVersion = QtWidgets.QGroupBox(self.ResolutionBox)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.RecoilVersion.setFont(font)
-        self.RecoilVersion.setAlignment(QtCore.Qt.AlignCenter)
-        self.RecoilVersion.setFlat(True)
-        self.RecoilVersion.setObjectName("RecoilVersion")
-        self.horizontalLayout_rv = QtWidgets.QHBoxLayout(self.RecoilVersion)
-        self.horizontalLayout_rv.setObjectName("horizontalLayout_rv")
+        # 倍镜系数
+        sens_group = QtWidgets.QGroupBox("倍镜系数", content)
+        sg_layout = QtWidgets.QHBoxLayout(sens_group)
+        sg_layout.setContentsMargins(6, 2, 6, 2)
+        self.SensitivitySelect = QtWidgets.QComboBox(sens_group)
+        for s in ["无", "红点", "全息", "2倍", "3倍", "4倍", "6倍", "8倍", "15倍", "shift"]:
+            self.SensitivitySelect.addItem(s)
+        sg_layout.addWidget(self.SensitivitySelect, 1)
+        self.SensitivityText = QtWidgets.QLineEdit(sens_group)
+        sg_layout.addWidget(self.SensitivityText, 1)
+        self.SensitivityBtn = QtWidgets.QPushButton("保存", sens_group)
+        sg_layout.addWidget(self.SensitivityBtn, 1)
+        param_row.addWidget(sens_group)
 
-        self.RecoilVersionLabel = QtWidgets.QLabel(self.RecoilVersion)
-        self.RecoilVersionLabel.setObjectName("RecoilVersionLabel")
-        self.horizontalLayout_rv.addWidget(self.RecoilVersionLabel)
+        content_layout.addLayout(param_row)
 
-        self.RecoilVersionSelect = QtWidgets.QComboBox(self.RecoilVersion)
-        self.RecoilVersionSelect.setObjectName("RecoilVersionSelect")
-        self.RecoilVersionSelect.addItem("v3 (Lua弹道+ABCD编码)")
-        self.RecoilVersionSelect.addItem("v2 (自校准+A*B*C*编码)")
-        self.horizontalLayout_rv.addWidget(self.RecoilVersionSelect)
+        # ═══ 高级参数 ═══
+        adv_row = QtWidgets.QHBoxLayout()
+        adv_row.setSpacing(6)
 
-        self.RecoilVersionBtn = QtWidgets.QPushButton(self.RecoilVersion)
-        self.RecoilVersionBtn.setObjectName("RecoilVersionBtn")
-        self.horizontalLayout_rv.addWidget(self.RecoilVersionBtn)
-
-        self.horizontalLayout_rv.setStretch(0, 1)
-        self.horizontalLayout_rv.setStretch(1, 2)
-        self.horizontalLayout_rv.setStretch(2, 1)
-        self.horizontalLayout_23.addWidget(self.RecoilVersion)
-
-        # 姿态系数配置
-        self.PostureConfig = QtWidgets.QGroupBox(self.ResolutionBox)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.PostureConfig.setFont(font)
-        self.PostureConfig.setAlignment(QtCore.Qt.AlignCenter)
-        self.PostureConfig.setFlat(True)
-        self.PostureConfig.setObjectName("PostureConfig")
-        self.horizontalLayout_pc = QtWidgets.QHBoxLayout(self.PostureConfig)
-        self.horizontalLayout_pc.setObjectName("horizontalLayout_pc")
-
-        self.PostureLabel = QtWidgets.QLabel(self.PostureConfig)
-        self.PostureLabel.setObjectName("PostureLabel")
-        self.horizontalLayout_pc.addWidget(self.PostureLabel)
-
-        self.PostureSelect = QtWidgets.QComboBox(self.PostureConfig)
-        self.PostureSelect.setObjectName("PostureSelect")
+        # 姿态系数
+        posture_group = QtWidgets.QGroupBox("姿态系数", content)
+        pg_layout = QtWidgets.QHBoxLayout(posture_group)
+        pg_layout.setContentsMargins(6, 2, 6, 2)
+        self.PostureSelect = QtWidgets.QComboBox(posture_group)
         self.PostureSelect.addItem("蹲下")
         self.PostureSelect.addItem("趴下")
-        self.horizontalLayout_pc.addWidget(self.PostureSelect)
+        pg_layout.addWidget(self.PostureSelect, 1)
+        self.PostureText = QtWidgets.QLineEdit(posture_group)
+        pg_layout.addWidget(self.PostureText, 1)
+        self.PostureBtn = QtWidgets.QPushButton("保存", posture_group)
+        pg_layout.addWidget(self.PostureBtn, 1)
+        adv_row.addWidget(posture_group)
 
-        self.PostureText = QtWidgets.QLineEdit(self.PostureConfig)
-        self.PostureText.setObjectName("PostureText")
-        self.horizontalLayout_pc.addWidget(self.PostureText)
+        # 枪械系数
+        gun_ratio_group = QtWidgets.QGroupBox("枪械系数", content)
+        gr_layout = QtWidgets.QHBoxLayout(gun_ratio_group)
+        gr_layout.setContentsMargins(6, 2, 6, 2)
+        self.GunRatioSelect = QtWidgets.QComboBox(gun_ratio_group)
+        gr_layout.addWidget(self.GunRatioSelect, 2)
+        self.GunRatioText = QtWidgets.QLineEdit(gun_ratio_group)
+        gr_layout.addWidget(self.GunRatioText, 1)
+        self.GunRatioBtn = QtWidgets.QPushButton("保存", gun_ratio_group)
+        gr_layout.addWidget(self.GunRatioBtn, 1)
+        adv_row.addWidget(gun_ratio_group)
 
-        self.PostureBtn = QtWidgets.QPushButton(self.PostureConfig)
-        self.PostureBtn.setObjectName("PostureBtn")
-        self.horizontalLayout_pc.addWidget(self.PostureBtn)
+        content_layout.addLayout(adv_row)
 
-        self.horizontalLayout_pc.setStretch(0, 1)
-        self.horizontalLayout_pc.setStretch(1, 1)
-        self.horizontalLayout_pc.setStretch(2, 1)
-        self.horizontalLayout_pc.setStretch(3, 1)
-        self.horizontalLayout_23.addWidget(self.PostureConfig)
+        # ═══ 日志区 ═══
+        log_group = QtWidgets.QGroupBox("日志", content)
+        log_layout = QtWidgets.QVBoxLayout(log_group)
+        log_layout.setContentsMargins(4, 4, 4, 4)
+        self.Info = QtWidgets.QTextEdit(log_group)
+        self.Info.setReadOnly(True)
+        self.Info.setMaximumHeight(100)
+        log_layout.addWidget(self.Info)
+        content_layout.addWidget(log_group)
 
-        # 枪械独立压枪系数配置
-        self.GunRatioConfig = QtWidgets.QGroupBox(self.ResolutionBox)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.GunRatioConfig.setFont(font)
-        self.GunRatioConfig.setAlignment(QtCore.Qt.AlignCenter)
-        self.GunRatioConfig.setFlat(True)
-        self.GunRatioConfig.setObjectName("GunRatioConfig")
-        self.horizontalLayout_gr = QtWidgets.QHBoxLayout(self.GunRatioConfig)
-        self.horizontalLayout_gr.setObjectName("horizontalLayout_gr")
+        # ═══ 底部按钮 ═══
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(8)
 
-        self.GunRatioLabel = QtWidgets.QLabel(self.GunRatioConfig)
-        self.GunRatioLabel.setObjectName("GunRatioLabel")
-        self.horizontalLayout_gr.addWidget(self.GunRatioLabel)
-
-        self.GunRatioSelect = QtWidgets.QComboBox(self.GunRatioConfig)
-        self.GunRatioSelect.setObjectName("GunRatioSelect")
-        self.horizontalLayout_gr.addWidget(self.GunRatioSelect)
-
-        self.GunRatioText = QtWidgets.QLineEdit(self.GunRatioConfig)
-        self.GunRatioText.setObjectName("GunRatioText")
-        self.horizontalLayout_gr.addWidget(self.GunRatioText)
-
-        self.GunRatioBtn = QtWidgets.QPushButton(self.GunRatioConfig)
-        self.GunRatioBtn.setObjectName("GunRatioBtn")
-        self.horizontalLayout_gr.addWidget(self.GunRatioBtn)
-
-        self.horizontalLayout_gr.setStretch(0, 1)
-        self.horizontalLayout_gr.setStretch(1, 2)
-        self.horizontalLayout_gr.setStretch(2, 1)
-        self.horizontalLayout_gr.setStretch(3, 1)
-        self.horizontalLayout_23.addWidget(self.GunRatioConfig)
-
-        self.horizontalLayout_23.setStretch(0, 1)
-        self.horizontalLayout_23.setStretch(1, 1)
-        self.horizontalLayout_23.setStretch(2, 1)
-        self.horizontalLayout_23.setStretch(3, 1)
-        self.horizontalLayout_23.setStretch(4, 1)
-        self.gridLayout.addWidget(self.ResolutionBox, 5, 0, 1, 1)
-        self.BtnBox = QtWidgets.QWidget(self.Container)
-        self.BtnBox.setObjectName("BtnBox")
-        self.horizontalLayout_3 = QtWidgets.QHBoxLayout(self.BtnBox)
-        self.horizontalLayout_3.setContentsMargins(5, 5, 5, 5)
-        self.horizontalLayout_3.setSpacing(10)
-        self.horizontalLayout_3.setObjectName("horizontalLayout_3")
-        self.StatusInfo = QtWidgets.QLineEdit(self.BtnBox)
-        self.StatusInfo.setStyleSheet("color: rgb(170, 0, 0);")
-        self.StatusInfo.setDragEnabled(False)
-        self.StatusInfo.setReadOnly(True)
+        self.StatusInfo = QtWidgets.QLineEdit(content)
         self.StatusInfo.setObjectName("StatusInfo")
-        self.horizontalLayout_3.addWidget(self.StatusInfo)
-        self.Startbtn = QtWidgets.QPushButton(self.BtnBox)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Startbtn.setFont(font)
+        self.StatusInfo.setReadOnly(True)
+        self.StatusInfo.setText("未启动...")
+        btn_row.addWidget(self.StatusInfo, 3)
+
+        self.Startbtn = QtWidgets.QPushButton("启动", content)
         self.Startbtn.setObjectName("Startbtn")
-        self.horizontalLayout_3.addWidget(self.Startbtn)
-        self.Pausebtn = QtWidgets.QPushButton(self.BtnBox)
+        btn_row.addWidget(self.Startbtn, 1)
+
+        self.Pausebtn = QtWidgets.QPushButton("暂停", content)
         self.Pausebtn.setEnabled(False)
-        font = QtGui.QFont()
-        font.setBold(True)
-        font.setWeight(75)
-        self.Pausebtn.setFont(font)
-        self.Pausebtn.setObjectName("Pausebtn")
-        self.horizontalLayout_3.addWidget(self.Pausebtn)
-        self.Stopbtn = QtWidgets.QPushButton(self.BtnBox)
-        self.Stopbtn.setEnabled(False)
-        font = QtGui.QFont()
-        font.setPointSize(10)
-        font.setBold(True)
-        font.setWeight(75)
-        self.Stopbtn.setFont(font)
+        btn_row.addWidget(self.Pausebtn, 1)
+
+        self.Stopbtn = QtWidgets.QPushButton("退出", content)
         self.Stopbtn.setObjectName("Stopbtn")
-        self.horizontalLayout_3.addWidget(self.Stopbtn)
-        self.horizontalLayout_3.setStretch(1, 2)
-        self.horizontalLayout_3.setStretch(2, 2)
-        self.horizontalLayout_3.setStretch(3, 2)
-        self.gridLayout.addWidget(self.BtnBox, 6, 0, 1, 1)
-        self.gridLayout.setRowStretch(0, 1)
-        self.gridLayout.setRowStretch(1, 2)
-        self.gridLayout.setRowStretch(2, 6)
-        self.gridLayout.setRowStretch(5, 1)
-        self.verticalLayout_3.addWidget(self.Container)
-        self.retranslateUi(PUBG)
-        QtCore.QMetaObject.connectSlotsByName(PUBG)
+        self.Stopbtn.setEnabled(False)
+        btn_row.addWidget(self.Stopbtn, 1)
 
-    def retranslateUi(self, PUBG):
-        _translate = QtCore.QCoreApplication.translate
-        PUBG.setWindowTitle(_translate("PUBG", "LGHUB"))
-#         self.Title.setText(_translate("PUBG", "PUBG 自动识别鼠标宏"))
-#         self.Remind.setHtml(_translate("PUBG", "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n"
-# "<html><head><meta name=\"qrichtext\" content=\"1\" /><style type=\"text/css\">\n"
-# "p, li { white-space: pre-wrap; }\n"
-# "</style></head><body style=\" font-family:\'SimSun\'; font-size:9pt; font-weight:400; font-style:normal;\">\n"
-# "<p align=\"center\" style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">使用须知</span></p>\n"
-# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 1.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">本软件免费学习使用，禁止倒卖，交流QQ群：695919722</span></p>\n"
-# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 2.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">如果觉得好用，可以在下方支持下作者，广告联系作者微信：js_python98</span></p>\n"
-# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 3.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">使用需要安装罗技GHUB 21版本或LGS蓝驱的驱动，并禁止驱动更新</span></p>\n"
-# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 4.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">GHUB和本软件都需要以管理员身份运行</span></p>\n"
-# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\"> 5.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">分辨率支持：1080p 1.5k 1440p 1660p 2.5k 4k</span></p>\n"
-# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">6.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">打开背包后，按下tab识别，识别率高达95%，支持全配件识别</span></p>\n"
-# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">7.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">适配所有灵敏度</span></p>\n"
-# "<p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;\"><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"> </span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:12pt; font-weight:600; color:#aa0000;\">8.</span><span style=\" font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\">按下“Home键”弹出隐藏窗口，按下“ins”键重置当前所有状态（枪械，开镜方式，姿态，开镜状态）</span></p>\n"
-# "<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:\'宋体\',\'monospace\'; font-size:10pt; color:#000000;\"><br /></p>\n"
-# "<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px; font-family:\'宋体\',\'monospace\'; font-size:12pt; color:#ecc48d;\"><br /></p></body></html>"))
-        self.ScopeMode.setTitle(_translate("PUBG", "开镜模式"))
-        self.LongPress.setText(_translate("PUBG", "长按"))
-        self.ClickPress.setText(_translate("PUBG", "单击"))
-        self.IsScope.setTitle(_translate("PUBG", "是否开镜"))
-        self.OpenScope.setText(_translate("PUBG", "开镜"))
-        self.CloseScope.setText(_translate("PUBG", "未开镜"))
-        self.ViewMode.setTitle(_translate("PUBG", "视角选择"))
-        self.FirstPerson.setText(_translate("PUBG", "第一人称"))
-        self.ThirdPerson.setText(_translate("PUBG", "第三人称"))
+        content_layout.addLayout(btn_row)
 
-        self.OneGunsBox.setTitle(_translate("PUBG", "一号枪"))
-        self.Name1Lable.setText(_translate("PUBG", "名称："))
-        self.Muzzle1Lable.setText(_translate("PUBG", "枪口："))
-        self.Scope1Lable.setText(_translate("PUBG", "倍镜："))
-        self.Grip1Lable.setText(_translate("PUBG", "握把："))
-        self.Butt1Label.setText(_translate("PUBG", "枪托："))
-        self.TwoGunsBox.setTitle(_translate("PUBG", "二号枪"))
-        self.Name2Lable.setText(_translate("PUBG", "名称："))
-        self.Muzzle2Lable.setText(_translate("PUBG", "枪口："))
-        self.Scope2Lable.setText(_translate("PUBG", "倍镜："))
-        self.Grip2Lable.setText(_translate("PUBG", "握把："))
-        self.Butt2Lable.setText(_translate("PUBG", "枪托："))
-        self.InfoBoxs.setTitle(_translate("PUBG", "日志输出"))
-        self.EquipBox.setTitle(_translate("PUBG", "当前装备"))
-        self.OneGuns.setText(_translate("PUBG", "1号枪"))
-        self.TwoGuns.setText(_translate("PUBG", "2号枪"))
-        self.Orders.setText(_translate("PUBG", "其他"))
-        self.PoseBox.setTitle(_translate("PUBG", "当前姿势"))
-        self.SquatDown.setText(_translate("PUBG", "下蹲"))
-        self.GetDown.setText(_translate("PUBG", "趴下"))
-        self.Stand.setText(_translate("PUBG", "站立"))
-        self.Resolution.setTitle(_translate("PUBG", "分辨率设置"))
-        self.ResolutionLabel.setText(_translate("PUBG", "当前分辨率："))
-        self.ResolutionSelect.setItemText(1, _translate("PUBG", "1728x1080"))
-        self.ResolutionSelect.setItemText(2, _translate("PUBG", "1920x1080"))
-        self.ResolutionSelect.setItemText(3, _translate("PUBG", "2560x1080"))
-        self.ResolutionSelect.setItemText(4, _translate("PUBG", "2560x1440"))
-        self.ResolutionSelect.setItemText(5, _translate("PUBG", "2560x1600"))
-        self.ResolutionSelect.setItemText(6, _translate("PUBG", "3440x1440"))
-        self.ResolutionSelect.setItemText(7, _translate("PUBG", "3840x2160"))
-        self.ResolutionBtn.setText(_translate("PUBG", "保存设置"))
-        self.Sensitivity.setTitle(_translate("PUBG", "灵敏度设置"))
-        self.SensitivityLabel.setText(_translate("PUBG", "当前灵敏度："))
-        self.SensitivitySelect.setItemText(0, _translate("PUBG", "无"))
-        self.SensitivitySelect.setItemText(1, _translate("PUBG", "红点"))
-        self.SensitivitySelect.setItemText(2, _translate("PUBG", "全息"))
-        self.SensitivitySelect.setItemText(3, _translate("PUBG", "2倍"))
-        self.SensitivitySelect.setItemText(4, _translate("PUBG", "3倍"))
-        self.SensitivitySelect.setItemText(5, _translate("PUBG", "4倍"))
-        self.SensitivitySelect.setItemText(6, _translate("PUBG", "6倍"))
-        self.SensitivitySelect.setItemText(7, _translate("PUBG", "8倍"))
-        self.SensitivitySelect.setItemText(8, _translate("PUBG", "15倍"))
-        self.SensitivitySelect.setItemText(9, _translate("PUBG", "shift"))
-        self.SensitivityBtn.setText(_translate("PUBG", "保存设置"))
-        self.RecoilVersion.setTitle(_translate("PUBG", "压枪版本"))
-        self.RecoilVersionLabel.setText(_translate("PUBG", "弹道版本："))
-        self.RecoilVersionBtn.setText(_translate("PUBG", "保存设置"))
-        self.PostureConfig.setTitle(_translate("PUBG", "姿态系数"))
-        self.PostureLabel.setText(_translate("PUBG", "姿态："))
-        self.PostureBtn.setText(_translate("PUBG", "保存设置"))
-        self.GunRatioConfig.setTitle(_translate("PUBG", "枪械系数"))
-        self.GunRatioLabel.setText(_translate("PUBG", "枪械："))
-        self.GunRatioBtn.setText(_translate("PUBG", "保存设置"))
-        self.StatusInfo.setText(_translate("PUBG", "未启动..."))
-        self.Startbtn.setText(_translate("PUBG", "启动"))
-        self.Pausebtn.setText(_translate("PUBG", "暂停"))
-        self.Stopbtn.setText(_translate("PUBG", "退出"))
+        main_layout.addWidget(content, 1)
+
+    # ── 枪械信息组构建 ──
+
+    def _build_gun_group(self, parent, title, idx):
+        group = QtWidgets.QGroupBox(title, parent)
+        layout = QtWidgets.QGridLayout(group)
+        layout.setContentsMargins(6, 6, 6, 4)
+        layout.setVerticalSpacing(2)
+        layout.setHorizontalSpacing(4)
+
+        labels = [
+            ("名称", "gun-name"),
+            ("枪口", "accessory-muzzle"),
+            ("倍镜", "accessory-scope"),
+            ("握把", "accessory-grip"),
+            ("枪托", "accessory-stock"),
+        ]
+        attrs = ["Name", "Muzzle", "Scope", "Grip", "Butt"]
+
+        for row, ((text, css_class), attr) in enumerate(zip(labels, attrs)):
+            lbl = QtWidgets.QLabel(f"{text}:", group)
+            lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            layout.addWidget(lbl, row, 0)
+
+            val = QtWidgets.QLabel("", group)
+            val.setProperty("class", css_class)
+            val.setStyleSheet(self._accessory_style(css_class))
+            layout.addWidget(val, row, 1)
+
+            setattr(self, f"{attr}{idx}Lable" if attr != "Butt" else f"{attr}{idx}Label", lbl)
+            setattr(self, f"{attr}{idx}Name", val)
+
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 3)
+        return group
+
+    @staticmethod
+    def _accessory_style(css_class):
+        colors = {
+            "gun-name": "#ffba08",
+            "accessory-scope": "#ff4444",
+            "accessory-muzzle": "#4ae04a",
+            "accessory-grip": "#e0a040",
+            "accessory-stock": "#4a9eff",
+        }
+        c = colors.get(css_class, "#c0c0d0")
+        weight = "bold" if css_class == "gun-name" else "normal"
+        size = "11pt" if css_class == "gun-name" else "10pt"
+        return f"color: {c}; font-weight: {weight}; font-size: {size};"

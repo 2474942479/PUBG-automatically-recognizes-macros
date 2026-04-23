@@ -1,12 +1,59 @@
+import logging
+import os
 import sys
+import time
+import traceback
+from logging.handlers import RotatingFileHandler
+
 from data import fire_data
 from core import process as Process
+from core.paths import res_path
 from PyQt5.QtCore import QThread, Qt, pyqtSignal, QEvent
 from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QMainWindow
 from ui.pubg_ui import Ui_PUBG
 from input.mouse_listener import AppMainMouseListener
 from input.key_listener import AppMainKeyListener
 from ui.overlay_hud import GameHUD
+
+VERSION = "1.0.0"
+logger = logging.getLogger(__name__)
+
+
+def setup_logging():
+    log_dir = res_path('logs')
+    os.makedirs(log_dir, exist_ok=True)
+    handler = RotatingFileHandler(
+        os.path.join(log_dir, 'app.log'),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding='utf-8'
+    )
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+    ))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+
+
+def setup_exception_handler():
+    def handler(exc_type, exc_value, exc_tb):
+        error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logger.critical("未处理异常:\n%s", error_msg)
+        crash_file = res_path('logs', f'crash_{int(time.time())}.log')
+        try:
+            with open(crash_file, 'w', encoding='utf-8') as f:
+                f.write(error_msg)
+        except Exception:
+            pass
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Critical)
+        msg.setWindowTitle("程序异常")
+        msg.setText(f"程序遇到了一个错误，即将退出。\n\n错误日志已保存到:\n{crash_file}")
+        msg.setDetailedText(error_msg)
+        msg.setWindowFlags(msg.windowFlags() | Qt.WindowStaysOnTopHint)
+        msg.exec_()
+    sys.excepthook = handler
 
 class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidget和UI类
     def __init__(self):  # 初始化方法
@@ -19,25 +66,32 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
                           '3倍': '3bei', '4倍': "4bei", '6倍': '6bei', '8倍': '8bei', '15倍': '15bei', 'shift': 'shift'}
         self.init_ui()  # 调用初始化UI方法
 
-    def init_ui(self):  # 初始化UI方法
-        self.setupUi(self)  # 设置UI
-        self.setWindowFlags(Qt.WindowStaysOnTopHint)  # 设置窗口始终置顶
-        self.Init_UI_LOG("程序初始化中.....")  # 初始化日志
-        self.Init_UI_LOG(PC.ghub_device_info)  # 初始化日志，显示设备信息
-        # self.Init_UI_Win()  # 初始化窗口信息
-        self.Init_UI_Equip(PC.Current_firearms)  # 初始化枪械信息
-        self.Init_UI_Posture(PC.Current_posture)  # 初始化姿态信息
-        self.Init_UI_ScopeMode(PC.RightClick)  # 初始化开镜模式
-        self.Init_UI_ScopeOpen(PC.StartFire)  # 初始化是否开镜
-        self.Init_UI_GunsData()  # 初始化枪械数据
-        self.ResolutionSelect.setCurrentText(PC.Monitor)  # 设置分辨率选择
-        self.Init_UI_Sensitivity()  # 初始化灵敏度
-        self.Init_UI_RecoilVersion()  # 初始化压枪版本选择
-        self.Init_UI_PostureV3()  # 初始化姿态系数
-        self.Init_UI_GunRatioV3()  # 初始化枪械系数
-        self.Init_UI_Btn()  # 初始化按钮
-        self.Init_UI_LOG("程序初始化完成.....")  # 初始化完成日志
-        # 初始化 HUD 浮窗
+    def init_ui(self):
+        self.setupUi(self)
+        self.setWindowTitle(f"PUBG 宏识别工具 v{VERSION}")
+        self.setWindowFlags(Qt.WindowStaysOnTopHint)
+        self.Init_UI_LOG(f"程序初始化中... v{VERSION}")
+        self.Init_UI_LOG(PC.ghub_device_info)
+
+        if PC.ghub_device_info and ("缺失" in PC.ghub_device_info or "未安装" in PC.ghub_device_info):
+            QMessageBox.warning(
+                self, "驱动检测",
+                "未检测到罗技 G HUB 驱动！\n\n"
+                "请先安装 G HUB 驱动，安装后重启电脑再运行本工具。\n"
+                "下载地址: https://www.logitechg.com/zh-cn/innovation/g-hub.html"
+            )
+
+        self.Init_UI_Equip(PC.Current_firearms)
+        self.Init_UI_Posture(PC.Current_posture)
+        self.Init_UI_ScopeMode(PC.RightClick)
+        self.Init_UI_ScopeOpen(PC.StartFire)
+        self.Init_UI_GunsData()
+        self.ResolutionSelect.setCurrentText(PC.Monitor)
+        self.Init_UI_Sensitivity()
+        self.Init_UI_PostureV3()
+        self.Init_UI_GunRatioV3()
+        self.Init_UI_Btn()
+        self.Init_UI_LOG("程序初始化完成")
         self._hud = GameHUD(PC)
     
     def Init_UI_Btn(self):  # 初始化按钮事件
@@ -46,7 +100,6 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.Pausebtn.clicked.connect(self.pause)  # 绑定暂停按钮事件
         self.ResolutionBtn.clicked.connect(self.Save_Config_Resolution)  # 绑定分辨率保存按钮事件
         self.SensitivityBtn.clicked.connect(self.Save_Config_Sensitivity)  # 绑定灵敏度保存按钮事件
-        self.RecoilVersionBtn.clicked.connect(self.Save_Config_RecoilVersion)  # 绑定压枪版本保存按钮事件
         self.PostureBtn.clicked.connect(self.Save_Config_PostureV3)  # 绑定姿态系数保存按钮事件
         self.PostureSelect.currentIndexChanged[int].connect(self.Change_Posture_label)  # 绑定姿态选择变化
         self.GunRatioBtn.clicked.connect(self.Save_Config_GunRatioV3)  # 绑定枪械系数保存按钮事件
@@ -188,14 +241,10 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
     def Init_UI_LOG(self, info):  # 初始化UI日志
         self.Info.append(info + "\n")  # 添加日志信息
     
-    def Change_Sensitivity_label(self, SelectValue):  # 更新灵敏度标签
-        Text = self.TextValue  # 获取文本值映射
-        # 根据压枪版本选择不同数据源
-        if PC.recoil_version == 3:
-            Select = PC.ScopeFactorV3.get(Text[SelectValue], '1')  # v3: scope_factor
-        else:
-            Select = PC.ScopeData.get(Text[SelectValue], '1')  # v2: sensitivity
-        self.SensitivityText.setText(str(Select))  # 设置灵敏度标签
+    def Change_Sensitivity_label(self, SelectValue):
+        Text = self.TextValue
+        Select = PC.ScopeFactorV3.get(Text[SelectValue], '1')
+        self.SensitivityText.setText(str(Select))
     
     def Save_Config_Resolution(self):  # 保存分辨率设置
         PC.Monitor = self.ResolutionSelect.currentText()  # 获取当前选择的分辨率
@@ -212,34 +261,10 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         SensitivitySelect = self.SensitivitySelect.currentText()  # 获取当前选择的灵敏度类型
         Text = self.TextValue[SensitivitySelect]  # 获取文本值
 
-        if PC.recoil_version == 3:
-            # v3: 保存到 scope_factor_v3
-            PC.ScopeFactorV3[Text] = SensitivityText
-            PC.save_config_data('scope_factor_v3', PC.ScopeFactorV3)
-            self.message_Info("v3 倍镜系数保存成功！！")
-        else:
-            # v2: 保存到 sensitivity
-            PC.ScopeData[Text] = SensitivityText
-            PC.save_config_data('sensitivity', PC.ScopeData)
-            self.message_Info("v2 灵敏度保存成功！！")
+        PC.ScopeFactorV3[Text] = SensitivityText
+        PC.save_config_data('scope_factor_v3', PC.ScopeFactorV3)
+        self.message_Info("倍镜系数保存成功！")
     
-    def Save_Config_RecoilVersion(self):  # 保存压枪版本设置
-        version_idx = self.RecoilVersionSelect.currentIndex()  # 获取当前选择索引
-        recoil_version = 3 if version_idx == 0 else 2  # 0=v3, 1=v2
-        PC.recoil_version = recoil_version  # 更新运行时版本
-        PC.save_config_data('recoil_version', recoil_version)  # 保存到配置文件
-        version_name = "v3 (Lua弹道+ABCD编码)" if recoil_version == 3 else "v2 (自校准+A*B*C*编码)"
-        # 切换版本后刷新灵敏度显示
-        self.Change_Sensitivity_label(self.SensitivitySelect.currentText())
-        self.message_Info(f"压枪版本已切换为 {version_name}，下次开火生效")  # 显示成功消息
-
-    def Init_UI_RecoilVersion(self):  # 初始化压枪版本选择
-        recoil_version = PC.recoil_version
-        if recoil_version == 3:
-            self.RecoilVersionSelect.setCurrentIndex(0)  # v3
-        else:
-            self.RecoilVersionSelect.setCurrentIndex(1)  # v2
-
     # ═══════════════════════════════════════════
     # 姿态系数 (v3) 配置
     # ═══════════════════════════════════════════
@@ -394,10 +419,13 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         if action:  # 如果有处理函数
             action(*args)  # 调用处理函数
 
-if __name__ == '__main__':  # 程序入口
-    app = QApplication([])  # 创建应用程序
-    PC = Process.ProcessClass()  # 创建核心处理类实例
-    Main = AppManager()  # 创建主应用管理类实例
-    # 展示窗口
-    Main.show()  # 显示窗口
-    sys.exit(app.exec_())  # 运行应用程序并退出
+if __name__ == '__main__':
+    setup_logging()
+    setup_exception_handler()
+    logger.info("程序启动 v%s", VERSION)
+
+    app = QApplication([])
+    PC = Process.ProcessClass()
+    Main = AppManager()
+    Main.show()
+    sys.exit(app.exec_())

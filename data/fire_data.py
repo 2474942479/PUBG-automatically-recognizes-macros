@@ -53,39 +53,6 @@ ACCESSORIES_CH = {
 }
 
 # ═══════════════════════════════════════════════════════════
-# v2 格式配件编码（A*B*C*，不含镜组）—— 保留向后兼容
-# ═══════════════════════════════════════════════════════════
-KEY_DATA = {
-    "Muzzle": {
-        "eliuquan": "1",
-        "yazuiqiangkou": "2",
-        "jujiqiangbuchang": "3",
-        "jujiqiangxiaoyan": "4",
-        "buqiangbuchang": "5",
-        "buqiangxiaoyan": "6",
-        "chongfengqiangxiaoyan": "7",
-        "chongfengqiangbuchang": "8",
-        "xiaoyin": "9",
-        "none": "0"
-    },
-    "Grip": {
-        "none": "0",
-        "banjieshi": "1",
-        "muzhi": "2",
-        "zhijiao": "3",
-        "chuizhi": "4",
-    },
-    "Stock": {
-        "none": "0",
-        "zhanshuqiangtuo": "1",
-        "zhongxinqiangtuo": "2",
-        "tuosaiban": "3",
-        "zidandai": "4",
-        "zhedieshiqiangtuo": "5"
-    }
-}
-
-# ═══════════════════════════════════════════════════════════
 # v3 格式配件编码（ABCD 4位码，含镜组）
 #   来自 Lua 脚本和 data.txt 的编码规则：
 #   A(千位)=镜组: 1=机瞄/红点/全息, 2=2倍镜及以上

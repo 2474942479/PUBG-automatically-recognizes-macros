@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QImage, QFont, QPainter, QColor, QPen, QBrush
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data.fire_data import KEY_DATA
+from data.key_data_v2 import KEY_DATA
 from calibration.bullet_analysis import (
     BulletDetector, BulletSorter, BulletComparator, BulletVisualizer,
     ParameterCorrector, ProjectData, IterativeCorrector,

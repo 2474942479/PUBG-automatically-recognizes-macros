@@ -1,14 +1,28 @@
+import asyncio
+import logging
 import simplejson as json
 import os
 import sys
 import threading
 import time
-from core.ghub import ghub_device
-from core.recognition import capture_all_positions_thread, recogniseif_firearm, capture_zishi_positions_thread
-from data.fire_data import KEY_DATA, KEY_DATA_V3, SCOPE_FACTOR
-import asyncio
+
 import numpy as np
-from pyopdll import OP
+from core.ghub import ghub_device
+from core.paths import res_path
+from core.recognition import capture_all_positions_thread, recogniseif_firearm
+from data.fire_data import KEY_DATA_V3, SCOPE_FACTOR
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_CONFIG = {
+    "resolution": "1920x1080",
+    "sensitivity": {"none": 1, "hongdian": 1, "quanxi": 2, "2bei": 1.7,
+                     "3bei": 5.5, "4bei": 11.5, "6bei": 5, "8bei": 5.7,
+                     "15bei": 10, "shift": 1.5},
+    "scope_factor_v3": {},
+    "posture_v3": {},
+    "gun_ratio_v3": {},
+}
 
 class ProcessClass:
     _instance_lock = threading.Lock()
@@ -48,9 +62,7 @@ class ProcessClass:
         self.GunRatioV3 = self.get_config_data('gr3')  # v3 独立压枪系数
         self.GunsName = None
         self.added = False
-        self.op = OP()
-        # 压枪数据版本: 2=v2(A*B*C*+per-shot), 3=v3(ABCD+per-tick+Lua公式)
-        self.recoil_version = self.get_config_data('v')
+        self.recoil_version = 3
         # 全局压枪系数（对应Lua的all_ratio）
         # 默认1.0，3号位武器时降为0.9
         self.all_ratio = 1.0
@@ -58,23 +70,33 @@ class ProcessClass:
     def move_mouse(self, x, y):
         self._gd.mouse_R(x, y)
 
+    def _config_path(self):
+        return res_path('Config', 'config.json')
+
     def get_config_data(self, mode='r'):
-        with open('./Config/config.json', "r", encoding='utf-8') as Config:
-            Config_data = json.loads(Config.read())
-            if mode == 'r':
-                return Config_data["resolution"]
-            elif mode == 's':
-                return Config_data['sensitivity']
-            elif mode == 'v':
-                return Config_data.get('recoil_version', 3)  # 默认v3
-            elif mode == 'sf3':
-                return Config_data.get('scope_factor_v3', {})
-            elif mode == 'p3':
-                return Config_data.get('posture_v3', {})
-            elif mode == 'gr3':
-                return Config_data.get('gun_ratio_v3', {})
-            elif mode == 'a':
-                return Config_data
+        config_path = self._config_path()
+        try:
+            with open(config_path, "r", encoding='utf-8') as f:
+                Config_data = json.loads(f.read())
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.warning("配置文件读取失败，使用默认配置: %s", e)
+            Config_data = DEFAULT_CONFIG.copy()
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w", encoding='utf-8') as f:
+                f.write(json.dumps(Config_data, ensure_ascii=False, indent=2))
+
+        if mode == 'r':
+            return Config_data.get("resolution", "1920x1080")
+        elif mode == 's':
+            return Config_data.get('sensitivity', DEFAULT_CONFIG['sensitivity'])
+        elif mode == 'sf3':
+            return Config_data.get('scope_factor_v3', {})
+        elif mode == 'p3':
+            return Config_data.get('posture_v3', {})
+        elif mode == 'gr3':
+            return Config_data.get('gun_ratio_v3', {})
+        elif mode == 'a':
+            return Config_data
 
     def save_config_data(self, mode, data):
         save_data = self.get_config_data('a')
@@ -82,16 +104,17 @@ class ProcessClass:
             save_data['resolution'] = data
         elif mode == 'sensitivity':
             save_data['sensitivity'] = data
-        elif mode == 'recoil_version':
-            save_data['recoil_version'] = data
         elif mode == 'scope_factor_v3':
             save_data['scope_factor_v3'] = data
         elif mode == 'posture_v3':
             save_data['posture_v3'] = data
         elif mode == 'gun_ratio_v3':
             save_data['gun_ratio_v3'] = data
-        with open('./Config/config.json', "w", encoding='utf-8') as Config:
-            Config.write(json.dumps(save_data))
+        try:
+            with open(self._config_path(), "w", encoding='utf-8') as f:
+                f.write(json.dumps(save_data, ensure_ascii=False, indent=2))
+        except Exception as e:
+            logger.error("保存配置失败: %s", e)
 
     def reduction_data(self):
         self.StartFire = False
@@ -105,25 +128,12 @@ class ProcessClass:
         self._Result2 = {}
 
     def read_gun_data(self, fileName) -> dict:
-        """读取枪械数据 JSON。
-
-        当 recoil_version == 2 时，从 GunData_v2_backup 读取 v2 格式数据；
-        否则从 GunData 读取当前（v3）数据。
-        """
-        if self.recoil_version == 2:
-            path = f'./_internal/GunData_v2_backup/{fileName}.json'
-        else:
-            path = f'./_internal/GunData/{fileName}.json'
+        """读取 v3 枪械数据 JSON（_internal/GunData）。"""
+        path = res_path('_internal', 'GunData', f'{fileName}.json')
         if not os.path.exists(path):
-            # 降级：v2 备份不存在时尝试当前目录
-            fallback = f'./_internal/GunData/{fileName}.json'
-            if self.recoil_version == 2 and os.path.exists(fallback):
-                path = fallback
-            else:
-                return None
-        with open(path, "r", encoding='utf-8') as GUNS:
-            GUNS_data = json.loads(GUNS.read())
-            return GUNS_data
+            return None
+        with open(path, "r", encoding='utf-8') as f:
+            return json.loads(f.read())
 
     def get_current_scope(self):
         result = self.get_guns_info()
@@ -161,6 +171,8 @@ class ProcessClass:
         self.ScopeData = sensitivity_data
         self.added=False
     def get_window_version(self):
+        if not hasattr(sys, 'getwindowsversion'):
+            return False
         windows_version = sys.getwindowsversion()
         if windows_version.build >= 22000:
             return True
@@ -201,16 +213,6 @@ class ProcessClass:
     def IF_Open_Lens(self):
         self.StartFire = recogniseif_firearm(self.Monitor)
 
-    def recognize_zishi_info(self):
-        """
-        姿势识别
-        :return:
-        """
-
-        Data = asyncio.run(capture_zishi_positions_thread(self.Monitor, self.firstPerson))
-        self.Current_posture = Data[0].get("zishi", "None")
-
-
     def Change_posture(self, keyWord):
         """
         姿势切换
@@ -233,7 +235,6 @@ class ProcessClass:
         - ``posture``: 枪械 JSON 中站姿/蹲/趴等姿态系数；不同姿态后坐力表现不同，与 ``recoil`` 相乘体现姿态对补偿的缩放。
 
         三者相乘得到「本 tick 理论像素/驱动单位位移」，再 ``int(round(...))`` 取整为整数。
-        注意: 最终整数鼠标步长由 ``FIRE`` / ``FIRE1`` 中的 remainder 累加后再 ``int(round)``，此处仅负责单 tick 浮点合成。
         """
         recoil_value = posture * (recoil * scope)
         return int(round(recoil_value))  # 返回整数
@@ -248,15 +249,7 @@ class ProcessClass:
 
     def FIRE_Start(self, Emit):
         """
-        压枪宏入口：串联「能否压枪」→「读枪与弹道」→「姿态/倍镜」→「全自动或半自动开火循环」。
-
-        流水线概要:
-        1. 前置条件: 已开镜 (``StartFire``)、已选 1/2 号槽 (``Current_firearms``)、两侧槽位识别结果非空；
-           否则直接 ``Emit`` 日志并返回，避免无数据空跑。
-        2. ``get_guns_info()`` 取当前槽位识别结果 → 枪名 ``gunsName`` → ``read_gun_data`` 加载 ``_internal/GunData/<枪>.json``。
-        3. ``get_accessories_nameCode`` 将枪口/握把/枪托映射为 ``A*B*C*`` 码，从 JSON 中取对应弹道列表 ``ballistic``；
-           ``Posture``、``Scope`` 分别为当前姿态键与当前镜型的灵敏度倍率。
-        4. 若枪属于 ``Not_Guns``（半自动等），走 ``FIRE1``（tick 间隔约 100ms）；否则 ``FIRE``（约 9ms），与游戏内射速档位一致。
+        压枪宏入口 (v3)：校验状态 → 读枪 JSON → ``_fire_start_v3`` / ``FIRE_v3``。
 
         不在此函数内做识别；识别由其他线程/回调更新 ``_Result*``、``StartFire`` 等状态。
         """
@@ -281,45 +274,7 @@ class ProcessClass:
         if not gun:
             return Emit("l", ("枪械数据不存在",))
 
-        # 根据配置的压枪版本分发
-        # 优先使用 config.json 的 recoil_version，也兼容 JSON 文件的 version 字段
-        recoil_version = self.recoil_version
-        if recoil_version == 3 or gun.get("version") == 3:
-            return self._fire_start_v3(gun, guns_info, Emit)
-
-        if recoil_version == 2 or gun.get("version") == 2:
-            return self._fire_start_v2(gun, guns_info, Emit)
-
-        # ── v1 兼容路径 ──
-        # 获取配件码
-        NameCode = self.get_accessories_nameCode(guns_info)
-        # 获取弹道数据
-        ballistic = gun.get(NameCode, [])
-        # 获取姿态数据
-        Posture = gun.get(self.Current_posture.lower(), 1)
-        # 获取倍镜数据
-        accessor_scope = guns_info.get("Scope", "None").lower()
-        Scope = self.ScopeData.get(accessor_scope, 1)
-        # 判断是否为非连点枪械
-        Not_Guns = ["sks", "mini14", "delagongnuofu", "m16a4", "mk12", "mk47", "qbu", "zidongzhuangtianbuqiang"]
-        if gunsName in Not_Guns:
-            return self.FIRE1(Posture, Scope, ballistic, Emit)
-        else:
-            return self.FIRE(Posture, Scope, ballistic, Emit)
-
-    def get_accessories_nameCode(self, guns_info):
-        """
-        获取配件名称 (v2 格式: A*B*C*，不含镜组)
-        :param guns_info:识别枪械的数据
-        :return:
-        """
-        NameCode = ""
-        type_dict = {"Muzzle": "A", "Grip": "B", "Stock": "C"}
-        for name, value in type_dict.items():
-            accessories = guns_info.get(name, "None").lower()
-            code_num = KEY_DATA[name][accessories]
-            NameCode += value + code_num
-        return NameCode
+        return self._fire_start_v3(gun, guns_info, Emit)
 
     def get_accessories_nameCode_v3(self, guns_info):
         """
@@ -499,126 +454,3 @@ class ProcessClass:
         Emit('x', (False,))
         return recoil_list
 
-    # ═══════════════════════════════════════════
-    # v2 开火路径：per-shot 平滑展开 + 水平补偿
-    # ═══════════════════════════════════════════
-
-    def _fire_start_v2(self, gun, guns_info, Emit):
-        """v2 格式入口：从 gun JSON 中提取 per-shot 数据，调用 FIRE_v2。"""
-        NameCode = self.get_accessories_nameCode(guns_info)
-        recoil_data = gun.get("recoil", {}).get(NameCode)
-        if not recoil_data:
-            return Emit("l", (f"配件组合 {NameCode} 无弹道数据",))
-
-        y_array = recoil_data.get("y", [])
-        x_array = recoil_data.get("x", [])
-        if not y_array:
-            return Emit("l", ("弹道数据为空，请先校准",))
-
-        posture_key = self.Current_posture.lower()
-        posture = gun.get("posture", {}).get(posture_key, 1.0)
-
-        accessor_scope = guns_info.get("Scope", "None").lower()
-        scope = self.ScopeData.get(accessor_scope, 1)
-
-        ticks_per_shot = gun.get("ticks_per_shot", 10)
-        tick_ms = gun.get("tick_ms", 9)
-
-        return self.FIRE_v2(posture, scope, y_array, x_array,
-                            ticks_per_shot, tick_ms, Emit)
-
-    def FIRE_v2(self, posture, scope, y_array, x_array,
-                ticks_per_shot, tick_ms, Emit):
-        """
-        v2 压枪核心：将每发子弹的总补偿量平滑展开到多个 tick。
-
-        相比 v1 FIRE 的改进:
-        - 消除锯齿：per-shot 总量均匀分配到每个 tick，不再出现 [3,0,0,3,0,0] 的抖动
-        - 水平补偿：同时输出 x/y 方向的鼠标移动
-        - 亚像素精度：remainder 在 shot 之间连续累积，总位移量精确等于理论值
-        """
-        y_remainder = 0.0
-        x_remainder = 0.0
-        shot_totals = []
-
-        for shot_idx in range(len(y_array)):
-            if not self.mouse_one:
-                break
-            Emit('x', (True,))
-
-            y_total = y_array[shot_idx]
-            x_total = x_array[shot_idx] if shot_idx < len(x_array) else 0.0
-
-            y_per_tick = y_total / ticks_per_shot
-            x_per_tick = x_total / ticks_per_shot
-
-            y_shot_actual = 0
-            x_shot_actual = 0
-
-            for _ in range(ticks_per_shot):
-                if not self.mouse_one:
-                    break
-
-                y_exact = posture * (y_per_tick * scope) + y_remainder
-                x_exact = posture * (x_per_tick * scope) + x_remainder
-
-                y_move = int(round(y_exact))
-                x_move = int(round(x_exact))
-
-                y_remainder = y_exact - y_move
-                x_remainder = x_exact - x_move
-
-                self._gd.mouse_R(x_move, y_move)
-
-                y_shot_actual += y_move
-                x_shot_actual += x_move
-
-                latency = self.Computation_latency(tick_ms)
-                time.sleep(latency)
-
-            shot_totals.append(y_shot_actual)
-
-        Emit('x', (False,))
-        return shot_totals
-
-    # ═══════════════════════════════════════════
-    # v1 兼容开火路径（保留，直到所有数据迁移完成）
-    # ═══════════════════════════════════════════
-
-    def FIRE(self, posture, scope, ballistic, Emit):
-        """v1 全自动压枪：per-tick 逐元素下发，tick 间隔约 9ms。"""
-        recoil_list = []
-        remainder = 0.0
-        for i in ballistic:
-            if not self.mouse_one:
-                break
-            Emit('x', (True,))
-            recoil = self.calculate_the_recoil(i, posture, scope)
-            recoil_list.append(recoil)
-            exact = recoil + remainder
-            move = int(round(exact))
-            remainder = exact - move
-            self._gd.mouse_R(0, move)
-            latency = self.Computation_latency(9)
-            time.sleep(latency)
-        Emit('x', (False,))
-        return recoil_list
-
-    def FIRE1(self, posture, scope, ballistic, Emit):
-        """v1 半自动压枪：per-tick 逐元素下发，tick 间隔约 100ms。"""
-        recoil_list = []
-        remainder = 0.0
-        for i in ballistic:
-            if not self.mouse_one:
-                break
-            Emit('x', (True,))
-            recoil = self.calculate_the_recoil(i, posture, scope)
-            recoil_list.append(recoil)
-            exact = recoil + remainder
-            move = int(round(exact))
-            remainder = exact - move
-            self._gd.mouse_R(0, move)
-            latency = self.Computation_latency(100)
-            time.sleep(latency)
-        Emit('x', (False,))
-        return recoil_list

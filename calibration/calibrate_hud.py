@@ -27,7 +27,7 @@ import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.process import ProcessClass
-from data.fire_data import KEY_DATA
+from data.key_data_v2 import KEY_DATA
 
 try:
     import keyboard as kb_lib
