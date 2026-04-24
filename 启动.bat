@@ -1,26 +1,37 @@
 @echo off
 chcp 65001 >nul 2>&1
-cd /d "%~dp0"
+set "ROOT=%~dp0"
+set "RT=%ROOT%runtime"
+set "EXE=%RT%\PUBG宏识别工具.exe"
 
 echo ============================================
 echo   PUBG 宏识别工具
 echo ============================================
 echo.
 
-:: 检查 GHUB DLL 是否存在
-if not exist "_internal\ghub_device_GHUB.dll" (
-    echo [错误] 未找到 ghub_device_GHUB.dll
-    echo 请确保 _internal 目录中包含此文件。
+if not exist "%EXE%" (
+    echo [错误] 未找到运行库: %EXE%
+    echo 请保持本 bat 与 runtime 文件夹的相对位置不变。
     echo.
     pause
     exit /b 1
 )
 
-:: 检查配置文件
-if not exist "Config\config.json" (
-    echo [提示] 首次运行，正在生成默认配置...
-    if not exist "Config" mkdir Config
+if not exist "%RT%\_internal\ghub_device_GHUB.dll" (
+    echo [错误] 未找到 G HUB 驱动库: runtime\_internal\ghub_device_GHUB.dll
+    echo.
+    pause
+    exit /b 1
 )
 
-echo 正在启动程序...
-start "" "PUBG宏识别工具.exe"
+:: 与 bat 同级的用户目录（Config / logs 由程序在发布根下读写）
+if not exist "%ROOT%Config" mkdir "%ROOT%Config" 2>nul
+if not exist "%ROOT%logs" mkdir "%ROOT%logs" 2>nul
+
+if not exist "%ROOT%Config\config.json" (
+    echo [提示] 首次运行将生成默认配置于 Config\config.json
+)
+
+echo 正在从 runtime 启动程序...
+:: 工作目录设为本目录，供路径解析为「发布根」
+start "" /D "%ROOT%" "%EXE%"

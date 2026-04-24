@@ -13,8 +13,9 @@ PUBG 宏识别工具 — Nuitka 一键构建脚本
       - 或 MinGW-w64 (nuitka 可自动下载)
 
 构建产物:
-    dist/PUBG宏识别工具/          # 可直接运行的目录
-    dist/PUBG宏识别工具-v{版本}.zip  # 交付压缩包
+    dist/PUBG宏识别工具/                 # 发布根（启动.bat、Config/、logs/、使用说明 等）
+    dist/PUBG宏识别工具/runtime/         # exe、DLL、_internal、依赖（与 bat 分离）
+    dist/PUBG宏识别工具-v{版本}.zip      # 整包 zip
 """
 
 import os
@@ -35,7 +36,9 @@ ENTRY_SCRIPT = "main.py"
 PROJECT_ROOT = Path(__file__).parent.resolve()
 DIST_DIR = PROJECT_ROOT / "dist"
 BUILD_DIR = PROJECT_ROOT / "build"
+# 发布根目录：与 启动.bat 同级；可执行体在 OUTPUT_DIR / "runtime"
 OUTPUT_DIR = DIST_DIR / APP_NAME
+RUNTIME_DIR = OUTPUT_DIR / "runtime"
 
 CORE_MODULES_FOR_CYTHON = [
     "core/process.py",
@@ -46,7 +49,6 @@ CORE_MODULES_FOR_CYTHON = [
 EXCLUDE_MODULES = [
     "calibration",
     "tools",
-    "crypto",
 ]
 
 INCLUDE_DATA_DIRS = [
@@ -120,6 +122,7 @@ def step_nuitka():
         "--include-package=ui",
         "--include-package=data",
         "--include-package=core",
+        "--include-package=crypto",
     ]
 
     if IS_WINDOWS:
@@ -145,18 +148,55 @@ def step_nuitka():
     run_cmd(cmd)
 
     nuitka_out = DIST_DIR / "main.dist"
-    if nuitka_out.exists() and nuitka_out != OUTPUT_DIR:
-        if OUTPUT_DIR.exists():
-            shutil.rmtree(OUTPUT_DIR)
-        nuitka_out.rename(OUTPUT_DIR)
-        log(f"产物目录已重命名: {OUTPUT_DIR}")
+    if not nuitka_out.exists():
+        log(f"Nuitka 未生成 main.dist: {nuitka_out}")
+        sys.exit(1)
+    if OUTPUT_DIR.exists():
+        shutil.rmtree(OUTPUT_DIR)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    nuitka_out.rename(RUNTIME_DIR)
+    log(f"运行库目录: {RUNTIME_DIR}")
+
+
+def _move_runtime_config_to_release_root():
+    """Nuitka 内嵌的 Config 在 runtime 下，发布时挪到与 bat 同级。"""
+    src = RUNTIME_DIR / "Config"
+    if not src.exists():
+        return
+    dst = OUTPUT_DIR / "Config"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.move(str(src), str(dst))
+    log("已移动 runtime/Config -> 发布根 Config/")
+
+
+def step_encrypt_gun_data():
+    """构建产物内 GunData：加密为 .enc 后删除明文凭据（不改动源码目录）。"""
+    log("=" * 60)
+    log("Step 3: GunData 加密")
+    log("=" * 60)
+    gun_dir = RUNTIME_DIR / "_internal" / "GunData"
+    if not gun_dir.is_dir():
+        log(f"未找到 GunData 目录，跳过: {gun_dir}")
+        return
+    from crypto.gun_data_crypto import encrypt_all_gun_data
+
+    encrypt_all_gun_data(gun_data_dir=gun_dir)
+    removed = 0
+    for p in gun_dir.glob("*.json"):
+        p.unlink()
+        removed += 1
+    if removed:
+        log(f"已删除发布目录内 {removed} 个 .json，仅保留 .enc")
 
 
 def step_post_build():
-    """构建后处理：复制启动脚本、README、清理。"""
+    """构建后处理：Config 到发布根、复制 bat/README、空目录与版本号。"""
     log("=" * 60)
-    log("Step 3: 构建后处理")
+    log("Step 4: 构建后处理")
     log("=" * 60)
+
+    _move_runtime_config_to_release_root()
 
     bat_src = PROJECT_ROOT / "启动.bat"
     if bat_src.exists():
@@ -168,12 +208,12 @@ def step_post_build():
         shutil.copy2(readme_src, OUTPUT_DIR / "使用说明.txt")
         log("已复制 使用说明.txt")
 
-    logs_dir = OUTPUT_DIR / "logs"
-    logs_dir.mkdir(exist_ok=True)
-    log("已创建 logs/ 目录")
-
     config_dir = OUTPUT_DIR / "Config"
     config_dir.mkdir(exist_ok=True)
+
+    logs_dir = OUTPUT_DIR / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    log("已确保 logs/ 与 Config/ 在发布根")
 
     version_file = OUTPUT_DIR / "version.txt"
     version_file.write_text(VERSION, encoding="utf-8")
@@ -183,7 +223,7 @@ def step_post_build():
 def step_zip():
     """将构建产物打为 zip 包。"""
     log("=" * 60)
-    log("Step 4: 打包 ZIP")
+    log("Step 5: 打包 ZIP")
     log("=" * 60)
 
     if not OUTPUT_DIR.exists():
@@ -224,6 +264,7 @@ def main():
         if not args.skip_cython:
             step_cython()
         step_nuitka()
+        step_encrypt_gun_data()
         step_post_build()
         step_zip()
 

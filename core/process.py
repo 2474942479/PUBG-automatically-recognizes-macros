@@ -152,12 +152,14 @@ class ProcessClass:
         self.duobei_scope_mode = {}
 
     def read_gun_data(self, fileName) -> dict:
-        """读取 v3 枪械数据 JSON（_internal/GunData）。"""
-        path = res_path('_internal', 'GunData', f'{fileName}.json')
-        if not os.path.exists(path):
+        """读取 v3 枪械数据：优先 .enc（发布包），无则 .json（开发）。"""
+        from pathlib import Path
+        from crypto.gun_data_crypto import load_gun_data
+        key = (fileName or "").strip()
+        if not key:
             return None
-        with open(path, "r", encoding='utf-8') as f:
-            return json.loads(f.read())
+        gun_dir = Path(res_path("_internal", "GunData"))
+        return load_gun_data(key.lower(), gun_data_dir=gun_dir)
 
     def get_current_scope(self):
         """
