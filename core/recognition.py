@@ -2,14 +2,42 @@ import cv2
 import logging
 import mss
 import os
+import threading
 import time
 import asyncio
-from core.paths import res_path
-from data.resolution_setting import RESOLUTION_SETTINGS, GUNS_REOLUTION_SETTINGS, Click
 import numpy as np
 from PIL import ImageGrab
 
+from core.paths import res_path
+from data.resolution_setting import RESOLUTION_SETTINGS, GUNS_REOLUTION_SETTINGS, Click
+
 logger = logging.getLogger(__name__)
+
+# 多线程下并发 mss 抓屏可能导致帧错乱或驱动层阻塞，串行化避免「假死/压枪失效」
+_mss_capture_lock = threading.RLock()
+
+
+def _normalize_roi_ltrb(coords):
+    """
+    将 ROI 统一为 (left, top, right, bottom)。
+
+    仅当按 (left, top, right, bottom) 解出的宽或高 <= 0 时，再按 (left, top, width, height) 解释。
+    不得再用「宽和高都 < 100」等启发式：倍镜等合法区域常小于 100px，误当 w/h 会导致裁切错误、识别全崩。
+    """
+    if not isinstance(coords, (list, tuple)) or len(coords) != 4:
+        return None
+    left, top, c, d = coords
+    left, top = int(left), int(top)
+    c, d = int(c), int(d)
+    right, bottom = c, d
+    width = right - left
+    height = bottom - top
+    if width > 0 and height > 0:
+        return left, top, right, bottom
+    w, h = c, d
+    if w > 0 and h > 0:
+        return left, top, left + w, top + h
+    return None
 
 # ✅ 全局缓存：预加载所有模板到内存，避免重复读取磁盘
 _template_cache = {}  # {template_path: img_array}
@@ -52,66 +80,50 @@ def _match_single_template(args):
 def MSS_Img(Values):
     """
     截取指定 ROI 区域
-    :param Values: 坐标元组 (left, top, right, bottom)
+    :param Values: 坐标 (left, top, right, bottom)；若宽/高非正则按 (left, top, w, h) 解释
     :return: (img_gray, img_np)
     """
     if len(Values) != 4:
         raise ValueError(f"坐标格式错误，期望4个值 (left, top, right, bottom)，收到: {Values}")
-    
-    left, top, right, bottom = Values
-    width = right - left
-    height = bottom - top
-    
-    # 检查是否为 (left, top, width, height) 格式并转换
-    if width <= 0 or height <= 0:
-        logger.warning(f"检测到可能的 (left, top, width, height) 格式: {Values}")
-        left, top, w, h = Values
-        if w > 0 and h > 0:
-            width, height = w, h
-            right, bottom = left + width, top + height
-            logger.info(f"自动转换为 (left, top, right, bottom): ({left}, {top}, {right}, {bottom})")
-        else:
-            logger.error(f"无效的 ROI 坐标: {Values}")
-            # 返回空图像避免崩溃
-            empty_img = np.zeros((100, 100, 3), dtype=np.uint8)
-            empty_gray = cv2.cvtColor(empty_img, cv2.COLOR_BGR2GRAY)
-            return empty_gray, empty_img
-    
-    # 确保尺寸为正数
-    if width <= 0 or height <= 0:
-        logger.error(f"ROI 尺寸无效: width={width}, height={height}")
+    norm = _normalize_roi_ltrb(Values)
+    if not norm:
+        logger.error(f"无效的 ROI 坐标: {Values}")
         empty_img = np.zeros((100, 100, 3), dtype=np.uint8)
         empty_gray = cv2.cvtColor(empty_img, cv2.COLOR_BGR2GRAY)
         return empty_gray, empty_img
+    left, top, right, bottom = norm
+    width = right - left
+    height = bottom - top
     
     try:
-        with mss.mss() as sct:
-            monitor = {"top": top, "left": left, "width": width, "height": height}
-            img = sct.grab(monitor)
-            img_np = np.array(img)  # 转换为numpy数组
-            
-            # 检查图像是否有效
-            if img_np is None or img_np.size == 0:
-                logger.error(f"截图失败，ROI: {Values}")
-                empty_img = np.zeros((height, width, 3), dtype=np.uint8)
-                return cv2.cvtColor(empty_img, cv2.COLOR_BGR2GRAY), empty_img
-            
-            # 确保是 3 通道图像
-            if len(img_np.shape) == 2:
-                img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
-            elif len(img_np.shape) == 3 and img_np.shape[2] == 4:
-                img_np = cv2.cvtColor(img_np, cv2.COLOR_BGRA2BGR)
-            
-            img_gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)  # 转换为灰度图
-            
-            # 最终验证
-            if img_gray is None or img_gray.size == 0:
-                logger.error(f"灰度转换失败，ROI: {Values}")
-                empty_img = np.zeros((height, width), dtype=np.uint8)
-                return empty_img, cv2.cvtColor(empty_img, cv2.COLOR_GRAY2BGR)
-            
-            return img_gray, img_np
-            
+        with _mss_capture_lock:
+            with mss.mss() as sct:
+                monitor = {"top": top, "left": left, "width": width, "height": height}
+                img = sct.grab(monitor)
+        img_np = np.array(img)  # 转换为numpy数组
+
+        # 检查图像是否有效
+        if img_np is None or img_np.size == 0:
+            logger.error(f"截图失败，ROI: {Values}")
+            empty_img = np.zeros((height, width, 3), dtype=np.uint8)
+            return cv2.cvtColor(empty_img, cv2.COLOR_BGR2GRAY), empty_img
+
+        # 确保是 3 通道图像
+        if len(img_np.shape) == 2:
+            img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
+        elif len(img_np.shape) == 3 and img_np.shape[2] == 4:
+            img_np = cv2.cvtColor(img_np, cv2.COLOR_BGRA2BGR)
+
+        img_gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)  # 转换为灰度图
+
+        # 最终验证
+        if img_gray is None or img_gray.size == 0:
+            logger.error(f"灰度转换失败，ROI: {Values}")
+            empty_img = np.zeros((height, width), dtype=np.uint8)
+            return empty_img, cv2.cvtColor(empty_img, cv2.COLOR_GRAY2BGR)
+
+        return img_gray, img_np
+
     except Exception as e:
         logger.error(f"MSS_Img 异常: {e}, ROI: {Values}")
         # 返回默认大小的空图像
@@ -206,24 +218,12 @@ async def capture_and_compare(Data):
         empty_img = np.zeros((50, 50), dtype=np.uint8)
         return Keys, empty_img
     
-    left, top, right, bottom = Values
-    
-    # 检测是否为 (left, top, width, height) 格式并转换
-    width = right - left
-    height = bottom - top
-    
-    # 如果 width 或 height 为负数或过小，说明可能是 (left, top, width, height) 格式
-    if width <= 0 or height <= 0 or (width < 100 and height < 100):
-        # 假设是 (left, top, width, height) 格式
-        logger.warning(f"检测到可能的 (left, top, width, height) 格式，正在转换: {Keys}={Values}")
-        left, top, w, h = Values
-        if w > 0 and h > 0:
-            right, bottom = left + w, top + h
-            logger.info(f"转换后: {Keys}=({left}, {top}, {right}, {bottom})")
-        else:
-            logger.error(f"无效的 ROI 坐标: {Keys}={Values}")
-            empty_img = np.zeros((50, 50), dtype=np.uint8)
-            return Keys, empty_img
+    norm = _normalize_roi_ltrb(Values)
+    if not norm:
+        logger.error(f"无效的 ROI 坐标: {Keys}={Values}")
+        empty_img = np.zeros((50, 50), dtype=np.uint8)
+        return Keys, empty_img
+    left, top, right, bottom = norm
     
     # 直接使用 MSS_Img 截取该 ROI 区域
     try:
@@ -346,17 +346,15 @@ async def capture_all_positions_thread(current_res):
         captured_images = []
         for key, coords in Guns_img.items():
             try:
-                left, top, right, bottom = coords
-                width = right - left
-                height = bottom - top
-                
-                # 检测并转换坐标格式
-                if width <= 0 or height <= 0 or (width < 100 and height < 100):
-                    left, top, w, h = coords
-                    if w > 0 and h > 0:
-                        right, bottom = left + w, top + h
-                        width, height = w, h
-                
+                if key == "posture_roi":
+                    continue
+                norm = _normalize_roi_ltrb(coords)
+                if not norm:
+                    logger.error(f"无效 ROI: {key}={coords}")
+                    empty_img = np.zeros((50, 50), dtype=np.uint8)
+                    captured_images.append((key, empty_img))
+                    continue
+                left, top, right, bottom = norm
                 # 从大图中裁剪 ROI
                 roi_gray = img_gray_full[top:bottom, left:right]
                 captured_images.append((key, roi_gray))
@@ -374,15 +372,14 @@ async def capture_all_positions_thread(current_res):
         captured_images = []
         for key, coords in Guns_img.items():
             try:
-                left, top, right, bottom = coords
-                width = right - left
-                height = bottom - top
-                
-                if width <= 0 or height <= 0 or (width < 100 and height < 100):
-                    left, top, w, h = coords
-                    if w > 0 and h > 0:
-                        right, bottom = left + w, top + h
-                
+                if key == "posture_roi":
+                    continue
+                norm = _normalize_roi_ltrb(coords)
+                if not norm:
+                    empty_img = np.zeros((50, 50), dtype=np.uint8)
+                    captured_images.append((key, empty_img))
+                    continue
+                left, top, right, bottom = norm
                 img_gray, _ = MSS_Img((left, top, right, bottom))
                 captured_images.append((key, img_gray))
             except Exception as e2:

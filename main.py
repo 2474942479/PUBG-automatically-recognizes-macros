@@ -18,6 +18,9 @@ from ui.roi_config_dialog import ROIConfigDialog
 from data.resolution_setting import RESOLUTION_SETTINGS
 
 VERSION = "1.0.0"
+# 唯一官方发布页（用于启动时醒目标识，减少倒卖与二改包）
+OFFICIAL_GITHUB_URL = "https://github.com/2474942479/PUBG-automatically-recognizes-macros"
+OFFICIAL_TAGLINE = "非本仓库/作者渠道获取的版本无保障；禁止商用倒卖与技术盗窃。"
 logger = logging.getLogger(__name__)
 PC = None  # 全局 ProcessClass 实例
 
@@ -38,7 +41,7 @@ def setup_logging():
     root.setLevel(logging.INFO)  # ✅ 默认 INFO 级别
     root.addHandler(handler)
     
-    # ✅ 全局 Debug 开关（可通过 F11 切换）
+    # 与 F9 / config.debug_mode 同步，启动后在 __main__ 里对齐
     global DEBUG_MODE
     DEBUG_MODE = False
 
@@ -63,34 +66,77 @@ def setup_exception_handler():
     sys.excepthook = handler
 
 
+def _apply_debug_state_to_logging():
+    """根据全局 DEBUG_MODE 设置 root 日志级别（不与 PC 写盘混用，供启动对齐）。"""
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG if DEBUG_MODE else logging.INFO)
+
+
+def sync_debug_mode_from_config():
+    """启动时：以 config 中的 debug_mode 为准，同步 DEBUG_MODE + root 级别。"""
+    global DEBUG_MODE
+    try:
+        from core.process import ProcessClass
+        pc = ProcessClass()
+        DEBUG_MODE = bool(getattr(pc, "debug_input_trace", False))
+    except Exception:
+        DEBUG_MODE = False
+    _apply_debug_state_to_logging()
+
+
 def toggle_debug_mode():
     """
-    切换 Debug 模式（通过 F11 键）
+    调试总开关（热键 F9，唯一）：
+    - 全量日志级别 DEBUG/INFO
+    - [INPUT_TRACE] 行（Tab/开镜等）
+    - 开镜姿势识别存图 logs/posture_debug/（与 PC.debug_input_trace 一致）
+    - 写回 config.json 的 debug_mode
     """
     global DEBUG_MODE
+    from core.process import ProcessClass
     DEBUG_MODE = not DEBUG_MODE
-    
-    root = logging.getLogger()
+    _apply_debug_state_to_logging()
+    try:
+        pc = ProcessClass()
+        pc.debug_input_trace = DEBUG_MODE
+        pc.save_config_data("debug_mode", DEBUG_MODE)
+    except Exception as e:
+        logger.warning("保存 debug_mode 失败: %s", e)
     if DEBUG_MODE:
-        root.setLevel(logging.DEBUG)
-        logger.info("✅ Debug 模式已开启 - 将显示详细日志")
-        # ✅ 更新 UI 显示
-        try:
-            from core.process import PC as ProcessPC
-            if hasattr(ProcessPC, '_ui_log_callback') and ProcessPC._ui_log_callback:
-                ProcessPC._ui_log_callback("📝 Debug 模式: ON (F11 关闭)")
-        except Exception:
-            pass
+        logger.info(
+            "调试总开关: ON (F9 关) — DEBUG + INPUT_TRACE + 姿势调试图，见 logs/app.log / posture_debug/"
+        )
     else:
-        root.setLevel(logging.INFO)
-        logger.info("ℹ️  Debug 模式已关闭 - 仅显示重要信息")
-        # ✅ 更新 UI 显示
-        try:
-            from core.process import PC as ProcessPC
-            if hasattr(ProcessPC, '_ui_log_callback') and ProcessPC._ui_log_callback:
-                ProcessPC._ui_log_callback("📝 Debug 模式: OFF (F11 开启)")
-        except Exception:
-            pass
+        logger.info("调试总开关: OFF (F9 开)")
+    try:
+        pc = ProcessClass()
+        if getattr(pc, "_ui_log_callback", None):
+            pc._ui_log_callback(
+                "📝 调试: %s (F9/界面按钮) 日志+INPUT_TRACE+姿势图" % ("ON" if DEBUG_MODE else "OFF")
+            )
+    except Exception:
+        pass
+    try:
+        pc = ProcessClass()
+        cb = getattr(pc, "_on_debug_mode_changed", None)
+        if callable(cb):
+            cb()
+    except Exception:
+        pass
+
+
+def debug_hotkey_f9(key_listener):
+    """
+    F9 与主界面「调试」按钮共用：切换调试 + 开时可选跑姿势测试线程。
+    key_listener 可为 None（未点「启动」时仅切换日志开关）。
+    """
+    from threading import Thread
+    from core.process import ProcessClass
+    toggle_debug_mode()
+    import main as m
+    if m.DEBUG_MODE and key_listener and getattr(ProcessClass(), "mouse_listener", None):
+        Thread(target=key_listener._test_posture_recognition).start()
+
 
 class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidget和UI类
     def __init__(self):  # 初始化方法
@@ -112,9 +158,11 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
 
     def init_ui(self):
         self.setupUi(self)
-        self.setWindowTitle(f"PUBG 宏识别工具 v{VERSION}")
+        self.setWindowTitle(f"PUBG 宏识别工具 v{VERSION} | 作者 GitHub: {OFFICIAL_GITHUB_URL}")
         self.setWindowFlags(Qt.WindowStaysOnTopHint)
         self.Init_UI_LOG(f"程序初始化中... v{VERSION}")
+        self.Init_UI_LOG(f"【官方仓库】{OFFICIAL_GITHUB_URL}")
+        self.Init_UI_LOG(f"【声明】{OFFICIAL_TAGLINE}")
         self.Init_UI_LOG(PC.ghub_device_info)
 
         if PC.ghub_device_info and ("缺失" in PC.ghub_device_info or "未安装" in PC.ghub_device_info):
@@ -139,14 +187,28 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         
         # ═══ 设置 UI 日志回调 ═══
         PC._ui_log_callback = self.Init_UI_LOG
+        PC._on_debug_mode_changed = self._refresh_debug_mode_button
+        self._refresh_debug_mode_button()
         
         self._hud = GameHUD(PC)
     
+    def _refresh_debug_mode_button(self):
+        """与 F9、config.debug_mode 同步主界面「调试」按钮文字。"""
+        import main as m
+        on = m.DEBUG_MODE
+        if hasattr(self, "DebugModeBtn"):
+            self.DebugModeBtn.setText("调试: 开" if on else "调试: 关")
+
+    def on_debug_mode_clicked(self):
+        from main import debug_hotkey_f9
+        debug_hotkey_f9(self.my_key_thread)
+
     def Init_UI_Btn(self):  # 初始化按钮事件
         self.Startbtn.clicked.connect(self.start)  # 绑定开始按钮事件
         self.Stopbtn.clicked.connect(self.stop)  # 绑定停止按钮事件
         self.Pausebtn.clicked.connect(self.pause)  # 绑定暂停按钮事件
         self.ROIConfigBtn.clicked.connect(self.open_roi_config)  # 绑定 ROI 配置按钮事件
+        self.DebugModeBtn.clicked.connect(self.on_debug_mode_clicked)
         self.ResolutionBtn.clicked.connect(self.Save_Config_Resolution)  # 绑定分辨率保存按钮事件
         self.SensitivityBtn.clicked.connect(self.Save_Config_Sensitivity)  # 绑定灵敏度保存按钮事件
         self.PostureBtn.clicked.connect(self.Save_Config_PostureV3)  # 绑定姿态系数保存按钮事件
@@ -601,10 +663,15 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
 if __name__ == '__main__':
     setup_logging()
     setup_exception_handler()
-    logger.info("程序启动 v%s", VERSION)
+    logger.info("程序启动 v%s | 官方: %s", VERSION, OFFICIAL_GITHUB_URL)
+    logger.info("%s", OFFICIAL_TAGLINE)
 
     app = QApplication([])
     PC = Process.ProcessClass()
+    sync_debug_mode_from_config()
+    if DEBUG_MODE:
+        logger.info("已从 config 恢复调试总开关: ON (F9 关闭)")
+
     Main = AppManager()
     Main.show()
     sys.exit(app.exec_())

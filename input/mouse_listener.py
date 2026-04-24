@@ -11,6 +11,9 @@ from PyQt5.QtCore import QThread, pyqtSignal  # 导入PyQt5的线程和信号模
 from pynput import mouse  # 导入pynput鼠标模块，用于监听鼠标事件
 import ctypes  # 导入ctypes用于Windows API调用
 
+from core.recognition import recogniseif_firearm
+from core import input_trace as _input_trace
+
 # Windows API 常量
 VK_LMENU = 0xA4  # 左 Alt 键虚拟键码
 VK_RMENU = 0xA5  # 右 Alt 键虚拟键码
@@ -33,7 +36,7 @@ class AppMainMouseListener(QThread):  # 定义鼠标监听器类，继承自QThr
         self.PC = PCdata  # 保存PC对象引用
         self.count = 1  # 初始化计数器
         self.key_listener = None  # 保存键盘监听器引用
-        self.debug_mode = False  # 姿势识别调试模式
+        # 姿势调试图 / 详细匹配：与 F9 总开关、PC.debug_input_trace 一致，不再单独字段
         
         # ✅ 姿势识别优化：不再使用防抖和缓存，每次开镜都强制更新
         # self._last_posture_recognize_time = 0  # 已废弃
@@ -76,10 +79,16 @@ class AppMainMouseListener(QThread):  # 定义鼠标监听器类，继承自QThr
                                 self.mouseClicked.emit('p', (self.PC.Current_posture,))  # 同步当前手动姿态到 UI
                         else:  # 如果释放
                             self.PC.StartFire = False  # 设置开镜状态为False
-                    else:  # 如果右键开镜模式为False
-                        if pressed:  # 如果按下
-                            Thread(target=self.PC.IF_Open_Lens).start()  # 启动开镜线程
-                    
+                    else:  # 点按开镜：与 emit 同线程同步判定，避免后台线程晚于 emit 导致「未开镜却压枪/状态错乱」
+                        if pressed:
+                            self.PC.StartFire = recogniseif_firearm(self.PC.Monitor)
+                    _input_trace.log(
+                        "右键 pressed=%s 长按开镜=%s TabKey=%s -> StartFire=%s (emit后)",
+                        pressed,
+                        self.PC.RightClick,
+                        self.PC.TabKey,
+                        self.PC.StartFire,
+                    )
                     # ✅ 每次都发送开镜状态信号，确保 UI 更新
                     self.mouseClicked.emit('s', (self.PC.StartFire,))
             elif button == mouse.Button.x1 or button == mouse.Button.x2:  # 如果是X1或X2键点击
@@ -127,9 +136,9 @@ class AppMainMouseListener(QThread):  # 定义鼠标监听器类，继承自QThr
         # 等待开镜动画完成
         time.sleep(0.3)
         
-        # 使用调试模式截取并识别姿势
-        posture = self.PC.capture_and_recognize_posture(debug=self.debug_mode)
-        
+        dbg = bool(getattr(self.PC, "debug_input_trace", False))
+        posture = self.PC.capture_and_recognize_posture(debug=dbg)
+
         if posture:
             # ✅ 每次都更新姿势，不跳过
             self.PC.Change_posture(posture)
@@ -137,7 +146,7 @@ class AppMainMouseListener(QThread):  # 定义鼠标监听器类，继承自QThr
             mode_name = {"None": "站立", "c": "蹲下", "z": "趴下"}.get(posture, "未知")
             self.mouseClicked.emit('l', (f"🎯 姿势识别: {mode_name}",))
         else:
-            if self.debug_mode:
+            if dbg:
                 self.mouseClicked.emit('l', ("⚠️ 姿势识别失败，请查看 logs/posture_debug/ 目录中的截图",))
 
     def stop_listener(self):  # 停止鼠标监听

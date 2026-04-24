@@ -467,6 +467,10 @@ class Ui_PUBG(object):
         self.ROIConfigBtn.setToolTip("按 F8 快速打开 ROI 配置工具")
         btn_row.addWidget(self.ROIConfigBtn, 1)
 
+        self.DebugModeBtn = QtWidgets.QPushButton("调试: 关", content)
+        self.DebugModeBtn.setToolTip("与 F9 相同：全量 DEBUG + INPUT_TRACE + 开镜姿势存图 logs/posture_debug/")
+        btn_row.addWidget(self.DebugModeBtn, 1)
+
         self.Startbtn = QtWidgets.QPushButton("启动", content)
         self.Startbtn.setObjectName("Startbtn")
         btn_row.addWidget(self.Startbtn, 1)

@@ -1,14 +1,12 @@
 """通用 ROI 配置对话框 - 集成到主 UI"""
-import sys
 import os
-import json
 import cv2
 import numpy as np
 
 from PyQt5.QtCore import Qt, QRect, QPoint, pyqtSignal
 from PyQt5.QtWidgets import (
-    QApplication, QDialog, QLabel, QMessageBox, QScrollArea, 
-    QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QDialogButtonBox
+    QDialog, QLabel, QMessageBox, QScrollArea, 
+    QVBoxLayout, QHBoxLayout, QPushButton, QComboBox
 )
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QImage
 
@@ -51,7 +49,6 @@ class ROILabel(QLabel):
     def __init__(self, pixmap, parent=None):
         super().__init__(parent)
         self._base_pixmap = pixmap
-        self._scale = 1.0
         self._current_rect = None
         self._current_roi = None  # 当前已配置的 ROI
         self._start_pos = None
@@ -64,16 +61,9 @@ class ROILabel(QLabel):
         self._mouse_pos = QPoint(0, 0)
         self._update_display()
 
-    def set_scale(self, scale):
-        self._scale = max(0.2, min(3.0, scale))
-        self._update_display()
-
     def _to_image_coords(self, widget_pos):
-        """控件坐标 → 原图像素坐标。"""
-        return QPoint(
-            int(widget_pos.x() / self._scale),
-            int(widget_pos.y() / self._scale)
-        )
+        """控件坐标 → 原图像素坐标（1:1 全屏截图，无缩放）。"""
+        return QPoint(int(widget_pos.x()), int(widget_pos.y()))
     
     def _get_edge_at_pos(self, pos, threshold=10):
         """
@@ -131,12 +121,9 @@ class ROILabel(QLabel):
             if width <= 0 or height <= 0:
                 return None
             
-            # 从截图中提取 ROI 区域
+            # 从截图中提取 ROI 区域（原图像素，与框选一致）
             roi_pixmap = self._base_pixmap.copy(
-                int(left * self._scale),
-                int(top * self._scale),
-                int(width * self._scale),
-                int(height * self._scale)
+                int(left), int(top), int(width), int(height)
             )
             
             # 转换为 OpenCV 格式
@@ -202,46 +189,37 @@ class ROILabel(QLabel):
             return None
 
     def _update_display(self):
-        scaled = self._base_pixmap.scaled(
-            int(self._base_pixmap.width() * self._scale),
-            int(self._base_pixmap.height() * self._scale),
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        canvas = QPixmap(scaled)
+        # 1:1 原图绘制，避免缩放带来的亚像素偏差
+        canvas = QPixmap(self._base_pixmap)
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        font = QFont("Microsoft YaHei", max(8, int(10 * self._scale)))
+        font = QFont("Microsoft YaHei", 10)
         painter.setFont(font)
 
         # 绘制提示文字
-        hint_text = "请拖动鼠标框选区域"
+        hint_text = "请拖动鼠标框选区域（1:1 全屏像素，可滚动查看）"
         painter.setPen(QPen(QColor(255, 255, 255, 200)))
-        painter.drawText(10, int(30 * self._scale), hint_text)
+        painter.drawText(10, 28, hint_text)
 
         # 绘制当前已配置的 ROI（如果有）
         if hasattr(self, '_current_roi') and self._current_roi:
             left, top, right, bottom = self._current_roi
             
             # 如果正在拖动或调整大小，使用实线；否则使用虚线
-            pen = QPen(QColor(255, 165, 0, 220), 3)  # 橙色，更粗
+            pen = QPen(QColor(255, 165, 0, 220), 2)
             is_active = getattr(self, '_dragging_roi', False) or getattr(self, '_resizing_edge', None)
             if not is_active:
                 pen.setStyle(Qt.DashLine)
             painter.setPen(pen)
             
-            scaled_rect = QRect(
-                int(left * self._scale),
-                int(top * self._scale),
-                int((right - left) * self._scale),
-                int((bottom - top) * self._scale)
-            )
-            painter.drawRect(scaled_rect)
+            r = QRect(int(left), int(top), int(right - left), int(bottom - top))
+            painter.drawRect(r)
             
             # 添加标签
             painter.setPen(QPen(QColor(255, 165, 0)))
             label_text = "当前配置 (可拖动/调整)"
-            painter.drawText(scaled_rect.topLeft() + QPoint(4, -4), label_text)
+            painter.drawText(r.topLeft() + QPoint(4, -4), label_text)
             
             # 显示置信度（如果有）
             if hasattr(self, '_confidence_score') and self._confidence_score is not None:
@@ -249,7 +227,7 @@ class ROILabel(QLabel):
                 if self._template_path:
                     conf_text += f" ({self._template_path})"
                 painter.setPen(QPen(QColor(0, 255, 0) if self._confidence_score > 0.7 else QColor(255, 165, 0)))
-                painter.drawText(scaled_rect.bottomLeft() + QPoint(4, -4), conf_text)
+                painter.drawText(r.bottomLeft() + QPoint(4, -4), conf_text)
             
             # 绘制8个调整手柄（四个角+四条边中点）
             handle_size = 6
@@ -266,8 +244,8 @@ class ROILabel(QLabel):
             
             for hx, hy in handles:
                 handle_rect = QRect(
-                    int(hx * self._scale) - handle_size // 2,
-                    int(hy * self._scale) - handle_size // 2,
+                    int(hx) - handle_size // 2,
+                    int(hy) - handle_size // 2,
                     handle_size,
                     handle_size
                 )
@@ -277,15 +255,9 @@ class ROILabel(QLabel):
 
         # 绘制正在框选的区域
         if self._current_rect:
-            pen = QPen(QColor(0, 255, 0, 200), 3)
+            pen = QPen(QColor(0, 255, 0, 200), 2)
             painter.setPen(pen)
-            scaled_rect = QRect(
-                int(self._current_rect.x() * self._scale),
-                int(self._current_rect.y() * self._scale),
-                int(self._current_rect.width() * self._scale),
-                int(self._current_rect.height() * self._scale)
-            )
-            painter.drawRect(scaled_rect)
+            painter.drawRect(self._current_rect)
 
             coord_text = (
                 f"({self._current_rect.x()}, {self._current_rect.y()}, "
@@ -293,12 +265,12 @@ class ROILabel(QLabel):
                 f"[{self._current_rect.width()}x{self._current_rect.height()}]"
             )
             painter.setPen(QPen(QColor(0, 255, 0)))
-            painter.drawText(scaled_rect.bottomLeft() + QPoint(4, 20), coord_text)
+            painter.drawText(self._current_rect.bottomLeft() + QPoint(4, 18), coord_text)
 
         pos = self._to_image_coords(self._mouse_pos)
         cursor_text = f"X:{pos.x()} Y:{pos.y()}"
         painter.setPen(QPen(QColor(200, 200, 200, 180)))
-        painter.drawText(10, int(50 * self._scale), cursor_text)
+        painter.drawText(10, 48, cursor_text)
 
         painter.end()
         self.setPixmap(canvas)
@@ -420,6 +392,14 @@ class ROILabel(QLabel):
             )
         return None
 
+    def cancel_ongoing(self):
+        """取消正在画的新框、拖动/缩放手势；不关闭对话框。"""
+        self._current_rect = None
+        self._resizing_edge = None
+        self._dragging_roi = False
+        self._start_pos = None
+        self._update_display()
+
 
 class ROIConfigDialog(QDialog):
     """通用 ROI 配置对话框"""
@@ -445,7 +425,16 @@ class ROIConfigDialog(QDialog):
     def __init__(self, resolution, current_rois=None, parent=None):
         super().__init__(parent)
         self.resolution = resolution
-        self.current_rois = current_rois or {}
+        self.current_rois = {}
+        if current_rois:
+            for k, v in current_rois.items():
+                self.current_rois[k] = list(v) if v is not None and isinstance(v, (list, tuple)) else v
+        # 打开对话框时已存在配置（与「保存当前」写入磁盘）对齐的快照
+        self._last_emitted = {}
+        for k, v in self.current_rois.items():
+            if v is not None:
+                self._last_emitted[k] = self._norm_roi(v)
+        self._allow_close_without_prompt = False
         self.setWindowTitle("ROI 配置工具")
         self.setMinimumSize(900, 700)
         
@@ -486,18 +475,6 @@ class ROIConfigDialog(QDialog):
         self.calc_conf_btn.clicked.connect(self._calculate_confidence)
         top_bar.addWidget(self.calc_conf_btn)
         
-        # 缩放控制
-        top_bar.addWidget(QLabel("缩放:"))
-        self.zoom_in_btn = QPushButton("+")
-        self.zoom_in_btn.setFixedWidth(30)
-        self.zoom_in_btn.clicked.connect(lambda: self._roi_label.set_scale(self._roi_label._scale + 0.1))
-        top_bar.addWidget(self.zoom_in_btn)
-        
-        self.zoom_out_btn = QPushButton("-")
-        self.zoom_out_btn.setFixedWidth(30)
-        self.zoom_out_btn.clicked.connect(lambda: self._roi_label.set_scale(self._roi_label._scale - 0.1))
-        top_bar.addWidget(self.zoom_out_btn)
-        
         main_layout.addLayout(top_bar)
         
         # 截图显示区域
@@ -506,14 +483,20 @@ class ROIConfigDialog(QDialog):
         self.scroll_area.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.scroll_area, 1)
         
-        # 底部按钮
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self._on_save)
-        button_box.rejected.connect(self.reject)
-        main_layout.addWidget(button_box)
+        # 底部按钮：保存仅写入当前类型，不关闭；关闭再结束
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.save_btn = QPushButton("保存当前 ROI")
+        self.save_btn.setDefault(True)
+        self.save_btn.clicked.connect(self._on_save)
+        self.close_btn = QPushButton("关闭")
+        self.close_btn.clicked.connect(self._close_dialog)
+        btn_row.addWidget(self.save_btn)
+        btn_row.addWidget(self.close_btn)
+        main_layout.addLayout(btn_row)
         
         # 状态栏
-        self.status_label = QLabel("拖动框选区域 → 点击确定保存")
+        self.status_label = QLabel("1:1 全屏截图，可拖动滚动条查看；保存当前 ROI 写入一条，全部调好后点「关闭」")
         self.status_label.setStyleSheet("color: #a0a0b0; padding: 5px;")
         main_layout.addWidget(self.status_label)
     
@@ -526,15 +509,6 @@ class ROIConfigDialog(QDialog):
             
             self._roi_label = ROILabel(pixmap, self)
             self.scroll_area.setWidget(self._roi_label)
-            
-            # 自动适应窗口大小
-            screen = QApplication.primaryScreen().geometry()
-            fit_scale = min(
-                (screen.width() - 200) / pixmap.width(),
-                (screen.height() - 200) / pixmap.height(),
-                1.0
-            )
-            self._roi_label.set_scale(fit_scale)
             
             # ✅ 初始化 _last_roi_type
             self._last_roi_type = self.roi_type_combo.currentData()
@@ -618,6 +592,51 @@ class ROIConfigDialog(QDialog):
             self.confidence_label.setText("无法计算")
             self.confidence_label.setStyleSheet("color: #ff4444; font-weight: bold;")
     
+    @staticmethod
+    def _norm_roi(v):
+        if v is None:
+            return None
+        t = v if isinstance(v, tuple) else tuple(v)
+        return tuple(int(x) for x in t)
+
+    def _effective_rois(self):
+        """与界面一致的 ROI 表（含当前类型下未点「保存」的编辑）。"""
+        eff = {k: v for k, v in self.current_rois.items() if v is not None}
+        t = self.roi_type_combo.currentData()
+        if not hasattr(self, "_roi_label") or self._roi_label is None:
+            return eff
+        lb = self._roi_label
+        if lb._current_roi is not None:
+            eff[t] = list(lb._current_roi)
+        else:
+            gr = lb.get_roi()
+            if gr:
+                eff[t] = list(gr)
+        return eff
+
+    def _has_unsaved_changes(self):
+        eff = self._effective_rois()
+        for k, v in eff.items():
+            cur = self._norm_roi(v)
+            if k not in self._last_emitted or self._last_emitted[k] != cur:
+                return True
+        for k, last in self._last_emitted.items():
+            if k not in eff and last is not None:
+                return True
+        return False
+
+    def _ok_to_close(self):
+        if not self._has_unsaved_changes():
+            return True
+        r = QMessageBox.question(
+            self,
+            "未保存的修改",
+            "有 ROI 已调整但尚未点「保存当前 ROI」写入配置文件，确定要关闭吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return r == QMessageBox.Yes
+
     def _on_save(self):
         """保存 ROI"""
         # 优先使用拖动后的 ROI，如果没有则使用框选的
@@ -629,29 +648,33 @@ class ROIConfigDialog(QDialog):
         
         roi_type = self.roi_type_combo.currentData()
         roi_name = self.ROI_TYPES.get(roi_type, roi_type)
+        roi_t = self._norm_roi(roi)
+        self.current_rois[roi_type] = list(roi_t)
         
         # 发送保存信号
         self.roi_saved.emit(roi_type, roi)
+        self._last_emitted[roi_type] = roi_t
         
-        QMessageBox.information(
-            self, "保存成功",
-            f"ROI 已保存！\n\n"
-            f"类型: {roi_name}\n"
-            f"坐标: {roi}\n"
-            f"分辨率: {self.resolution}"
+        self.status_label.setText(
+            f"已保存到配置: {roi_name} | {roi} | {self.resolution}（可继续调整其他类型）"
         )
-        
-        self.accept()
     
-    def wheelEvent(self, event):
-        """滚轮缩放"""
-        delta = event.angleDelta().y()
-        current = self._roi_label._scale
-        if delta > 0:
-            self._roi_label.set_scale(current + 0.1)
+    def _close_dialog(self):
+        if not self._ok_to_close():
+            return
+        # accept() 会再触发 closeEvent，避免未保存提示弹两次
+        self._allow_close_without_prompt = True
+        self.accept()
+
+    def closeEvent(self, event):
+        if self._allow_close_without_prompt:
+            self._allow_close_without_prompt = False
+            event.accept()
+            return
+        if not self._ok_to_close():
+            event.ignore()
         else:
-            self._roi_label.set_scale(current - 0.1)
-        self.status_label.setText(f"缩放: {self._roi_label._scale:.0%}")
+            event.accept()
     
     def keyPressEvent(self, event):
         """键盘事件"""
@@ -660,6 +683,10 @@ class ROIConfigDialog(QDialog):
         if key in (Qt.Key_Return, Qt.Key_Enter):
             self._on_save()
         elif key in (Qt.Key_Escape, Qt.Key_Q):
-            self.reject()
+            if hasattr(self, "_roi_label") and self._roi_label is not None:
+                self._roi_label.cancel_ongoing()
+            self.status_label.setText(
+                "已取消当前画框/拖动手势（未关闭窗口）；保存请点「保存当前 ROI」"
+            )
         else:
             super().keyPressEvent(event)

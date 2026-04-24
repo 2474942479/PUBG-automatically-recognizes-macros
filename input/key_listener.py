@@ -3,6 +3,8 @@ from PyQt5.QtCore import QThread, pyqtSignal  # 导入PyQt5的线程和信号模
 import keyboard  # 导入keyboard库，用于全局键盘事件监听
 import logging  # 导入日志模块
 
+from core import input_trace as _input_trace
+
 logger = logging.getLogger(__name__)  # 创建 logger 实例
 
 class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThread
@@ -33,14 +35,20 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
             current_time = time.time()
             
             # 检查是否在防抖时间内（500ms）
-            if hasattr(self, '_last_tab_time') and (current_time - self._last_tab_time) < 0.5:
-                logger.debug(f"Tab 键防抖：忽略过快点击")
-                return  # 忽略过快的点击
+            # 过长防抖会导致软件 TabKey 与游戏背包不同步，进而截屏时机错误；此处仅防连点
+            if hasattr(self, '_last_tab_time') and (current_time - self._last_tab_time) < 0.12:
+                logger.debug("Tab 键防抖：忽略连点")
+                return
             
             self._last_tab_time = current_time
             
             # 切换背包状态
             self.PC.TabKey = not self.PC.TabKey
+            _input_trace.log(
+                "Tab键 -> TabKey=%s StartFire=%s",
+                self.PC.TabKey,
+                self.PC.StartFire,
+            )
             
             if self.PC.TabKey:
                 # 第一次按 Tab：打开背包，进行识别
@@ -90,27 +98,18 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
             self.keyInfo.emit('t', (None,))  # 发送切换窗口信号
         elif Keys == "f8":  # 如果按下F8键
             self.roi_config_requested.emit()  # 发送 ROI 配置请求信号
-        elif Keys == "f9":  # 如果按下F9键
-            # 切换姿势识别调试模式
-            if hasattr(self.PC, 'mouse_listener') and self.PC.mouse_listener:
-                self.PC.mouse_listener.debug_mode = not self.PC.mouse_listener.debug_mode
-                mode_str = "开启" if self.PC.mouse_listener.debug_mode else "关闭"
-                self.keyInfo.emit('l', (f"🔧 姿势识别调试模式已{mode_str}（截图保存在 logs/posture_debug/）",))
-                
-                # 如果开启调试模式，立即执行一次姿势识别测试
-                if self.PC.mouse_listener.debug_mode:
-                    Thread(target=self._test_posture_recognition).start()
-        elif Keys == "f11":  # ✅ 如果按下F11键 - 切换 Debug 日志模式
+        elif Keys == "f9":  # 调试总开关（与主界面「调试」按钮相同逻辑）
             try:
-                from main import toggle_debug_mode
-                toggle_debug_mode()
-                # 获取当前日志级别
-                import logging
-                root = logging.getLogger()
-                level_name = "DEBUG" if root.level == logging.DEBUG else "INFO"
-                self.keyInfo.emit('l', (f"📝 日志级别: {level_name}",))
+                import main as _main_mod
+                from main import debug_hotkey_f9
+                debug_hotkey_f9(self)
+                level_name = "DEBUG" if _main_mod.DEBUG_MODE else "INFO"
+                self.keyInfo.emit(
+                    'l',
+                    (f"📝 调试 (F9): {level_name} | 开镜时姿势可存 logs/posture_debug/",),
+                )
             except Exception as e:
-                self.keyInfo.emit('l', (f"⚠️ 切换日志级别失败: {e}",))
+                self.keyInfo.emit('l', (f"⚠️ 切换调试总开关失败: {e}",))
         elif Keys == "ctrl_l":  # 如果按下左Ctrl键
             self.PC.Current_posture = "c"  # 设置姿态为趴下
             self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
@@ -125,8 +124,9 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
         time.sleep(0.5)  # 稍微延迟，让用户准备好
         
         try:
-            # 执行姿势识别（调试模式会自动保存截图）
-            posture = self.PC.capture_and_recognize_posture(debug=True)
+            posture = self.PC.capture_and_recognize_posture(
+                debug=bool(getattr(self.PC, "debug_input_trace", False))
+            )
             
             if posture:
                 mode_name = {"None": "站立", "c": "蹲下", "z": "趴下"}.get(posture, "未知")

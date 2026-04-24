@@ -9,7 +9,8 @@ import time
 import numpy as np
 from core.ghub import ghub_device
 from core.paths import res_path
-from core.recognition import capture_all_positions_thread, recogniseif_firearm
+from core.recognition import capture_all_positions_thread, recogniseif_firearm, _mss_capture_lock
+from core import input_trace as _input_trace
 from data.fire_data import KEY_DATA_V3, SCOPE_FACTOR
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ DEFAULT_CONFIG = {
     "scope_factor_v3": {},
     "posture_v3": {},
     "gun_ratio_v3": {},
+    "debug_mode": False,
 }
 
 class ProcessClass:
@@ -79,6 +81,15 @@ class ProcessClass:
         
         # ═══ UI 日志回调 ═══
         self._ui_log_callback = None  # 用于将日志输出到 UI
+        # F9 / 界面「调试」按钮切换后刷新按钮文字等（可选，由主窗口注册）
+        self._on_debug_mode_changed = None
+        # 与开镜/姿势等线程错开：Tab 识别持锁期间不并发第二段 asyncio.run
+        self._gun_recognize_lock = threading.Lock()
+        _cfg = self.get_config_data("a")
+        # 与 F9 调试总开关一致；兼容旧项 debug_input_trace
+        self.debug_input_trace = bool(
+            _cfg.get("debug_mode", _cfg.get("debug_input_trace", False))
+        )
 
     def move_mouse(self, x, y):
         self._gd.mouse_R(x, y)
@@ -119,6 +130,8 @@ class ProcessClass:
             save_data['posture_v3'] = data
         elif mode == 'gun_ratio_v3':
             save_data['gun_ratio_v3'] = data
+        elif mode in ('debug_mode', 'debug_input_trace'):
+            save_data['debug_mode'] = bool(data)
         try:
             with open(self._config_path(), "w", encoding='utf-8') as f:
                 f.write(json.dumps(save_data, ensure_ascii=False, indent=2))
@@ -443,56 +456,41 @@ class ProcessClass:
                 return None
             
             logger.info(f"📷 开始姿势识别 (ROI: {self.posture_roi}, 调试: {debug})")
-            
+            _input_trace.log(
+                "姿势识别 开始 ROI=%s StartFire=%s TabKey=%s",
+                self.posture_roi,
+                self.StartFire,
+                self.TabKey,
+            )
             # 输出到 UI
             if hasattr(self, '_ui_log_callback') and self._ui_log_callback:
                 self._ui_log_callback(f"📷 开始姿势识别...")
             
-            # 截取屏幕区域
-            with mss.mss() as sct:
-                monitor = {"top": top, "left": left, "width": width, "height": height}
-                screenshot = sct.grab(monitor)
-                
-                # 转换为 numpy array (BGR格式)
-                img = np.array(screenshot)
-                # mss 默认是 BGRA 格式，转换为 BGR
-                if img.shape[2] == 4:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-                
-                # 识别姿势
-                posture = self.recognize_posture_from_image(img, debug=debug)
-                
-                # 如果识别失败且是调试模式，输出提示
-                if posture is None and debug:
-                    if hasattr(self, '_ui_log_callback') and self._ui_log_callback:
-                        self._ui_log_callback("⚠️ 姿势识别失败，请查看 logs/posture_debug/ 目录中的截图")
-                
-                return posture
-                
+            # 截取屏幕区域（与枪械识别共用 mss 串行锁）
+            with _mss_capture_lock:
+                with mss.mss() as sct:
+                    monitor = {"top": top, "left": left, "width": width, "height": height}
+                    screenshot = sct.grab(monitor)
+            img = np.array(screenshot)
+            if img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+            posture = self.recognize_posture_from_image(img, debug=debug)
+            _input_trace.log("开镜姿势识别 结果=%s StartFire=%s TabKey=%s", posture, self.StartFire, self.TabKey)
+
+            if posture is None and debug:
+                if hasattr(self, "_ui_log_callback") and self._ui_log_callback:
+                    self._ui_log_callback("⚠️ 姿势识别失败，请查看 logs/posture_debug/ 目录中的截图")
+
+            return posture
+
         except Exception as e:
             import traceback
             logger.error(f"截取并识别姿势失败: {e}\n{traceback.format_exc()}")
             if hasattr(self, '_ui_log_callback') and self._ui_log_callback:
                 self._ui_log_callback(f"❌ 姿势识别异常: {e}")
             return None
-    
-    def Change_posture(self, keyWord):
-        """
-        姿态切换（兼容按键和图片识别两种方式）
-        :param keyWord: 姿态键值 ('space'/'None'=站立, 'z'=趴下, 'c'=蹲下)
-        """
-        if keyWord == "space":
-            self.Current_posture = "None"
-        elif keyWord == "z":
-            self.Current_posture = "z"
-        elif keyWord == "c":
-            self.Current_posture = "c"
-        else:
-            # 支持直接传入识别结果
-            if keyWord in ("None", "z", "c"):
-                self.Current_posture = keyWord
-        
-        logger.info(f"姿态切换为: {self.Current_posture}")
+
     def get_window_version(self):
         if not hasattr(sys, 'getwindowsversion'):
             return False
@@ -513,31 +511,39 @@ class ProcessClass:
         枪械配件识别
         :return:
         """
-        # ✅ 检查背包状态，如果已经关闭则不更新结果
-        if not self.TabKey:
-            logger.debug("背包已关闭，取消识别结果更新")
+        _input_trace.log(
+            "Tab识别 请求开始 TabKey=%s Monitor=%s", self.TabKey, self.Monitor
+        )
+        if not self._gun_recognize_lock.acquire(blocking=False):
+            logger.info("Tab 识别仍在执行，本次跳过（避免 mss/异步重入卡死）")
+            _input_trace.log("Tab识别 锁占用中，本帧跳过")
             return
-        
-        # ✅ 等待游戏UI渲染完成（背包打开动画通常需要 100-200ms）
-        import time
-        logger.debug("等待游戏UI渲染...")
-        time.sleep(0.01)  # 等待 10ms
-        
-        # ✅ 再次检查背包状态（防止在等待过程中被关闭）
-        if not self.TabKey:
-            logger.debug("等待过程中背包被关闭，取消识别")
-            return
-        
-        Data = asyncio.run(capture_all_positions_thread(self.Monitor))
-        
-        # ✅ 再次检查背包状态（防止在识别过程中被关闭）
-        if not self.TabKey:
-            logger.debug("识别过程中背包被关闭，丢弃结果")
-            return
-        
-        self._Result1 = Data[0]
-        self._Result2 = Data[1]
-        Emit('g', (None,))
+        try:
+            if not self.TabKey:
+                _input_trace.log("Tab识别 已取消(背包关)")
+                return
+
+            time.sleep(0.18)
+            if not self.TabKey:
+                _input_trace.log("Tab识别 等待UI后已取消(背包关)")
+                return
+            t0 = time.perf_counter()
+            Data = asyncio.run(capture_all_positions_thread(self.Monitor))
+            if not self.TabKey:
+                _input_trace.log("Tab识别 完成但已关背包，丢弃 (耗时=%.2fs)", time.perf_counter() - t0)
+                return
+            self._Result1 = Data[0]
+            self._Result2 = Data[1]
+            _input_trace.log(
+                "Tab识别 完成 耗时=%.2fs 槽1Name=%s 槽2Name=%s",
+                time.perf_counter() - t0,
+                self._Result1.get("Name") if self._Result1 else None,
+                self._Result2.get("Name") if self._Result2 else None,
+            )
+            Emit("g", (None,))
+        finally:
+            self._gun_recognize_lock.release()
+            _input_trace.log("Tab识别 已释放锁")
 
     def Change_firearms(self, keyWord):
         """
