@@ -73,7 +73,7 @@ def _find_best_match(roi_gray, category, resolution, threshold=0.18):
             tmpl = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
             if tmpl is None:
                 continue
-            score = match_sift(roi_gray, tmpl)
+            score = match_sift(roi_gray, tmpl, resolution)
             if score > best_score:
                 best_score = score
                 best_name = os.path.splitext(fname)[0]

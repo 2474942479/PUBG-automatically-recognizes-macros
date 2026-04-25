@@ -7,6 +7,7 @@ import threading
 import time
 import asyncio
 import numpy as np
+from collections import Counter
 from PIL import ImageGrab
 
 from core.paths import res_path
@@ -19,10 +20,24 @@ logger = logging.getLogger(__name__)
 _sift_detector = None
 # ✅ 全局 FLANN 匹配器（避免重复创建）
 _flann_matcher = None
+# ✅ 全局 ORB 检测器（避免重复创建，用于小图标特征匹配）
+_orb_detector = None
 # ✅ 全局 ROI 配置缓存
 _roi_config_cache = None
 _roi_config_cache_time = 0
 _roi_config_cache_ttl = 60  # 缓存 60 秒
+
+# ROI 裁剪边距(px)，补偿模板和截图之间的像素级位置偏移
+# PUBG 背包 UI 在每次打开时可能有 ±1~2px 的抖动
+# 裁剪时扩边 → matchTemplate 滑动窗口自动找最佳对齐位置
+PADDING = 2
+
+# 多帧共识投票：每槽位保留最近 N 帧识别结果
+# 当最近 3 帧中 ≥2 帧一致时锁定结果，消除偶发单帧漏检
+CONSENSUS_WINDOW = 3
+CONSENSUS_MIN_VOTES = 2
+_slot_history = {}  # {"Name_1": ["m416", "m416", "m416"], ...}
+_slot_locked = {}   # {"Name_1": "m416", ...}  锁定后的兜底值
 
 def _get_sift_detector():
     """获取或创建 SIFT 检测器（单例模式）"""
@@ -37,6 +52,148 @@ def _get_flann_matcher():
     if _flann_matcher is None:
         _flann_matcher = cv2.FlannBasedMatcher(FLANN_INDEX_PARAMS, FLANN_SEARCH_PARAMS)
     return _flann_matcher
+
+def _get_orb_detector():
+    global _orb_detector
+    if _orb_detector is None:
+        _orb_detector = cv2.ORB_create(
+            nfeatures=200, scaleFactor=1.2, nlevels=4,
+            edgeThreshold=5, patchSize=15
+        )
+    return _orb_detector
+
+
+def _match_icon_canny(src, tmpl):
+    """Canny edge matching - immune to brightness/transparency, fourth channel"""
+    # 低阈值捕捉更多边缘，适合 99×75 的小图标
+    e1 = cv2.Canny(src, 30, 100)
+    e2 = cv2.Canny(tmpl, 30, 100)
+    if e1.shape != e2.shape:
+        return 0.0
+    # 检查是否有足够边缘（全黑 = 无边缘 = 无效）
+    if cv2.countNonZero(e1) < 20 or cv2.countNonZero(e2) < 20:
+        return 0.0
+    result = cv2.matchTemplate(e1, e2, cv2.TM_CCOEFF_NORMED)
+    _, score, _, _ = cv2.minMaxLoc(result)
+    return score
+
+
+def _classify_resolution(current_res):
+    """
+    分辨率三档分类：large (>=4K), medium (2K), small (<=1080p)
+    :return: (tier, scale) where tier in ('large','medium','small'), scale = width/3840
+    """
+    if not current_res:
+        return 'large', 1.0
+    try:
+        w = int(current_res.split('x')[0])
+    except (ValueError, IndexError):
+        return 'large', 1.0
+    scale = w / 3840.0
+    if w >= 3000:
+        return 'large', scale
+    elif w >= 2000:
+        return 'medium', scale
+    else:
+        return 'small', scale
+
+
+def _get_clahe_params(tier, scale):
+    """分辨率自适应的 CLAHE 参数"""
+    if tier == 'large':
+        return 1.5, (4, 4)
+    elif tier == 'medium':
+        return 1.5, (3, 3)
+    else:
+        return 1.2, (2, 2)
+
+
+def _get_canny_params(tier):
+    """分辨率自适应的 Canny 阈值"""
+    if tier == 'large':
+        return 30, 100
+    elif tier == 'medium':
+        return 20, 70
+    else:
+        return 15, 50
+
+
+def _match_icon_ccorr(src, tmpl):
+    """
+    CCORR_NORMED 模板匹配 -- 中/小图主力通道
+    不依赖均值估计，纯幅度归一化，66px 以下比 CCOEFF 更稳定
+    """
+    if src.shape != tmpl.shape:
+        return 0.0
+    result = cv2.matchTemplate(src, tmpl, cv2.TM_CCORR_NORMED)
+    _, score, _, _ = cv2.minMaxLoc(result)
+    return score
+
+
+def _match_icon_sobel(src, tmpl, sobel_thresh=20):
+    """Sobel 梯度匹配（独立函数）"""
+    gx1 = cv2.Sobel(src, cv2.CV_64F, 1, 0, ksize=3)
+    gy1 = cv2.Sobel(src, cv2.CV_64F, 0, 1, ksize=3)
+    gm1 = cv2.magnitude(gx1, gy1).astype(np.uint8)
+    gx2 = cv2.Sobel(tmpl, cv2.CV_64F, 1, 0, ksize=3)
+    gy2 = cv2.Sobel(tmpl, cv2.CV_64F, 0, 1, ksize=3)
+    gm2 = cv2.magnitude(gx2, gy2).astype(np.uint8)
+    _, e1 = cv2.threshold(gm1, sobel_thresh, 255, cv2.THRESH_BINARY)
+    _, e2 = cv2.threshold(gm2, sobel_thresh, 255, cv2.THRESH_BINARY)
+    result = cv2.matchTemplate(e1, e2, cv2.TM_CCOEFF_NORMED)
+    _, score, _, _ = cv2.minMaxLoc(result)
+    return score
+
+
+def _match_icon_small(src, tmpl, tier, scale):
+    """
+    小图专用匹配 (<=1080p)
+    pipeline: CLAHE_bilateral + CCORR_NORMED + ORB_multi_scale
+    放弃 Sobel/Canny（40px 边缘太少），改用双边滤波平滑背景
+    模板缩放到 90%/100%/110% 三个尺度匹配取 max
+    """
+    clip_limit, tile_grid = _get_clahe_params(tier, scale)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
+    src_c = clahe.apply(src)
+    tmpl_c = clahe.apply(tmpl)
+    # 双边滤波平滑背景，保留边缘
+    src_c = cv2.bilateralFilter(src_c, 5, 50, 50)
+    tmpl_c = cv2.bilateralFilter(tmpl_c, 5, 50, 50)
+    # 主通道：CCORR_NORMED
+    score_ccorr = _match_icon_ccorr(src_c, tmpl_c)
+    # 多尺度 ORB（模板缩放 90%/100%/110%）
+    score_orb = _match_icon_orb(src_c, tmpl_c)
+    ht, wt = tmpl_c.shape
+    for r in [0.9, 1.1]:
+        new_h, new_w = max(10, int(ht * r)), max(10, int(wt * r))
+        tmpl_scaled = cv2.resize(tmpl_c, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        ch, cw = tmpl_scaled.shape
+        cy_s = max(0, (ch - ht) // 2)
+        cx_s = max(0, (cw - wt) // 2)
+        tmpl_cropped = tmpl_scaled[cy_s:cy_s + ht, cx_s:cx_s + wt]
+        if tmpl_cropped.shape == src_c.shape:
+            score_orb = max(score_orb, _match_icon_orb(src_c, tmpl_cropped))
+    return max(score_ccorr, score_orb)
+
+
+def _match_icon_orb(src, tmpl):
+    """ORB binary feature matching - third channel"""
+    orb = _get_orb_detector()
+    kp1, des1 = orb.detectAndCompute(src, None)
+    kp2, des2 = orb.detectAndCompute(tmpl, None)
+    if des1 is None or des2 is None or len(des1) < 3 or len(des2) < 3:
+        return 0.0
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING2, crossCheck=True)
+    try:
+        matches = bf.match(des1, des2)
+    except cv2.error:
+        return 0.0
+    if not matches:
+        return 0.0
+    matches = sorted(matches, key=lambda x: x.distance)
+    good = [m for m in matches if m.distance < 60]
+    max_possible = max(len(kp1), len(kp2))
+    return min(len(good) / (max_possible + 0.1), 1.0)
 
 def _load_roi_config():
     """
@@ -151,17 +308,21 @@ def _ensure_min_size(img, min_dim=200):
 def _match_single_template(args):
     """
     并行化 SIFT 匹配任务（用于 ThreadPoolExecutor）
-    :param args: (img1, template_path, template_name)
+    :param args: (img1, template_path, template_name, current_res)
     :return: (template_name, score) 或 None
     """
-    img1, template_path, template_name = args
+    if len(args) == 4:
+        img1, template_path, template_name, current_res = args
+    else:
+        img1, template_path, template_name = args
+        current_res = None
     img2 = _load_template_cached(template_path)
     
     if img2 is None:
         return None
     
     try:
-        score = match_sift(img1, img2)
+        score = match_sift(img1, img2, current_res)
         return (template_name, score)
     except Exception as e:
         # ✅ 只在调试模式下记录异常
@@ -237,11 +398,62 @@ def compute_matches_mask(matches, distance_threshold):
 
     return matchesMask, matchedPoints1
 
-def match_sift(img1, img2):
+
+def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0):
+    """
+    分辨率自适应匹配（4K/2K/1080p 自动分流）
+
+    large  (>=4K):  CLAHE + CCOEFF + Sobel + Canny  (现有最优 pipeline)
+    medium (2K):     CLAHE + CCOEFF + CCORR + Sobel  (双路归一化，放弃易噪的 Canny)
+    small  (<=1080p): 委托 _match_icon_small           (CCORR + 双边滤波 + 多尺度 ORB)
+    """
+    # 尺寸保护：src 任一维小于 tmpl → matchTemplate 会断言失败
+    hs, ws = src.shape[:2]
+    ht, wt = tmpl.shape[:2]
+    if hs < ht or ws < wt:
+        return 0.0
+
+    clip_limit, tile_grid = _get_clahe_params(tier, scale)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
+    src_c = clahe.apply(src)
+    tmpl_c = clahe.apply(tmpl)
+
+    # --- 方法1：像素级 TM_CCOEFF_NORMED（所有 tier 共用） ---
+    result = cv2.matchTemplate(src_c, tmpl_c, cv2.TM_CCOEFF_NORMED)
+    _, score_ccoeff, _, _ = cv2.minMaxLoc(result)
+
+    # --- 小图分支：委托专用 pipeline ---
+    if tier == 'small':
+        score_small = _match_icon_small(src, tmpl, tier, scale)
+        return max(score_ccoeff, score_small)
+
+    # --- 方法2：梯度级匹配（large + medium） ---
+    sobel_thresh = 20 if tier == 'large' else 15  # medium 用更低阈值
+    score_sobel = _match_icon_sobel(src_c, tmpl_c, sobel_thresh)
+
+    # --- 中图分支：CCORR_NORMED 替代 Canny（更稳定） ---
+    if tier == 'medium':
+        score_ccorr = _match_icon_ccorr(src_c, tmpl_c)
+        return max(score_ccoeff, score_sobel, score_ccorr)
+
+    # --- 大图分支：加 Canny 边缘（4K 专享，像素最多效果最好） ---
+    canny_lo, canny_hi = _get_canny_params(tier)
+    e1 = cv2.Canny(src_c, canny_lo, canny_hi)
+    e2 = cv2.Canny(tmpl_c, canny_lo, canny_hi)
+    if cv2.countNonZero(e1) >= 20 and cv2.countNonZero(e2) >= 20:
+        result_c = cv2.matchTemplate(e1, e2, cv2.TM_CCOEFF_NORMED)
+        _, score_canny, _, _ = cv2.minMaxLoc(result_c)
+    else:
+        score_canny = 0.0
+
+    return max(score_ccoeff, score_sobel, score_canny)
+
+def match_sift(img1, img2, current_res=None):
     """
     SIFT 特征匹配
     :param img1: 待匹配的图像（灰度图）
     :param img2: 模板图像（灰度图）
+    :param current_res: 当前分辨率字符串（如 '2560x1440'）
     :return: 匹配率
     """
     # 验证输入图像
@@ -263,20 +475,37 @@ def match_sift(img1, img2):
         img2 = img2.astype(np.uint8)
     
     # ✅ 小图（任一维度 < 100px）直接用模板匹配 TM_CCOEFF_NORMED
-    # SIFT 在 62×65 的图标上特征点太少（0~29个），匹配不可靠
+    # SIFT 在 62x65 的图标上特征点太少（0~29个），匹配不可靠
     # 模板匹配在同尺寸图上零特征提取、极快（1ms 10次）、100% 准确
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
     if (h1 < 100 or w1 < 100) and (h2 < 100 or w2 < 100):
+        # 分辨率自适应 pipeline（两路径共用）
+        tier, scale = _classify_resolution(current_res) if current_res else ('large', 1.0)
+        # 路径1：尺寸完全一致 → 分辨率自适应多通道融合
         if img1.shape == img2.shape:
-            # ✅ CLAHE 自适应直方图均衡化，减少 PUBG 背包半透明背景透色差异
-            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
-            img1 = clahe.apply(img1)
-            img2 = clahe.apply(img2)
-            result = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED)
-            _, score, _, _ = cv2.minMaxLoc(result)
-            return float(score)
-        # 尺寸不一致 → 降级到 SIFT（不同分辨率模板间用特征匹配）
+            score_tm = _match_icon_hybrid(img1, img2, tier, scale)
+            score_orb = _match_icon_orb(img1, img2)
+            return float(max(score_tm, score_orb))
+        
+        # 路径2：尺寸在 ±PADDING 内 → 滑动窗口匹配
+        # PUBG 背包 UI 每次打开可能有 ±1~2px 的像素抖动
+        # ROI 裁剪时加了 PADDING 边距，此处用 matchTemplate 找最佳对齐位置
+        if abs(h1 - h2) <= PADDING and abs(w1 - w2) <= PADDING:
+            # 大图为源（滑动窗口 TM），小图为模板
+            if h1 >= h2 and w1 >= w2:
+                src, tmpl = img1, img2
+            else:
+                src, tmpl = img2, img1
+            score_tm = _match_icon_hybrid(src, tmpl, tier, scale)
+            # ORB: 裁取源图中心区域（去掉 padding 边距）
+            h_s, w_s = src.shape[:2]
+            h_t, w_t = tmpl.shape[:2]
+            cy = (h_s - h_t) // 2
+            cx = (w_s - w_t) // 2
+            src_center = src[cy:cy+h_t, cx:cx+w_t]
+            score_orb = _match_icon_orb(src_center, tmpl)
+            return float(max(score_tm, score_orb))
     
     # ✅ 使用全局 SIFT 检测器（避免重复创建）
     sift = _get_sift_detector()
@@ -391,9 +620,9 @@ async def capture_all_guns(pathData, current_res=None):
         # ✅ 并行化 SIFT 匹配（使用线程池）
         from concurrent.futures import ThreadPoolExecutor
         
-        # 准备任务列表
+        # 准备任务列表（传入 current_res 以启用分辨率自适应匹配）
         tasks = [
-            (img1, match_Path + each, each[:-4])
+            (img1, match_Path + each, each[:-4], current_res)
             for each in content
         ]
         
@@ -405,8 +634,8 @@ async def capture_all_guns(pathData, current_res=None):
         # 少于 10 个模板时，串行更快（避免线程开销）
         if len(tasks) < 10:
             # 串行模式
-            for template_path, _, template_name in [(t[1], t[0], t[2]) for t in tasks]:
-                result = _match_single_template((img1, template_path, template_name))
+            for template_path, _, template_name, res in [(t[1], t[0], t[2], t[3]) for t in tasks]:
+                result = _match_single_template((img1, template_path, template_name, res))
                 if result:
                     name, score = result
                     scores_detail.append((name, score))
@@ -429,25 +658,63 @@ async def capture_all_guns(pathData, current_res=None):
                             MatchName = name
                             MatchValue = score
         
-        # ✅ 提高最低阈值，避免误识别（0.18 → 0.5）
-        MATCH_THRESHOLD = 0.5
+        # ✅ 比值驱动阈值：区分度优先，高分兜底
+        # 第一名/第二名 ≥ RATIO_THRESHOLD 且分数 ≥ SCORE_FLOOR → 接受
+        # 否则分数 ≥ 0.5 → 接受
+        scores_detail.sort(key=lambda x: x[1], reverse=True)
+        top5 = scores_detail[:5]
+        top5_str = ", ".join([f"{n}:{s:.4f}" for n, s in top5])
         
-        # ✅ 调试日志：打印 Top5 置信度详情（依赖 debug_input_trace 开关）
-        if scores_detail:
-            scores_detail.sort(key=lambda x: x[1], reverse=True)
-            top5 = scores_detail[:5]
-            top5_str = ", ".join([f"{n}:{s:.4f}" for n, s in top5])
+        second_best = top5[1][1] if len(top5) >= 2 else 0.0
+        gap = MatchValue - second_best
+        ratio = MatchValue / second_best if second_best > 0 else float('inf')
+        
+        # 分辨率自适应阈值
+        tier, scale = _classify_resolution(current_res) if current_res else ('large', 1.0)
+        MATCH_THRESHOLD = max(0.38, 0.50 * scale)       # 4K→0.50, 2K→0.33(限0.38), 1080p→0.38
+        RATIO_THRESHOLD = max(2.5, 4.0 * scale)         # 4K→4.0, 2K→2.67, 1080p→2.5
+        SCORE_FLOOR = max(0.18, 0.25 * scale)            # 4K→0.25, 2K→0.18, 1080p→0.18
+        
+        accept = False
+        if ratio >= RATIO_THRESHOLD and MatchValue >= SCORE_FLOOR:
+            accept = True
             if debug_mode:
-                logger.info(f"[匹配详情] {mode}: 最佳={MatchName}({MatchValue:.4f}) | Top5: {top5_str}")
+                logger.info(f"[DEBUG] {mode} 低分高区分度({MatchName}={MatchValue:.4f},ratio={ratio:.1f}x,gap={gap:.4f})")
+        elif MatchValue >= MATCH_THRESHOLD:
+            accept = True
         
-        if MatchValue < MATCH_THRESHOLD or not MatchName:
+        if debug_mode:
+            logger.info(f"[匹配详情] {mode}: 最佳={MatchName}({MatchValue:.4f}) gap={gap:.4f} | Top5: {top5_str}")
+        
+        if not accept or not MatchName:
             MatchName = "none"
             if debug_mode:
-                logger.info(f"[DEBUG] {mode} 识别结果: none (置信度 {MatchValue:.4f} < 阈值 {MATCH_THRESHOLD})")
+                logger.info(f"[DEBUG] {mode}=none({MatchValue:.4f},gap={gap:.4f})")
         else:
-            logger.info(f"{mode} 识别结果: {MatchName} (置信度: {MatchValue:.4f})")
+            logger.info(f"{mode}={MatchName}({MatchValue:.4f},gap={gap:.4f})")
         
         ReturnData[mode[:-2]] = MatchName
+    
+    # ✅ 多帧共识投票：单帧漏检时用历史结果兜底
+    # 只在原始结果为 "none" 时触发，不影响正常识别和装备切换
+    for slot, raw_name in ReturnData.items():
+        if slot not in _slot_history:
+            _slot_history[slot] = []
+        hist = _slot_history[slot]
+        hist.append(raw_name)
+        if len(hist) > CONSENSUS_WINDOW:
+            hist.pop(0)
+        
+        if raw_name == "none" and len(hist) >= CONSENSUS_MIN_VOTES:
+            # 统计窗口内非 none 的最高频结果
+            candidates = [n for n in hist if n != "none"]
+            if candidates:
+                top, count = Counter(candidates).most_common(1)[0]
+                if count >= CONSENSUS_MIN_VOTES:
+                    ReturnData[slot] = top
+                    _slot_locked[slot] = top
+                    if debug_mode:
+                        logger.info(f"[CONSENSUS] {slot} none→{top} (窗口{CONSENSUS_WINDOW}帧内{count}票)")
     
     return ReturnData
 
@@ -515,9 +782,15 @@ async def capture_all_positions_thread(current_res, resolution_settings=None, gu
             
             left, top, right, bottom = norm
             
-            # ✅ 从背包大图中裁剪 ROI（numpy 切片，极快）
-            roi_gray = backpack_gray[top:bottom, left:right]
-            roi_color = backpack_color[top:bottom, left:right]
+            # ✅ 裁剪时加 PADDING 边距，用于补偿 PUBG 背包 UI 抖动导致的 ±1~2px 偏移
+            # matchTemplate 滑动窗口会自动找最佳对齐位置
+            hs, ws = backpack_gray.shape[:2]
+            left_pad = max(0, left - PADDING)
+            top_pad = max(0, top - PADDING)
+            right_pad = min(ws, right + PADDING)
+            bottom_pad = min(hs, bottom + PADDING)
+            roi_gray = backpack_gray[top_pad:bottom_pad, left_pad:right_pad]
+            roi_color = backpack_color[top_pad:bottom_pad, left_pad:right_pad]
             
             # 验证裁剪结果
             if roi_gray.size == 0:

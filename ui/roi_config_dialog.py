@@ -531,24 +531,28 @@ class ROIConfigDialog(QDialog):
         self._load_screenshot()
     
     def _update_roi_type_combo(self):
-        """更新 ROI 类型下拉框（根据是否已配置背包）"""
-        self.roi_type_combo.blockSignals(True)  # 阻止信号
+        """更新 ROI 类型下拉框（阶段1显示姿势/背包/开镳，阶段2只显示枪械配件）"""
+        self.roi_type_combo.blockSignals(True)
         self.roi_type_combo.clear()
-        
-        if self.backpack_roi and len(self.backpack_roi) == 4:
-            # ✅ 已配置背包：显示所有类型
-            for key, name in self.ROI_TYPES.items():
-                self.roi_type_combo.addItem(name, key)
+            
+        if self._phase == "roi":
+            # ✅ 阶段2：只显示枪械配件类型（姿势/背包/开镳不在这里配置）
+            phase2_types = [
+                'Name_1', 'Scope_1', 'Muzzle_1', 'Grip_1', 'Stock_1',
+                'Name_2', 'Scope_2', 'Muzzle_2', 'Grip_2', 'Stock_2',
+            ]
+            for key in phase2_types:
+                self.roi_type_combo.addItem(self.ROI_TYPES[key], key)
         else:
-            # ✅ 未配置背包：只显示背包区域和开镜坐标
-            limited_types = {
-                'guns_backpack_roi': '背包截图区域 (GUNS_REOLUTION_SETTINGS)',
-                'right_click_pos': '右键开镜点击坐标 (Click)',
-                'posture_roi': '姿势识别区域',
-            }
-            for key, name in limited_types.items():
+            # ✅ 阶段1：只显示姿势/背包/开镳坐标
+            phase1_types = [
+                ('guns_backpack_roi', '背包截图区域 (GUNS_REOLUTION_SETTINGS)'),
+                ('posture_roi',       '姿势识别区域'),
+                ('right_click_pos',   '右键开镳点击坐标 (Click)'),
+            ]
+            for key, name in phase1_types:
                 self.roi_type_combo.addItem(name, key)
-        
+            
         self.roi_type_combo.blockSignals(False)
     
     def _build_ui(self):
@@ -800,6 +804,8 @@ class ROIConfigDialog(QDialog):
                     self.roi_type_combo.setCurrentIndex(index)
                     self.roi_type_combo.blockSignals(False)
                     self._last_roi_type = roi_type
+                    # ✅ combo 已跳转，同步更新画布显示（blockSignals 阻断了 roi_type_changed）
+                    self._update_current_value()
                     logger.info(f"✅ 自动选择已配置的 ROI: {roi_type}")
                     return
         
@@ -810,6 +816,8 @@ class ROIConfigDialog(QDialog):
             self.roi_type_combo.setCurrentIndex(index)
             self.roi_type_combo.blockSignals(False)
             self._last_roi_type = 'Name_1'
+            # ✅ combo 已跳转，同步更新画布显示
+            self._update_current_value()
             logger.info("✅ 默认选择 Name_1")
     
     def _on_back_to_phase1(self):
@@ -864,20 +872,9 @@ class ROIConfigDialog(QDialog):
             self._roi_label._current_roi = None
             self._roi_label._update_display()
         
-        # ✅ 重置 ROI 类型下拉框（只显示背包和开镜）
-        self._update_roi_type_combo()
-        
-        # ✅ 切换回背包区域选项
-        index = self.roi_type_combo.findData('guns_backpack_roi')
-        if index >= 0:
-            self.roi_type_combo.blockSignals(True)
-            self.roi_type_combo.setCurrentIndex(index)
-            self.roi_type_combo.blockSignals(False)
-            self._last_roi_type = 'guns_backpack_roi'
-        
-        # ✅ 回到阶段1（显示全屏截图）
+        # ✅ 回到阶段1（_setup_phase1_backpack_selection 内部已刷新下拉框并选中背包）
         self._setup_phase1_backpack_selection()
-        
+                
         # 更新显示
         self._update_current_value()
         
@@ -934,15 +931,26 @@ class ROIConfigDialog(QDialog):
         """阶段1：显示全屏截图，框选背包区域"""
         self._phase = "backpack"
         
+        # ✅ 更新下拉框为阶段1选项（姿势/背包/开镓）
+        self._update_roi_type_combo()
+        # 默认选中背包区域
+        index = self.roi_type_combo.findData('guns_backpack_roi')
+        if index >= 0:
+            self.roi_type_combo.blockSignals(True)
+            self.roi_type_combo.setCurrentIndex(index)
+            self.roi_type_combo.blockSignals(False)
+            self._last_roi_type = 'guns_backpack_roi'
+        
         # 创建 ROI 标签（全屏模式）
         self._roi_label = ROILabel(self._fullscreen_pixmap, self, mode="fullscreen")
         self.scroll_area.setWidget(self._roi_label)
         
-        # ✅ 隐藏回退按钮和保存模板按钮（阶段1不需要）
+        # ✅ 隐藏回退按钮（阶段1不需要）
         if hasattr(self, 'back_btn'):
             self.back_btn.setVisible(False)
+        # ✅ 显示保存模板按钮（阶段1可保存姿势模板）
         if hasattr(self, 'save_template_btn'):
-            self.save_template_btn.setVisible(False)
+            self.save_template_btn.setVisible(True)
 
         # ✅ 隐藏固定尺寸配置（阶段1不需要）
         if hasattr(self, 'roi_size_spin_w'):
@@ -959,6 +967,9 @@ class ROIConfigDialog(QDialog):
     def _setup_phase2_roi_selection(self):
         """阶段2：显示背包截图，框选 ROI"""
         self._phase = "roi"
+        
+        # ✅ 切换下拉框为阶段2选项（仅枪械配件）
+        self._update_roi_type_combo()
         
         # 移除旧的控件
         if hasattr(self, '_roi_label'):
@@ -1011,6 +1022,14 @@ class ROIConfigDialog(QDialog):
         roi_type = self.roi_type_combo.currentData()
         current = self.current_rois.get(roi_type)
         
+        # ✅ 切换类型时先清空旧 ROI，避免残留显示上一次选择的类型的框
+        if hasattr(self, '_roi_label') and self._roi_label:
+            self._roi_label._current_roi = None
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"🔄 _update_current_value: roi_type={roi_type}, current={current}")
+
         if current:
             # ✅ 显示当前配置的坐标
             self.current_value_label.setText(f"当前: {current}")
@@ -1092,17 +1111,31 @@ class ROIConfigDialog(QDialog):
                 self._roi_label._update_display()
 
     def _determine_fixed_size(self, roi_type):
-        """根据 ROI 类型和现有模板推断固定尺寸。返回 (w, h)。"""
-        # 默认值：名称 72×30，配件 60×50
-        name_default = (72, 30)
-        other_default = (60, 50)
-
+        """根据 ROI 类型、分辨率和现有模板推断固定尺寸。返回 (w, h)。"""
+        # ✅ 基准分辨率 2560x1440 的默认尺寸（已优化好的尺寸）
+        base_name_default = (72, 30)
+        base_other_default = (66, 50)  # Scope/Muzzle/Grip/Stock
+        
+        # ✅ 各分辨率相对于 2560x1440 的缩放比例（宽比例, 高比例）
+        BASE_RES = (2560, 1440)
+        SCALE_MAP = {
+            "3840x2160": (3840/2560, 2160/1440),
+            "3440x1440": (3440/2560, 1440/1440),
+            "2560x1600": (2560/2560, 1600/1440),
+            "2560x1440": (1.0, 1.0),
+            "2304x1440": (2304/2560, 1440/1440),
+            "2560x1080": (2560/2560, 1080/1440),
+            "1920x1080": (1920/2560, 1080/1440),
+            "1728x1080": (1728/2560, 1080/1440),
+        }
+        
+        sx, sy = SCALE_MAP.get(self.resolution, (1.0, 1.0))
         if 'Name' in roi_type:
-            default = name_default
+            default = (int(base_name_default[0] * sx), int(base_name_default[1] * sy))
         else:
-            default = other_default
+            default = (int(base_other_default[0] * sx), int(base_other_default[1] * sy))
 
-        # 从现有模板目录推断尺寸
+        # 从现有模板目录推断尺寸（模板尺寸优先级高于默认值）
         from core.paths import res_path
         category = None
         if 'Name' in roi_type:
@@ -1167,6 +1200,10 @@ class ROIConfigDialog(QDialog):
     
     def roi_type_changed(self):
         """ROI 类型改变时更新显示"""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"🔄 roi_type_changed: _last_roi_type={self._last_roi_type}, new={self.roi_type_combo.currentData()}")
+
         # ✅ 自动保存上一个 ROI 类型的调整结果
         if self._last_roi_type and hasattr(self, '_roi_label') and self._roi_label._current_roi:
             # 保存上一个类型的 ROI
@@ -1183,8 +1220,6 @@ class ROIConfigDialog(QDialog):
                 else:
                     self.current_rois[self._last_roi_type] = list(raw_roi)
                 
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.info(f"✅ 自动保存 {self._last_roi_type}: {raw_roi}")
 
             # ✅ 同步更新 _last_emitted，避免关闭时误报"未保存"
@@ -1196,8 +1231,6 @@ class ROIConfigDialog(QDialog):
         
         # ✅ 如果切换到枪械信息类型，检查是否已配置背包区域
         if new_roi_type in self.RELATIVE_TO_BACKPACK and not self.backpack_roi:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"⚠️ 请先配置背包区域，否则 {new_roi_type} 无法正确转换坐标")
             
             # ✅ 弹出提示并自动切换回背包区域选项
@@ -1232,25 +1265,24 @@ class ROIConfigDialog(QDialog):
         
         self._last_roi_type = new_roi_type
         
-        # 更新显示（加载新类型的 ROI）
-        self._update_current_value()
-
-        # ✅ 如果处于阶段2固定尺寸模式，更新尺寸微调框
+        # ✅ 先更新固定尺寸（必须在 _update_current_value 之前，否则会用旧类型的尺寸显示新类型的框）
         if self._phase == "roi" and hasattr(self, '_roi_label') and self._roi_label._fixed_size_mode:
-            if new_roi_type in self.RELATIVE_TO_BACKPACK or new_roi_type in ('posture_roi', 'guns_backpack_roi'):
-                # 枪械配件/姿势/背包区域才显示固定尺寸
-                if new_roi_type in self.RELATIVE_TO_BACKPACK or new_roi_type == 'posture_roi':
-                    fw, fh = self._determine_fixed_size(new_roi_type)
-                    self.roi_size_spin_w.blockSignals(True)
-                    self.roi_size_spin_h.blockSignals(True)
-                    self.roi_size_spin_w.setValue(fw)
-                    self.roi_size_spin_h.setValue(fh)
-                    self.roi_size_spin_w.blockSignals(False)
-                    self.roi_size_spin_h.blockSignals(False)
-                    self._roi_label.set_fixed_size(fw, fh)
-                    # 如果当前有配置，保持中心
-                    if self._roi_label._current_roi:
-                        self._roi_label._update_display()
+            if new_roi_type in self.RELATIVE_TO_BACKPACK or new_roi_type == 'posture_roi':
+                fw, fh = self._determine_fixed_size(new_roi_type)
+                self.roi_size_spin_w.blockSignals(True)
+                self.roi_size_spin_h.blockSignals(True)
+                self.roi_size_spin_w.setValue(fw)
+                self.roi_size_spin_h.setValue(fh)
+                self.roi_size_spin_w.blockSignals(False)
+                self.roi_size_spin_h.blockSignals(False)
+                self._roi_label.set_fixed_size(fw, fh)
+        
+        # ✅ 再加载新类型的 ROI 坐标（此时 _fixed_w/_fixed_h 已是新值）
+        self._update_current_value()
+        
+        # ✅ 强制重绘
+        if hasattr(self, '_roi_label'):
+            self._roi_label.repaint()
     
     def _on_roi_dragged(self, new_roi):
         """当用户拖动 ROI 框时调用"""
@@ -1402,8 +1434,19 @@ class ROIConfigDialog(QDialog):
         roi_type = self.roi_type_combo.currentData()
         roi_name = self.ROI_TYPES.get(roi_type, roi_type)
         
-        # ✅ 阶段2固定尺寸模式：重置到居中位置
+        # ✅ 阶段2固定尺寸模式：重置到居中位置（先刷新分辨率适配的固定尺寸）
         if self._phase == "roi" and hasattr(self, '_roi_label') and self._roi_label._fixed_size_mode:
+            # ✅ 重新按当前分辨率计算固定尺寸，避免用旧尺寸重置
+            if roi_type in self.RELATIVE_TO_BACKPACK or roi_type == 'posture_roi':
+                fw, fh = self._determine_fixed_size(roi_type)
+                self.roi_size_spin_w.blockSignals(True)
+                self.roi_size_spin_h.blockSignals(True)
+                self.roi_size_spin_w.setValue(fw)
+                self.roi_size_spin_h.setValue(fh)
+                self.roi_size_spin_w.blockSignals(False)
+                self.roi_size_spin_h.blockSignals(False)
+                self._roi_label.set_fixed_size(fw, fh)
+            
             self._roi_label.reset_to_center()
             # 保存到 current_rois
             if self._roi_label._current_roi:
@@ -1497,11 +1540,8 @@ class ROIConfigDialog(QDialog):
             print(f"\n✅ 背包区域已裁剪: {width}x{height}")
             print(f"   准备进入阶段2...")
             
-            # ✅ 自动切换到阶段2
+            # ✅ 自动切换到阶段2（_setup_phase2_roi_selection 内部已刷新下拉框）
             self._setup_phase2_roi_selection()
-            
-            # ✅ 更新 ROI 类型下拉框（显示所有类型）
-            self._update_roi_type_combo()
             
             # 自动切换到第一个 ROI 类型
             index = self.roi_type_combo.findData('Name_1')
@@ -1510,6 +1550,8 @@ class ROIConfigDialog(QDialog):
                 self.roi_type_combo.setCurrentIndex(index)
                 self.roi_type_combo.blockSignals(False)
                 self._last_roi_type = 'Name_1'
+            # ✅ 切换类型后同步更新画布显示
+            self._update_current_value()
             
         elif roi_type == 'right_click_pos':
             # 开镜坐标: 只取左上角点 (x, y)
@@ -1580,7 +1622,8 @@ class ROIConfigDialog(QDialog):
                 )
                 return
         
-        if self._phase != "roi":
+        # ✅ posture_roi 可以在阶段1（全屏模式）保存模板
+        if self._phase != "roi" and roi_type != 'posture_roi':
             QMessageBox.information(
                 self, "提示",
                 "请先进入阶段2（框选背包区域）后再保存模板"

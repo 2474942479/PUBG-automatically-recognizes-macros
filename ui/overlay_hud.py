@@ -378,9 +378,46 @@ class GameHUD(QWidget):
             x = g.width() - hud_w - margin_r
             y = pos.get('y', 20)
 
+        # 确保 HUD 在屏幕范围内（超出 -> 自动居中到右侧）
+        x, y = self._ensure_visible(x, y, hud_w, hud_h, g)
+
         self.move(x, y)
         if not self._drag_mode:
             _make_click_through(int(self.winId()))
+
+    def _ensure_visible(self, x, y, hud_w, hud_h, screen_geometry=None):
+        """
+        确保 HUD 至少部分可见（>=25px），超出则自动居中到屏幕右侧。
+        :return: (clamped_x, clamped_y)
+        """
+        if screen_geometry is None:
+            scr = QApplication.primaryScreen()
+            if not scr:
+                return x, y
+            screen_geometry = scr.geometry()
+
+        sw, sh = screen_geometry.width(), screen_geometry.height()
+        MIN_VISIBLE = 25
+
+        vis_left = max(x, 0)
+        vis_top = max(y, 0)
+        vis_right = min(x + hud_w, sw)
+        vis_bottom = min(y + hud_h, sh)
+        vis_w = max(0, vis_right - vis_left)
+        vis_h = max(0, vis_bottom - vis_top)
+
+        if vis_w < MIN_VISIBLE or vis_h < MIN_VISIBLE:
+            new_x = sw - hud_w - 20
+            new_y = (sh - hud_h) // 2
+            logger.info(f'HUD超出屏幕({x},{y},{vis_w}px可见) -> 自动居中({new_x},{new_y})')
+            # 更新配置防止重复触发
+            self._cfg.setdefault('position', {})['x'] = new_x
+            self._cfg['position']['y'] = new_y
+            self._cfg['position']['anchor'] = 'custom'
+            _save_config(self._cfg)
+            return new_x, new_y
+
+        return x, y
 
     def apply_resolution_preset(self, resolution: str):
         """根据分辨率应用预设位置。"""
@@ -394,8 +431,11 @@ class GameHUD(QWidget):
 
     def _save_position(self):
         p = self.pos()
-        self._cfg.setdefault('position', {})['x'] = p.x()
-        self._cfg['position']['y'] = p.y()
+        hud_w, hud_h = self.width(), self.height()
+        # 保存前确保位置在屏幕范围内
+        x, y = self._ensure_visible(p.x(), p.y(), hud_w, hud_h)
+        self._cfg.setdefault('position', {})['x'] = x
+        self._cfg['position']['y'] = y
         self._cfg['position']['anchor'] = 'custom'
         _save_config(self._cfg)
 

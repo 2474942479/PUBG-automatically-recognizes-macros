@@ -28,9 +28,22 @@ DEBUG_MODE = False  # Nuitka 编译需要模块级声明，默认关闭
 
 def setup_logging():
     log_dir = res_path('logs')
+    # ✅ 每次启动清空整个 logs 文件夹（含 posture_debug、roi_debug、crash 日志等）
+    if os.path.exists(log_dir):
+        import shutil
+        for entry in os.listdir(log_dir):
+            entry_path = os.path.join(log_dir, entry)
+            try:
+                if os.path.isdir(entry_path):
+                    shutil.rmtree(entry_path)
+                else:
+                    os.remove(entry_path)
+            except Exception:
+                pass  # 文件被占用时跳过
     os.makedirs(log_dir, exist_ok=True)
     handler = RotatingFileHandler(
         os.path.join(log_dir, 'app.log'),
+        mode='w',  # 每次启动清空旧日志
         maxBytes=5 * 1024 * 1024,
         backupCount=3,
         encoding='utf-8'
