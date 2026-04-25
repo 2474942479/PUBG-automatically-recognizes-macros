@@ -360,17 +360,16 @@ async def capture_all_guns(pathData, current_res=None):
             continue
         
         # ✅ 根据分辨率确定模板路径（三级降级）
-        # 优先级: 分辨率目录 > default 目录 > 根目录（兼容旧版本）
+        # 优先级: 分辨率目录 > 根目录（兼容旧版本）
         match_Path = None
         if current_res:
             # 1. 先尝试使用分辨率特定的模板
-            match_Path = res_path('_internal', 'data', 'firearms', current_res, mode[:-2]) + os.sep
-            if not os.path.exists(match_Path):
-                # 2. 降级到 default 目录
-                match_Path = res_path('_internal', 'data', 'firearms', 'default', mode[:-2]) + os.sep
-                if not os.path.exists(match_Path):
-                    # 3. 降级到根目录（兼容旧版本）
-                    match_Path = res_path('_internal', 'data', 'firearms', mode[:-2]) + os.sep
+            candidate = res_path('_internal', 'data', 'firearms', current_res, mode[:-2]) + os.sep
+            if os.path.exists(candidate):
+                match_Path = candidate
+            else:
+                # 2. 降级到根目录（兼容旧版本）
+                match_Path = res_path('_internal', 'data', 'firearms', mode[:-2]) + os.sep
         else:
             # 使用根目录（兼容旧版本）
             match_Path = res_path('_internal', 'data', 'firearms', mode[:-2]) + os.sep

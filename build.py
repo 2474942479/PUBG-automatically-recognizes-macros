@@ -13,8 +13,8 @@ PUBG 宏识别工具 — Nuitka 一键构建脚本
       - 或 MinGW-w64 (nuitka 可自动下载)
 
 构建产物:
-    dist/PUBG宏识别工具/                 # 发布根（启动.bat、Config/、logs/、使用说明 等）
-    dist/PUBG宏识别工具/runtime/         # exe、DLL、_internal、依赖（与 bat 分离）
+    dist/PUBG宏识别工具/                 # 发布根（启动.bat、使用说明）
+    dist/PUBG宏识别工具/runtime/         # exe、Config、logs、_internal、依赖（全部在一起）
     dist/PUBG宏识别工具-v{版本}.zip      # 整包 zip
 """
 
@@ -30,7 +30,7 @@ from pathlib import Path
 IS_WINDOWS = platform.system() == "Windows"
 
 VERSION = "1.0.0"
-APP_NAME = "PUBG宏识别工具"
+APP_NAME = "PUBG_MacroTool"
 ENTRY_SCRIPT = "main.py"
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
@@ -55,6 +55,18 @@ EXCLUDE_MODULES = [
 INCLUDE_DATA_DIRS = [
     ("Config", "Config"),
     ("_internal", "_internal"),
+]
+
+# Nuitka 需要但发布包中不需要的文件（在构建后删除）
+EXCLUDE_DATA_FILES = [
+    "_internal/data.txt",
+    "_internal/(0626)导入我到罗技GHUB驱动中.lua"
+]
+
+EXCLUDE_DATA_DIRS = [
+    ".idea",
+    "__pycache__",
+    ".qoder"
 ]
 
 # Nuitka 不需要但项目中引用的 stdlib / 冗余包
@@ -125,7 +137,7 @@ def step_nuitka():
         "--include-package=core",
         "--include-package=crypto",
         # 避免 NumPy 编译崩溃的选项
-        "--jobs=1",  # 单线程编译,避免内存问题
+        "--jobs=5",  # 单线程编译,避免内存问题
     ]
 
     if IS_WINDOWS:
@@ -161,18 +173,6 @@ def step_nuitka():
     log(f"运行库目录: {RUNTIME_DIR}")
 
 
-def _move_runtime_config_to_release_root():
-    """Nuitka 内嵌的 Config 在 runtime 下，发布时挪到与 bat 同级。"""
-    src = RUNTIME_DIR / "Config"
-    if not src.exists():
-        return
-    dst = OUTPUT_DIR / "Config"
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.move(str(src), str(dst))
-    log("已移动 runtime/Config -> 发布根 Config/")
-
-
 def step_encrypt_gun_data():
     """构建产物内 GunData：加密为 .enc 后删除明文凭据（不改动源码目录）。"""
     log("=" * 60)
@@ -194,14 +194,33 @@ def step_encrypt_gun_data():
 
 
 def step_post_build():
-    """构建后处理:Config 到发布根、复制 bat/README、空目录与版本号。"""
+    """构建后处理：复制 bat、README、空目录与版本号。Config 和 logs 保留在 runtime/ 内。"""
     log("=" * 60)
     log("Step 4: 构建后处理")
     log("=" * 60)
 
-    _move_runtime_config_to_release_root()
+    # ✅ 删除发布包中不需要的文件（如 data.txt、GHUB Lua 脚本等）
+    for rel_path in EXCLUDE_DATA_FILES:
+        target = RUNTIME_DIR / rel_path
+        if target.exists():
+            target.unlink()
+            log(f"已删除发布包内多余文件: {rel_path}")
+        elif target.parent.exists():
+            # 检查父目录下是否有同名文件（不同大小写等情况）
+            for f in target.parent.iterdir():
+                if f.is_file() and f.name.lower() == target.name.lower():
+                    f.unlink()
+                    log(f"已删除发布包内多余文件（模糊匹配）: {f.name}")
+                    break
 
-    # 确保 _internal 目录中的 .dll 和 .pyd 文件被正确复制
+    # ✅ 删除发布包中不需要的整个目录（分辨率模板目录、缓存等）
+    for rel_dir in EXCLUDE_DATA_DIRS:
+        target = RUNTIME_DIR / rel_dir
+        if target.exists() and target.is_dir():
+            shutil.rmtree(target)
+            log(f"已删除发布包内多余目录: {rel_dir}")
+
+    # ✅ 确保 _internal 目录中的 .dll 和 .pyd 文件被正确复制
     src_internal = PROJECT_ROOT / "_internal"
     dst_internal = RUNTIME_DIR / "_internal"
     if src_internal.exists() and dst_internal.exists():
@@ -222,14 +241,14 @@ def step_post_build():
         shutil.copy2(readme_src, OUTPUT_DIR / "使用说明.txt")
         log("已复制 使用说明.txt")
 
-    config_dir = OUTPUT_DIR / "Config"
+    config_dir = RUNTIME_DIR / "Config"
     config_dir.mkdir(exist_ok=True)
 
-    logs_dir = OUTPUT_DIR / "logs"
+    logs_dir = RUNTIME_DIR / "logs"
     logs_dir.mkdir(exist_ok=True)
-    log("已确保 logs/ 与 Config/ 在发布根")
+    log("已确保 Config/ 与 logs/ 在 runtime/ 内")
 
-    version_file = OUTPUT_DIR / "version.txt"
+    version_file = RUNTIME_DIR / "version.txt"
     version_file.write_text(VERSION, encoding="utf-8")
     log(f"版本号: {VERSION}")
 

@@ -24,12 +24,12 @@ if not exist "%RT%\_internal\ghub_device_GHUB.dll" (
     exit /b 1
 )
 
-:: 与 bat 同级的用户目录（Config / logs 由程序在发布根下读写）
-if not exist "%ROOT%Config" mkdir "%ROOT%Config" 2>nul
-if not exist "%ROOT%logs" mkdir "%ROOT%logs" 2>nul
+:: 用户目录（Config / logs）在 runtime 内，与 exe 同级
+if not exist "%RT%\Config" mkdir "%RT%\Config" 2>nul
+if not exist "%RT%\logs" mkdir "%RT%\logs" 2>nul
 
-if not exist "%ROOT%Config\config.json" (
-    echo [提示] 首次运行将生成默认配置于 Config\config.json
+if not exist "%RT%\Config\config.json" (
+    echo [提示] 首次运行将生成默认配置于 runtime\Config\config.json
 )
 
 echo 正在从 runtime 启动程序...
