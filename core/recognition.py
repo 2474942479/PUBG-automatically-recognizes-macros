@@ -269,6 +269,10 @@ def match_sift(img1, img2):
     h2, w2 = img2.shape[:2]
     if (h1 < 100 or w1 < 100) and (h2 < 100 or w2 < 100):
         if img1.shape == img2.shape:
+            # ✅ CLAHE 自适应直方图均衡化，减少 PUBG 背包半透明背景透色差异
+            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
+            img1 = clahe.apply(img1)
+            img2 = clahe.apply(img2)
             result = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED)
             _, score, _, _ = cv2.minMaxLoc(result)
             return float(score)

@@ -2,7 +2,7 @@
 chcp 65001 >nul 2>&1
 set "ROOT=%~dp0"
 set "RT=%ROOT%runtime"
-set "EXE=%RT%\PUBG宏识别工具.exe"
+set "EXE=%RT%\PUBG_MacroTool.exe"
 
 echo ============================================
 echo   PUBG 宏识别工具

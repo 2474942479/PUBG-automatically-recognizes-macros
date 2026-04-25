@@ -225,6 +225,10 @@ def save_selected(candidates, selected_indices, resolution, name_overrides=None,
         # 准备写入图像
         img_to_save = c['roi_image']
 
+        # ✅ CLAHE 预处理：与运行时匹配保持对称
+        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
+        img_to_save = clahe.apply(img_to_save)
+
         # 如果已存在同名模板，调整尺寸保持一致（解决槽1/槽2 ROI框大小不同的问题）
         if os.path.exists(save_path):
             existing = cv2.imread(save_path, cv2.IMREAD_GRAYSCALE)
