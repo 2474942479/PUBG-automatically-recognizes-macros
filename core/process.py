@@ -156,16 +156,21 @@ class ProcessClass:
         self.duobei_scope_mode = {}
 
     def read_gun_data(self, fileName) -> dict:
-        """读取 v3 枪械数据：优先 .enc（发布包），无则 .json（开发）。"""
-        from pathlib import Path
-        from crypto.gun_data_crypto import load_gun_data
+        """读取 v3 枪械弹道数据（直接读取 JSON）"""
+        import json as _json
         key = (fileName or "").strip()
         if not key:
             return None
-        gun_dir = Path(res_path("_internal", "GunData"))
-        # use_hardware_binding=False: 使用标准模式,便于分发
-        # 如需硬件绑定,改为 True (但需要在加密时也使用硬件绑定)
-        return load_gun_data(key.lower(), gun_data_dir=gun_dir, use_hardware_binding=False)
+        gun_path = res_path("_internal", "GunData", f"{key.lower()}.json")
+        try:
+            with open(gun_path, "r", encoding="utf-8") as f:
+                return _json.load(f)
+        except FileNotFoundError:
+            logger.warning(f"枪械数据文件不存在: {gun_path}")
+            return None
+        except Exception as e:
+            logger.error(f"读取枪械数据失败: {e}")
+            return None
 
     def get_current_scope(self):
         """

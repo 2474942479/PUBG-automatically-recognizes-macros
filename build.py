@@ -173,30 +173,10 @@ def step_nuitka():
     log(f"运行库目录: {RUNTIME_DIR}")
 
 
-def step_encrypt_gun_data():
-    """构建产物内 GunData：加密为 .enc 后删除明文凭据（不改动源码目录）。"""
-    log("=" * 60)
-    log("Step 3: GunData 加密")
-    log("=" * 60)
-    gun_dir = RUNTIME_DIR / "_internal" / "GunData"
-    if not gun_dir.is_dir():
-        log(f"未找到 GunData 目录，跳过: {gun_dir}")
-        return
-    from crypto.gun_data_crypto import encrypt_all_gun_data
-
-    encrypt_all_gun_data(gun_data_dir=gun_dir)
-    removed = 0
-    for p in gun_dir.glob("*.json"):
-        p.unlink()
-        removed += 1
-    if removed:
-        log(f"已删除发布目录内 {removed} 个 .json，仅保留 .enc")
-
-
 def step_post_build():
     """构建后处理：复制 bat、README、空目录与版本号。Config 和 logs 保留在 runtime/ 内。"""
     log("=" * 60)
-    log("Step 4: 构建后处理")
+    log("Step 3: 构建后处理")
     log("=" * 60)
 
     # ✅ 删除发布包中不需要的文件（如 data.txt、GHUB Lua 脚本等）
@@ -297,7 +277,6 @@ def main():
         if not args.skip_cython:
             step_cython()
         step_nuitka()
-        step_encrypt_gun_data()
         step_post_build()
         step_zip()
 
