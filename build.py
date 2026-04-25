@@ -236,7 +236,7 @@ def step_post_build():
         shutil.copy2(bat_src, OUTPUT_DIR / "启动.bat")
         log("已复制 启动.bat")
 
-    readme_src = PROJECT_ROOT / "README_RELEASE.txt"
+    readme_src = PROJECT_ROOT / "使用指南.txt"
     if readme_src.exists():
         shutil.copy2(readme_src, OUTPUT_DIR / "使用说明.txt")
         log("已复制 使用说明.txt")
