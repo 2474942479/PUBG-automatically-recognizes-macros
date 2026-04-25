@@ -488,10 +488,10 @@ def match_sift(img1, img2, current_res=None):
             score_orb = _match_icon_orb(img1, img2)
             return float(max(score_tm, score_orb))
         
-        # 路径2：尺寸在 ±PADDING 内 → 滑动窗口匹配
-        # PUBG 背包 UI 每次打开可能有 ±1~2px 的像素抖动
-        # ROI 裁剪时加了 PADDING 边距，此处用 matchTemplate 找最佳对齐位置
-        if abs(h1 - h2) <= PADDING and abs(w1 - w2) <= PADDING:
+        # 路径2：尺寸在 ±2*PADDING 内 → 滑动窗口匹配
+        # ROI 裁剪时每边加了 PADDING px，总差异 = 2*PADDING
+        # 用 matchTemplate 滑动窗口找最佳对齐位置，补偿 PUBG 背包 UI 的 ±1~2px 像素抖动
+        if abs(h1 - h2) <= 2 * PADDING and abs(w1 - w2) <= 2 * PADDING:
             # 大图为源（滑动窗口 TM），小图为模板
             if h1 >= h2 and w1 >= w2:
                 src, tmpl = img1, img2
