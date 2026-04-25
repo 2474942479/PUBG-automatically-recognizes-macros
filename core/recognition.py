@@ -399,6 +399,7 @@ async def capture_all_guns(pathData, current_res=None):
         
         MatchValue = 0.0
         MatchName = ""
+        scores_detail = []  # 记录每个模板的置信度（调试用）
         
         # ✅ 根据模板数量选择串行或并行
         # 少于 10 个模板时，串行更快（避免线程开销）
@@ -408,6 +409,7 @@ async def capture_all_guns(pathData, current_res=None):
                 result = _match_single_template((img1, template_path, template_name))
                 if result:
                     name, score = result
+                    scores_detail.append((name, score))
                     if score > MatchValue:
                         MatchName = name
                         MatchValue = score
@@ -422,12 +424,21 @@ async def capture_all_guns(pathData, current_res=None):
                 for result in results:
                     if result:
                         name, score = result
+                        scores_detail.append((name, score))
                         if score > MatchValue:
                             MatchName = name
                             MatchValue = score
         
-        # ✅ 提高最低阈值，避免误识别（0.10 → 0.18）
-        MATCH_THRESHOLD = 0.18
+        # ✅ 提高最低阈值，避免误识别（0.18 → 0.5）
+        MATCH_THRESHOLD = 0.5
+        
+        # ✅ 调试日志：打印 Top5 置信度详情（依赖 debug_input_trace 开关）
+        if scores_detail:
+            scores_detail.sort(key=lambda x: x[1], reverse=True)
+            top5 = scores_detail[:5]
+            top5_str = ", ".join([f"{n}:{s:.4f}" for n, s in top5])
+            if debug_mode:
+                logger.info(f"[匹配详情] {mode}: 最佳={MatchName}({MatchValue:.4f}) | Top5: {top5_str}")
         
         if MatchValue < MATCH_THRESHOLD or not MatchName:
             MatchName = "none"
