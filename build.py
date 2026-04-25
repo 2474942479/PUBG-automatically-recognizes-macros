@@ -43,8 +43,7 @@ RUNTIME_DIR = OUTPUT_DIR / "runtime"
 CORE_MODULES_FOR_CYTHON = [
     "core/process.py",
     "core/recognition.py",
-    "data/fire_data.py",
-    "crypto/gun_data_crypto.py",  # 加密模块也编译为.pyd,增加逆向难度
+    "data/fire_data.py"
 ]
 
 EXCLUDE_MODULES = [
@@ -134,10 +133,7 @@ def step_nuitka():
         "--include-package=input",
         "--include-package=ui",
         "--include-package=data",
-        "--include-package=core",
-        "--include-package=crypto",
-        # 避免 NumPy 编译崩溃的选项
-        "--jobs=5",  # 单线程编译,避免内存问题
+        "--include-package=core"
     ]
 
     if IS_WINDOWS:
