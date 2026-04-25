@@ -10,12 +10,14 @@ logger = logging.getLogger(__name__)  # 创建 logger 实例
 class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThread
     keyInfo = pyqtSignal(str, tuple)  # 定义信号，用于发送键盘事件信息
     roi_config_requested = pyqtSignal()  # 定义信号，用于请求打开 ROI 配置
+    batch_template_requested = pyqtSignal()  # 定义信号，用于请求批量生成模板
 
     def __init__(self, PCdata):  # 初始化方法
         super().__init__()  # 调用父类的初始化方法
         self.KeyHook = None  # 初始化键盘钩子
         self.PC = PCdata  # 保存PC对象引用
         self.alt_pressed = False  # Alt键状态标记
+        self.ctrl_pressed = False  # Ctrl键状态标记
 
     def on_key_pressed(self, event):  # 键盘按下事件处理方法
         try:
@@ -56,12 +58,8 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
                 self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
                 self.keyInfo.emit('l', ("📦 背包已打开，等待UI渲染...",))
                 
-                # ✅ 先清空旧数据，再启动识别
-                self.PC._Result1 = {"Name": "None", "Scope": "none", "Muzzle": "none", "Grip": "none", "Stock": "none"}
-                self.PC._Result2 = {"Name": "None", "Scope": "none", "Muzzle": "none", "Grip": "none", "Stock": "none"}
-                self.keyInfo.emit('g', (None,))  # 触发 UI 刷新显示空状态
-                
-                # ✅ 启动识别线程，线程内部会等待游戏UI渲染完成
+                # ✅ 保留旧数据，直接启动识别线程
+                # 识别完成后会自动更新 _Result1/2 并刷新 UI
                 Thread(target=self.PC.recognize_all_guns_info, args=(self.keyInfo.emit,)).start()
             else:
                 # 第二次按 Tab：关闭背包，✅ 不清空识别结果，保留已识别的枪械信息
@@ -97,7 +95,14 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
         elif Keys == "home":  # 如果按下Home键
             self.keyInfo.emit('t', (None,))  # 发送切换窗口信号
         elif Keys == "f8":  # 如果按下F8键
-            self.roi_config_requested.emit()  # 发送 ROI 配置请求信号
+            # 用 keyboard.is_pressed 实时查修饰键状态，避免事件顺序不一致
+            if keyboard.is_pressed('ctrl') and keyboard.is_pressed('alt'):
+                # Ctrl+Alt+F8: 批量生成模板
+                self.keyInfo.emit('l', ("📸 Ctrl+Alt+F8 触发批量生成模板…",))
+                self.batch_template_requested.emit()
+            else:
+                # 普通 F8: 打开 ROI 配置
+                self.roi_config_requested.emit()
         elif Keys == "f9":  # 调试总开关（与主界面「调试」按钮相同逻辑）
             try:
                 import main as _main_mod
@@ -110,9 +115,11 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
                 )
             except Exception as e:
                 self.keyInfo.emit('l', (f"⚠️ 切换调试总开关失败: {e}",))
-        elif Keys == "ctrl_l":  # 如果按下左Ctrl键
-            self.PC.Current_posture = "c"  # 设置姿态为趴下
-            self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
+        elif Keys in ("ctrl_l", "ctrl_r"):  # 如果按下Ctrl键
+            self.ctrl_pressed = True  # 标记Ctrl键按下
+            if Keys == "ctrl_l":  # 只有左Ctrl触发蹲下（原逻辑）
+                self.PC.Current_posture = "c"  # 设置姿态为趴下
+                self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
         elif Keys in ("alt_l", "alt_r"):  # 如果按下Alt键
             self.alt_pressed = True  # 标记Alt键按下
 
@@ -146,8 +153,11 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
         if not Keys:
             return
         if Keys == "ctrl_l":  # 如果释放左Ctrl键
+            self.ctrl_pressed = False
             self.PC.Current_posture = "None"  # 设置姿态为站立
             self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
+        elif Keys == "ctrl_r":
+            self.ctrl_pressed = False
         elif Keys == "alt_l" or Keys == "alt_r":  # 如果释放Alt键
             self.alt_pressed = False  # 标记Alt键释放
 

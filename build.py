@@ -44,6 +44,7 @@ CORE_MODULES_FOR_CYTHON = [
     "core/process.py",
     "core/recognition.py",
     "data/fire_data.py",
+    "crypto/gun_data_crypto.py",  # 加密模块也编译为.pyd,增加逆向难度
 ]
 
 EXCLUDE_MODULES = [
@@ -123,6 +124,8 @@ def step_nuitka():
         "--include-package=data",
         "--include-package=core",
         "--include-package=crypto",
+        # 避免 NumPy 编译崩溃的选项
+        "--jobs=1",  # 单线程编译,避免内存问题
     ]
 
     if IS_WINDOWS:
@@ -191,12 +194,23 @@ def step_encrypt_gun_data():
 
 
 def step_post_build():
-    """构建后处理：Config 到发布根、复制 bat/README、空目录与版本号。"""
+    """构建后处理:Config 到发布根、复制 bat/README、空目录与版本号。"""
     log("=" * 60)
     log("Step 4: 构建后处理")
     log("=" * 60)
 
     _move_runtime_config_to_release_root()
+
+    # 确保 _internal 目录中的 .dll 和 .pyd 文件被正确复制
+    src_internal = PROJECT_ROOT / "_internal"
+    dst_internal = RUNTIME_DIR / "_internal"
+    if src_internal.exists() and dst_internal.exists():
+        for file in src_internal.iterdir():
+            if file.is_file() and file.suffix in ['.dll', '.pyd']:
+                dst_file = dst_internal / file.name
+                if not dst_file.exists():
+                    shutil.copy2(file, dst_file)
+                    log(f"已复制缺失文件: {file.name}")
 
     bat_src = PROJECT_ROOT / "启动.bat"
     if bat_src.exists():

@@ -30,13 +30,78 @@ except ImportError:
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 密钥配置 — 编译后嵌入到 .pyd / native code 中
+# 使用混淆编码增加逆向工程难度
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_SALT = b"PUBG_MACRO_TOOL_2024"
-_PASSPHRASE = b"xK9#mP2$vL5@nQ8&wR3*jT7!"
 
-def _derive_key():
-    """从密码短语派生 AES-256 密钥。"""
-    return hashlib.pbkdf2_hmac("sha256", _PASSPHRASE, _SALT, iterations=100000)
+# SALT 的 ASCII 码表示 (PUBG_MACRO_TOOL_2024)
+_SALT_ENCODED = [80, 85, 66, 71, 95, 77, 65, 67, 82, 79, 95, 84, 79, 79, 76, 95, 50, 48, 50, 52]
+
+# PASSPHRASE 分段存储,运行时拼接 (xK9#mP2$vL5@nQ8&wR3*jT7!)
+_PASSPHRASE_PARTS = [
+    [120, 75, 57, 35],   # xK9#
+    [109, 80, 50, 36],   # mP2$
+    [118, 76, 53, 64],   # vL5@
+    [110, 81, 56, 38],   # nQ8&
+    [119, 82, 51, 42],   # wR3*
+    [106, 84, 55, 33],   # jT7!
+]
+
+def _get_salt():
+    """动态获取 SALT,避免明文存储。"""
+    return bytes(_SALT_ENCODED)
+
+def _get_passphrase():
+    """动态拼接 PASSPHRASE,避免明文存储。"""
+    return b"".join(bytes(part) for part in _PASSPHRASE_PARTS)
+
+def _get_hardware_id():
+    """
+    获取硬件指纹 (基于 CPU ID + 主板序列号)
+    用于生成机器绑定的密钥
+    :return: 硬件ID字符串
+    """
+    try:
+        import subprocess
+        import platform
+        
+        if platform.system() == "Windows":
+            # 获取 CPU ID
+            cpu_cmd = 'wmic cpu get processorid'
+            cpu_result = subprocess.check_output(cpu_cmd, shell=True).decode('utf-8', errors='ignore')
+            cpu_id = cpu_result.split('\n')[1].strip() if '\n' in cpu_result else ''
+            
+            # 获取主板序列号
+            board_cmd = 'wmic baseboard get serialnumber'
+            board_result = subprocess.check_output(board_cmd, shell=True).decode('utf-8', errors='ignore')
+            board_id = board_result.split('\n')[1].strip() if '\n' in board_result else ''
+            
+            # 组合硬件ID
+            hw_id = f"{cpu_id}_{board_id}"
+            return hw_id.encode('utf-8')
+        else:
+            # Linux/Mac  fallback
+            return b"cross_platform_fallback"
+    except Exception:
+        # 如果获取失败,使用默认值
+        return b"hardware_id_error"
+
+def _derive_key(use_hardware_binding=False):
+    """
+    从密码短语派生 AES-256 密钥。
+    :param use_hardware_binding: 是否使用硬件绑定 (实验性功能)
+    :return: 32字节的 AES 密钥
+    """
+    base_passphrase = _get_passphrase()
+    base_salt = _get_salt()
+    
+    if use_hardware_binding:
+        # 将硬件ID加入到盐值中,实现机器绑定
+        hw_id = _get_hardware_id()
+        combined_salt = base_salt + hw_id
+        return hashlib.pbkdf2_hmac("sha256", base_passphrase, combined_salt, iterations=100000)
+    else:
+        # 标准模式:不使用硬件绑定
+        return hashlib.pbkdf2_hmac("sha256", base_passphrase, base_salt, iterations=100000)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -222,9 +287,14 @@ if not HAS_PYCRYPTODOME:
 # 统一加密/解密接口
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def encrypt_bytes(data: bytes) -> bytes:
-    """加密数据，返回 IV(16字节) + 密文。"""
-    key = _derive_key()
+def encrypt_bytes(data: bytes, use_hardware_binding=False) -> bytes:
+    """
+    加密数据，返回 IV(16字节) + 密文。
+    :param data: 要加密的原始数据
+    :param use_hardware_binding: 是否使用硬件绑定 (加密和解密必须一致)
+    :return: IV + 密文
+    """
+    key = _derive_key(use_hardware_binding)
 
     if HAS_PYCRYPTODOME:
         cipher = AES.new(key, AES.MODE_CBC)
@@ -236,9 +306,14 @@ def encrypt_bytes(data: bytes) -> bytes:
         return iv + ct
 
 
-def decrypt_bytes(data: bytes) -> bytes:
-    """解密数据 (IV + 密文)。"""
-    key = _derive_key()
+def decrypt_bytes(data: bytes, use_hardware_binding=False) -> bytes:
+    """
+    解密数据 (IV + 密文)。
+    :param data: IV + 密文
+    :param use_hardware_binding: 是否使用硬件绑定 (必须与加密时一致)
+    :return: 解密后的原始数据
+    """
+    key = _derive_key(use_hardware_binding)
     iv = data[:16]
     ct = data[16:]
 
@@ -260,10 +335,16 @@ def _get_base_dir():
     return Path(__file__).parent.parent
 
 
-def encrypt_gun_data_file(json_path: Path, output_path: Path = None):
-    """将单个 GunData JSON 加密为 .enc 文件。"""
+def encrypt_gun_data_file(json_path: Path, output_path: Path = None, use_hardware_binding=False):
+    """
+    将单个 GunData JSON 加密为 .enc 文件。
+    :param json_path: JSON 文件路径
+    :param output_path: 输出路径 (默认同名 .enc)
+    :param use_hardware_binding: 是否使用硬件绑定
+    :return: 加密文件路径
+    """
     raw = json_path.read_bytes()
-    encrypted = encrypt_bytes(raw)
+    encrypted = encrypt_bytes(raw, use_hardware_binding)
 
     if output_path is None:
         output_path = json_path.with_suffix(".enc")
@@ -271,15 +352,24 @@ def encrypt_gun_data_file(json_path: Path, output_path: Path = None):
     return output_path
 
 
-def decrypt_gun_data_file(enc_path: Path) -> dict:
-    """解密 .enc 文件，返回字典 (不落盘)。"""
+def decrypt_gun_data_file(enc_path: Path, use_hardware_binding=False) -> dict:
+    """
+    解密 .enc 文件，返回字典 (不落盘)。
+    :param enc_path: 加密文件路径
+    :param use_hardware_binding: 是否使用硬件绑定 (必须与加密时一致)
+    :return: 解密后的字典数据
+    """
     raw = enc_path.read_bytes()
-    decrypted = decrypt_bytes(raw)
+    decrypted = decrypt_bytes(raw, use_hardware_binding)
     return json.loads(decrypted.decode("utf-8"))
 
 
-def encrypt_all_gun_data(gun_data_dir: Path = None):
-    """加密 GunData 目录下所有 JSON 文件。"""
+def encrypt_all_gun_data(gun_data_dir: Path = None, use_hardware_binding=False):
+    """
+    加密 GunData 目录下所有 JSON 文件。
+    :param gun_data_dir: GunData 目录路径
+    :param use_hardware_binding: 是否使用硬件绑定 (默认False,便于分发)
+    """
     if gun_data_dir is None:
         gun_data_dir = _get_base_dir() / "_internal" / "GunData"
 
@@ -288,27 +378,33 @@ def encrypt_all_gun_data(gun_data_dir: Path = None):
         return
 
     json_files = list(gun_data_dir.glob("*.json"))
-    print(f"[CRYPTO] 发现 {len(json_files)} 个 JSON 文件，开始加密...")
+    mode_str = "硬件绑定模式" if use_hardware_binding else "标准模式"
+    print(f"[CRYPTO] 发现 {len(json_files)} 个 JSON 文件，开始加密 ({mode_str})...")
 
     for jf in json_files:
-        enc_path = encrypt_gun_data_file(jf)
+        enc_path = encrypt_gun_data_file(jf, use_hardware_binding=use_hardware_binding)
         print(f"  {jf.name} -> {enc_path.name}")
 
     print(f"[CRYPTO] 加密完成。可以删除原始 .json 文件用于发布。")
 
 
-def load_gun_data(file_name: str, gun_data_dir: Path = None) -> dict:
+def load_gun_data(file_name: str, gun_data_dir: Path = None, use_hardware_binding=False) -> dict:
     """
     运行时加载弹道数据 — 优先读 .enc (加密)，降级读 .json (开发模式)。
 
     这是 core/process.py 中 read_gun_data() 应该调用的接口。
+    
+    :param file_name: 枪械名称 (不含扩展名)
+    :param gun_data_dir: GunData 目录路径
+    :param use_hardware_binding: 是否使用硬件绑定 (必须与加密时一致)
+    :return: 枪械数据字典
     """
     if gun_data_dir is None:
         gun_data_dir = _get_base_dir() / "_internal" / "GunData"
 
     enc_path = gun_data_dir / f"{file_name}.enc"
     if enc_path.exists():
-        return decrypt_gun_data_file(enc_path)
+        return decrypt_gun_data_file(enc_path, use_hardware_binding)
 
     json_path = gun_data_dir / f"{file_name}.json"
     if json_path.exists():

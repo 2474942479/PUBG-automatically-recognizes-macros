@@ -42,6 +42,12 @@ class ProcessClass:
         return ProcessClass._instance  # obj1
 
     def __init__(self):
+        # ✅ 初始化守卫：单例模式下 __init__ 每次都会被调用，但只需初始化一次
+        # 防止识别线程中 ProcessClass() 重复调用导致 TabKey/_ui_log_callback 被重置
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+        
         self.TabKey = False
         self.ghub_device_info = self._gd.info
         self.window_version = self.get_window_version()
@@ -86,10 +92,8 @@ class ProcessClass:
         # 与开镜/姿势等线程错开：Tab 识别持锁期间不并发第二段 asyncio.run
         self._gun_recognize_lock = threading.Lock()
         _cfg = self.get_config_data("a")
-        # 与 F9 调试总开关一致；兼容旧项 debug_input_trace
-        self.debug_input_trace = bool(
-            _cfg.get("debug_mode", _cfg.get("debug_input_trace", False))
-        )
+        # ✅ 调试模式仅在程序生命周期内有效，默认关闭，不持久化到配置
+        self.debug_input_trace = False
 
     def move_mouse(self, x, y):
         self._gd.mouse_R(x, y)
@@ -159,7 +163,9 @@ class ProcessClass:
         if not key:
             return None
         gun_dir = Path(res_path("_internal", "GunData"))
-        return load_gun_data(key.lower(), gun_data_dir=gun_dir)
+        # use_hardware_binding=False: 使用标准模式,便于分发
+        # 如需硬件绑定,改为 True (但需要在加密时也使用硬件绑定)
+        return load_gun_data(key.lower(), gun_data_dir=gun_dir, use_hardware_binding=False)
 
     def get_current_scope(self):
         """
@@ -228,28 +234,38 @@ class ProcessClass:
     
     def _load_posture_roi_from_resolution(self):
         """
-        从 resolution_setting 中加载当前分辨率的姿势 ROI
+        从 roi_config.json 中加载当前分辨率的姿势 ROI
         """
         try:
-            from data.resolution_setting import RESOLUTION_SETTINGS
+            import json
+            from core.paths import res_path
             
-            if self.Monitor in RESOLUTION_SETTINGS:
-                resolution_config = RESOLUTION_SETTINGS[self.Monitor]
+            config_file = res_path('Config', 'roi_config.json')
+            if not os.path.exists(config_file):
+                logger.warning(f"ROI 配置文件不存在: {config_file}")
+                return
+            
+            with open(config_file, 'r', encoding='utf-8') as f:
+                roi_config = json.load(f)
+            
+            if self.Monitor in roi_config:
+                resolution_config = roi_config[self.Monitor]
                 posture_roi = resolution_config.get('posture_roi')
                 
                 if posture_roi:
                     self.posture_roi = tuple(posture_roi)
-                    logger.info(f"从分辨率配置加载姿势 ROI: {self.Monitor} -> {self.posture_roi}")
+                    logger.info(f"从 ROI 配置加载姿势 ROI: {self.Monitor} -> {self.posture_roi}")
                 else:
                     logger.debug(f"分辨率 {self.Monitor} 未配置姿势 ROI")
             else:
-                logger.warning(f"未找到分辨率 {self.Monitor} 的配置")
+                logger.warning(f"未找到分辨率 {self.Monitor} 的 ROI 配置")
         except Exception as e:
             logger.error(f"加载姿势 ROI 失败: {e}")
     
     def load_posture_templates(self):
         """
-        加载姿势模板图片
+        加载姿势模板图片（三级分辨率搜索）
+        优先级: {resolution}/zishi/ → default/zishi/ → zishi/
         :return: 是否加载成功
         """
         try:
@@ -257,10 +273,25 @@ class ProcessClass:
             import os
             from core.paths import res_path
             
-            template_dir = res_path('_internal', 'data', 'firearms', 'zishi')
-            if not os.path.exists(template_dir):
-                logger.warning(f"姿势模板目录不存在: {template_dir}")
+            # ✅ 三级搜索：分辨率目录 → default 目录 → 根目录（与配件模板一致）
+            search_dirs = [
+                res_path('_internal', 'data', 'firearms', self.Monitor, 'zishi'),
+                res_path('_internal', 'data', 'firearms', 'default', 'zishi'),
+                res_path('_internal', 'data', 'firearms', 'zishi'),
+            ]
+            
+            # 找出第一个存在的目录
+            template_dir = None
+            for d in search_dirs:
+                if os.path.exists(d):
+                    template_dir = d
+                    break
+            
+            if not template_dir:
+                logger.warning(f"姿势模板目录不存在，已搜索: {search_dirs}")
                 return False
+            
+            logger.info(f"姿势模板目录: {template_dir}")
             
             # 加载三个姿势模板: None(站立), c(蹲下), z(趴下)
             posture_names = {'None': 'None.png', 'c': 'c.png', 'z': 'z.png'}
@@ -375,10 +406,12 @@ class ProcessClass:
             
             # 使用模板匹配
             for posture_name, template in self.posture_templates.items():
-                # 如果模板比截图大，跳过
-                if template.shape[0] > screenshot_roi_gray.shape[0] or template.shape[1] > screenshot_roi_gray.shape[1]:
-                    logger.debug(f"模板 {posture_name} 比截图大，跳过")
-                    continue
+                # 如果模板比截图大，缩小模板到截图尺寸而不是跳过
+                th, tw = template.shape[:2]
+                sh, sw = screenshot_roi_gray.shape[:2]
+                if th > sh or tw > sw:
+                    logger.debug(f"模板 {posture_name}({template.shape}) 比截图大，缩小到截图尺寸")
+                    template = cv2.resize(template, (sw, sh), interpolation=cv2.INTER_AREA)
                 
                 # 执行模板匹配
                 result = cv2.matchTemplate(screenshot_roi_gray, template, cv2.TM_CCOEFF_NORMED)
@@ -516,16 +549,18 @@ class ProcessClass:
         _input_trace.log(
             "Tab识别 请求开始 TabKey=%s Monitor=%s", self.TabKey, self.Monitor
         )
-        if not self._gun_recognize_lock.acquire(blocking=False):
-            logger.info("Tab 识别仍在执行，本次跳过（避免 mss/异步重入卡死）")
-            _input_trace.log("Tab识别 锁占用中，本帧跳过")
+        if not self._gun_recognize_lock.acquire(blocking=True, timeout=5.0):
+            logger.error("Tab 识别等待超时（5s），强制跳过（可能锁异常）")
+            _input_trace.log("Tab识别 等待超时，跳过")
             return
+        
         try:
             if not self.TabKey:
                 _input_trace.log("Tab识别 已取消(背包关)")
                 return
 
-            time.sleep(0.18)
+            # ✅ 优化：降低等待时间（180ms → 100ms），提升响应速度
+            time.sleep(0.10)
             if not self.TabKey:
                 _input_trace.log("Tab识别 等待UI后已取消(背包关)")
                 return
@@ -542,10 +577,15 @@ class ProcessClass:
                 self._Result1.get("Name") if self._Result1 else None,
                 self._Result2.get("Name") if self._Result2 else None,
             )
+            logger.info(f"✅ 准备发送 UI 更新信号: Emit('g')")
             Emit("g", (None,))
+            logger.info(f"✅ 已发送 UI 更新信号")
         finally:
-            self._gun_recognize_lock.release()
-            _input_trace.log("Tab识别 已释放锁")
+            try:
+                self._gun_recognize_lock.release()
+                _input_trace.log("Tab识别 已释放锁")
+            except RuntimeError as e:
+                logger.warning(f"Tab识别 释放锁失败: {e}")
 
     def Change_firearms(self, keyWord):
         """

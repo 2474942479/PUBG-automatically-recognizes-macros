@@ -162,11 +162,27 @@ GUN_CN = {
     'tangmuxunchongfengqiang': '汤姆逊',
     'delagongnuofu': '德拉贡诺夫',
     'zidongzhuangtianbuqiang': '自动装填',
+    '012': '012',
+    '98k': 'Kar98k',
+    'slr': 'SLR',
+    'amr': 'AMR',
+    'awm': 'AWM',
+    'dbs': 'DBS',
+    'm24': 'M24',
+    'mosin_nagant': '莫辛纳甘',
+    'moxinnaganbuqiang': '莫辛纳甘',
+    'paijipao': '迫击炮',
+    's12k': 'S12K',
+    's1897': 'S1897',
+    's686': 'S686',
+    'shizilv': '十字弩',
+    'tiequan': '铁拳火箭筒',
+    'win94': 'Win94',
 }
 SCOPE_SHORT = {
     'none': '机瞄', 'hongdian': '红点', 'quanxi': '全息',
-    '2bei': '2x', '3bei': '3x', '4bei': '4x',
-    '6bei': '6x', '8bei': '8x', '15bei': '15x',
+    '2bei': '2倍', '3bei': '3倍', '4bei': '4倍',
+    '6bei': '6倍', '8bei': '8倍', '15bei': '15倍',
     'renchengxiang4bei': '热4x',
     # ✅ 双模式倍镜
     'duobei1': '多倍(低)',
@@ -174,7 +190,7 @@ SCOPE_SHORT = {
 }
 POSTURE_CN = {'None': '站', 'space': '站', 'z': '卧', 'c': '蹲'}
 
-# ✅ 配件翻译表（完整版）
+# ✅ 配件翻译表（完整版，匹配 recognition.py 输出的全小写 key）
 MUZZLE_CN = {
     'none': '', 
     'xiaoyin': '消音', 
@@ -185,9 +201,11 @@ MUZZLE_CN = {
     'buqiangxiaoyan': '步枪消焰',
     'chongfengqiangbuchang': '冲锋枪补偿',
     'chongfengqiangxiaoyan': '冲锋枪消焰',
-    'jujiqiangbuchang': '机枪补偿',
+    'jujiqiangbuchang': '狙击枪补偿',
+    'jujiqiangxiaoyan': '狙击枪消焰',
     'yazuiqiangkou': '鸭嘴枪口',
     'eliuquan': '扼流圈',
+    'zhituiqi': '制退器',
 }
 GRIP_CN = {
     'none': '', 
@@ -195,16 +213,17 @@ GRIP_CN = {
     'jiaodu': '直角',
     'banjieshi': '半截', 
     'qingxing': '轻型',
-    'muZhi': '拇指',
-    'xiexiang': '斜角',
+    'muzhi': '拇指',
+    'xiexiang': '斜向',
     'zhijiao': '直角',
 }
 STOCK_CN = {
     'none': '', 
     'tuosaiban': '托腮板', 
     'zhanshu': '战术',
+    'zhanshuqiangtuo': '战术枪托',
     'zhedieshiqiangtuo': '折叠枪托',
-    'zhongxinqiangtuo': '重心枪托',
+    'zhongxinqiangtuo': '重型枪托',
     'zidandai': '子弹袋',
 }
 

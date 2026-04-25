@@ -6,7 +6,8 @@ import numpy as np
 from PyQt5.QtCore import Qt, QRect, QPoint, pyqtSignal
 from PyQt5.QtWidgets import (
     QDialog, QLabel, QMessageBox, QScrollArea, 
-    QVBoxLayout, QHBoxLayout, QPushButton, QComboBox
+    QVBoxLayout, QHBoxLayout, QPushButton, QComboBox,
+    QLineEdit, QInputDialog, QSpinBox
 )
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QImage
 
@@ -46,7 +47,12 @@ def capture_screenshot():
 class ROILabel(QLabel):
     """可在上面框选矩形的图片标签。"""
 
-    def __init__(self, pixmap, parent=None):
+    def __init__(self, pixmap, parent=None, mode="fullscreen"):
+        """
+        :param pixmap: 原始截图（全屏或背包区域）
+        :param parent: 父窗口
+        :param mode: 框选模式 - 'fullscreen'（全屏截图）或 'backpack'（背包截图）
+        """
         super().__init__(parent)
         self._base_pixmap = pixmap
         self._current_rect = None
@@ -57,8 +63,33 @@ class ROILabel(QLabel):
         self._resizing_edge = None  # 正在调整大小的边: 'top', 'bottom', 'left', 'right'
         self._confidence_score = None  # 模板匹配置信度
         self._template_path = None  # 模板图片路径
+        self._mode = mode  # ✅ 新增：框选模式
+
+        # ✅ 固定尺寸模式（阶段2：禁止调整大小，只允许拖动）
+        self._fixed_size_mode = False
+        self._fixed_w = 60
+        self._fixed_h = 50
+
         self.setMouseTracking(True)
         self._mouse_pos = QPoint(0, 0)
+        self._update_display()
+
+    def set_fixed_size(self, w, h):
+        """启用固定尺寸模式，设定固定宽高。"""
+        self._fixed_size_mode = True
+        self._fixed_w = w
+        self._fixed_h = h
+
+    def reset_to_center(self):
+        """将当前 ROI 移动到图片中心（固定尺寸模式）。"""
+        if not self._fixed_size_mode:
+            return
+        pw = self._base_pixmap.width()
+        ph = self._base_pixmap.height()
+        cx = pw // 2 - self._fixed_w // 2
+        cy = ph // 2 - self._fixed_h // 2
+        self._current_roi = (cx, cy, cx + self._fixed_w, cy + self._fixed_h)
+        self._current_rect = None
         self._update_display()
 
     def _to_image_coords(self, widget_pos):
@@ -146,8 +177,10 @@ class ROILabel(QLabel):
                 template_dir = res_path('_internal', 'data', 'firearms', 'Grip')
             elif 'Stock' in roi_type:
                 template_dir = res_path('_internal', 'data', 'firearms', 'Stock')
+            elif roi_type == 'posture_roi':
+                # ✅ 姿势识别也有模板，在 zishi 目录下
+                template_dir = res_path('_internal', 'data', 'firearms', 'zishi')
             else:
-                # 姿势识别没有模板
                 return None
             
             if not template_dir or not os.path.exists(template_dir):
@@ -167,10 +200,14 @@ class ROILabel(QLabel):
                 if template_img is None:
                     continue
                 
-                # 使用模板匹配
+                # 使用模板匹配（如果模板比截图大，缩小模板到截图尺寸）
                 try:
-                    result = cv2.matchTemplate(roi_gray, template_img, cv2.TM_CCOEFF_NORMED)
-                    _, max_val, _, _ = cv2.minMaxLoc(result)
+                    from core.recognition import match_sift
+                    th, tw = template_img.shape[:2]
+                    rh, rw = roi_gray.shape[:2]
+                    if th > rh or tw > rw:
+                        template_img = cv2.resize(template_img, (rw, rh), interpolation=cv2.INTER_AREA)
+                    max_val = match_sift(roi_gray, template_img)
                     
                     if max_val > best_score:
                         best_score = max_val
@@ -197,8 +234,10 @@ class ROILabel(QLabel):
         font = QFont("Microsoft YaHei", 10)
         painter.setFont(font)
 
-        # 绘制提示文字
-        hint_text = "请拖动鼠标框选区域（1:1 全屏像素，可滚动查看）"
+        # ✅ 绘制提示文字和分辨率信息
+        screen_w = self._base_pixmap.width()
+        screen_h = self._base_pixmap.height()
+        hint_text = f"请拖动鼠标框选区域（1:1 全屏像素 {screen_w}x{screen_h}，可滚动查看）"
         painter.setPen(QPen(QColor(255, 255, 255, 200)))
         painter.drawText(10, 28, hint_text)
 
@@ -230,28 +269,29 @@ class ROILabel(QLabel):
                 painter.drawText(r.bottomLeft() + QPoint(4, -4), conf_text)
             
             # 绘制8个调整手柄（四个角+四条边中点）
-            handle_size = 6
-            handles = [
-                (left, top),  # 左上
-                ((left + right) // 2, top),  # 上中
-                (right, top),  # 右上
-                (left, (top + bottom) // 2),  # 左中
-                (right, (top + bottom) // 2),  # 右中
-                (left, bottom),  # 左下
-                ((left + right) // 2, bottom),  # 下中
-                (right, bottom),  # 右下
-            ]
-            
-            for hx, hy in handles:
-                handle_rect = QRect(
-                    int(hx) - handle_size // 2,
-                    int(hy) - handle_size // 2,
-                    handle_size,
-                    handle_size
-                )
-                painter.fillRect(handle_rect, QColor(255, 165, 0))
-                painter.setPen(QPen(Qt.white, 1))
-                painter.drawRect(handle_rect)
+            if not self._fixed_size_mode:
+                handle_size = 6
+                handles = [
+                    (left, top),  # 左上
+                    ((left + right) // 2, top),  # 上中
+                    (right, top),  # 右上
+                    (left, (top + bottom) // 2),  # 左中
+                    (right, (top + bottom) // 2),  # 右中
+                    (left, bottom),  # 左下
+                    ((left + right) // 2, bottom),  # 下中
+                    (right, bottom),  # 右下
+                ]
+                
+                for hx, hy in handles:
+                    handle_rect = QRect(
+                        int(hx) - handle_size // 2,
+                        int(hy) - handle_size // 2,
+                        handle_size,
+                        handle_size
+                    )
+                    painter.fillRect(handle_rect, QColor(255, 165, 0))
+                    painter.setPen(QPen(Qt.white, 1))
+                    painter.drawRect(handle_rect)
 
         # 绘制正在框选的区域
         if self._current_rect:
@@ -260,15 +300,15 @@ class ROILabel(QLabel):
             painter.drawRect(self._current_rect)
 
             coord_text = (
-                f"({self._current_rect.x()}, {self._current_rect.y()}, "
+                f"✅ ROI: ({self._current_rect.x()}, {self._current_rect.y()}, "
                 f"{self._current_rect.right()}, {self._current_rect.bottom()}) "
-                f"[{self._current_rect.width()}x{self._current_rect.height()}]"
+                f"[{self._current_rect.width()}x{self._current_rect.height()}px]"
             )
             painter.setPen(QPen(QColor(0, 255, 0)))
             painter.drawText(self._current_rect.bottomLeft() + QPoint(4, 18), coord_text)
 
         pos = self._to_image_coords(self._mouse_pos)
-        cursor_text = f"X:{pos.x()} Y:{pos.y()}"
+        cursor_text = f"📍 鼠标位置: X:{pos.x()} Y:{pos.y()} (真实屏幕坐标)"
         painter.setPen(QPen(QColor(200, 200, 200, 180)))
         painter.drawText(10, 48, cursor_text)
 
@@ -280,12 +320,13 @@ class ROILabel(QLabel):
         if event.button() == Qt.LeftButton:
             pos = self._to_image_coords(event.pos())
             
-            # 检查是否在边框上（调整大小）
-            edge = self._get_edge_at_pos(pos)
-            if edge:
-                self._resizing_edge = edge
-                self._start_pos = pos
-                return
+            # ✅ 固定尺寸模式：跳过边缘检测（边框即拖动区域）
+            if not self._fixed_size_mode:
+                edge = self._get_edge_at_pos(pos)
+                if edge:
+                    self._resizing_edge = edge
+                    self._start_pos = pos
+                    return
             
             # 检查是否点击在已有 ROI 框内（用于拖动）
             if self._current_roi:
@@ -297,16 +338,21 @@ class ROILabel(QLabel):
                     self._start_pos = pos
                     return
             
-            # 否则开始框选新区域
+            # 开始框选新区域
             self._start_pos = pos
-            self._current_rect = QRect(self._start_pos, self._start_pos)
-            self._update_display()
+            if not self._fixed_size_mode:
+                self._current_rect = QRect(self._start_pos, self._start_pos)
+                self._update_display()
 
     def mouseMoveEvent(self, event):
         self._mouse_pos = event.pos()
         pos = self._to_image_coords(event.pos())
         
         if self._resizing_edge and self._current_roi:
+            # 固定尺寸模式不允许调整大小
+            if self._fixed_size_mode:
+                self._resizing_edge = None
+                return
             # 调整 ROI 大小
             left, top, right, bottom = self._current_roi
             edge = self._resizing_edge
@@ -376,7 +422,16 @@ class ROILabel(QLabel):
             elif self._current_rect:
                 # 结束框选
                 if self._current_rect.width() > 10 and self._current_rect.height() > 10:
-                    pass
+                    # ✅ 将框选的矩形转换为 ROI 坐标
+                    self._current_roi = (
+                        self._current_rect.x(),
+                        self._current_rect.y(),
+                        self._current_rect.right(),
+                        self._current_rect.bottom()
+                    )
+                    # 通知父窗口 ROI 已改变
+                    if hasattr(self.parent(), '_on_roi_dragged'):
+                        self.parent()._on_roi_dragged(self._current_roi)
                 else:
                     self._current_rect = None
                     self._start_pos = None
@@ -410,16 +465,25 @@ class ROIConfigDialog(QDialog):
     # ROI 类型定义
     ROI_TYPES = {
         'posture_roi': '姿势识别区域',
-        'Name_1': '1号枪-名称',
-        'Scope_1': '1号枪-倍镜',
-        'Muzzle_1': '1号枪-枪口',
-        'Grip_1': '1号枪-握把',
-        'Stock_1': '1号枪-枪托',
-        'Name_2': '2号枪-名称',
-        'Scope_2': '2号枪-倍镜',
-        'Muzzle_2': '2号枪-枪口',
-        'Grip_2': '2号枪-握把',
-        'Stock_2': '2号枪-枪托',
+        'Name_1': '1号枪-名称 (相对背包)',
+        'Scope_1': '1号枪-倍镜 (相对背包)',
+        'Muzzle_1': '1号枪-枪口 (相对背包)',
+        'Grip_1': '1号枪-握把 (相对背包)',
+        'Stock_1': '1号枪-枪托 (相对背包)',
+        'Name_2': '2号枪-名称 (相对背包)',
+        'Scope_2': '2号枪-倍镜 (相对背包)',
+        'Muzzle_2': '2号枪-枪口 (相对背包)',
+        'Grip_2': '2号枪-握把 (相对背包)',
+        'Stock_2': '2号枪-枪托 (相对背包)',
+        # ✅ 新增：背包截图区域和开镜点击坐标
+        'guns_backpack_roi': '背包截图区域 (GUNS_REOLUTION_SETTINGS)',
+        'right_click_pos': '右键开镜点击坐标 (Click)',
+    }
+    
+    # ✅ 需要转换为相对坐标的ROI类型（相对于背包区域）
+    RELATIVE_TO_BACKPACK = {
+        'Name_1', 'Scope_1', 'Muzzle_1', 'Grip_1', 'Stock_1',
+        'Name_2', 'Scope_2', 'Muzzle_2', 'Grip_2', 'Stock_2',
     }
     
     def __init__(self, resolution, current_rois=None, parent=None):
@@ -438,11 +502,54 @@ class ROIConfigDialog(QDialog):
         self.setWindowTitle("ROI 配置工具")
         self.setMinimumSize(900, 700)
         
+        # ✅ 设置窗口标志：独立顶层窗口，始终在最前
+        self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
+        
         # ✅ 记录当前正在编辑的 ROI 类型（用于切换时自动保存）
         self._last_roi_type = None
         
+        # ✅ 背包区域坐标（用于相对坐标转换）
+        # 【格式规范】统一使用 (left, top, right, bottom) - 屏幕绝对坐标
+        self.backpack_roi = None
+        if current_rois and 'guns_backpack_roi' in current_rois:
+            backpack_data = current_rois['guns_backpack_roi']
+            # 确保是4个值的元组
+            if len(backpack_data) == 4:
+                self.backpack_roi = tuple(backpack_data)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"✅ 加载背包区域（绝对坐标）: {self.backpack_roi}")
+        
+        # ✅ 新增：两步流程状态管理
+        self._phase = "backpack"  # 当前阶段: 'backpack' 或 'roi'
+        self._backpack_pixmap = None  # 背包截图（用于阶段2）
+        # 【格式规范】统一使用 (left, top, right, bottom) - 屏幕绝对坐标
+        self._backpack_abs_coords = None
+        self._fullscreen_pixmap = None  # 全屏截图（阶段1使用）
+        
         self._build_ui()
         self._load_screenshot()
+    
+    def _update_roi_type_combo(self):
+        """更新 ROI 类型下拉框（根据是否已配置背包）"""
+        self.roi_type_combo.blockSignals(True)  # 阻止信号
+        self.roi_type_combo.clear()
+        
+        if self.backpack_roi and len(self.backpack_roi) == 4:
+            # ✅ 已配置背包：显示所有类型
+            for key, name in self.ROI_TYPES.items():
+                self.roi_type_combo.addItem(name, key)
+        else:
+            # ✅ 未配置背包：只显示背包区域和开镜坐标
+            limited_types = {
+                'guns_backpack_roi': '背包截图区域 (GUNS_REOLUTION_SETTINGS)',
+                'right_click_pos': '右键开镜点击坐标 (Click)',
+                'posture_roi': '姿势识别区域',
+            }
+            for key, name in limited_types.items():
+                self.roi_type_combo.addItem(name, key)
+        
+        self.roi_type_combo.blockSignals(False)
     
     def _build_ui(self):
         """构建 UI"""
@@ -452,11 +559,20 @@ class ROIConfigDialog(QDialog):
         # 顶部控制栏
         top_bar = QHBoxLayout()
         
+        # ✅ 显示当前截图分辨率
+        self.resolution_label = QLabel(f"截图分辨率: 加载中...")
+        self.resolution_label.setStyleSheet("color: #00ffff; font-weight: bold; font-size: 12px;")
+        top_bar.addWidget(self.resolution_label)
+        
+        top_bar.addStretch()
+        
         # ROI 类型选择
         top_bar.addWidget(QLabel("ROI 类型:"))
         self.roi_type_combo = QComboBox()
-        for key, name in self.ROI_TYPES.items():
-            self.roi_type_combo.addItem(name, key)
+        
+        # ✅ 初始只显示背包区域和开镜坐标（不显示枪械信息）
+        self._update_roi_type_combo()
+        
         self.roi_type_combo.currentIndexChanged.connect(self.roi_type_changed)
         top_bar.addWidget(self.roi_type_combo, 1)
         
@@ -464,6 +580,36 @@ class ROIConfigDialog(QDialog):
         self.current_value_label = QLabel("未设置")
         self.current_value_label.setStyleSheet("color: #ffba08; font-weight: bold;")
         top_bar.addWidget(self.current_value_label)
+
+        # ✅ 固定尺寸配置（阶段2显示）
+        self.roi_size_spin_w = QSpinBox()
+        self.roi_size_spin_w.setRange(10, 999)
+        self.roi_size_spin_w.setValue(60)
+        self.roi_size_spin_w.setFixedWidth(50)
+        self.roi_size_spin_h = QSpinBox()
+        self.roi_size_spin_h.setRange(10, 999)
+        self.roi_size_spin_h.setValue(50)
+        self.roi_size_spin_h.setFixedWidth(50)
+        self.roi_size_w_label = QLabel("宽:")
+        self.roi_size_x_label = QLabel("×")
+        self.roi_size_h_label = QLabel("高:")
+        self.roi_size_w_label.setStyleSheet("color: #aaa;")
+        self.roi_size_x_label.setStyleSheet("color: #aaa;")
+        self.roi_size_h_label.setStyleSheet("color: #aaa;")
+        for w in (self.roi_size_w_label, self.roi_size_x_label, self.roi_size_h_label):
+            top_bar.addWidget(w)
+            w.setVisible(False)
+        for s in (self.roi_size_spin_w, self.roi_size_spin_h):
+            top_bar.addWidget(s)
+            s.setVisible(False)
+        self.roi_size_spin_w.valueChanged.connect(self._on_fixed_size_changed)
+        self.roi_size_spin_h.valueChanged.connect(self._on_fixed_size_changed)
+
+        self.roi_size_fixed_label = QLabel("(固定尺寸)")
+        self.roi_size_fixed_label.setStyleSheet("color: #4ae04a; font-weight: bold;")
+        top_bar.addWidget(self.roi_size_fixed_label)
+        self.roi_size_fixed_label.setVisible(False)
+        top_bar.addSpacing(8)
         
         # 置信度显示
         self.confidence_label = QLabel("")
@@ -475,12 +621,37 @@ class ROIConfigDialog(QDialog):
         self.calc_conf_btn.clicked.connect(self._calculate_confidence)
         top_bar.addWidget(self.calc_conf_btn)
         
+        # ✅ 保存模板按钮（阶段2单独生成模板）
+        self.save_template_btn = QPushButton("💾 保存模板")
+        self.save_template_btn.setToolTip("从当前ROI区域截图，生成SIFT识别用的模板图片")
+        self.save_template_btn.clicked.connect(self._on_save_template)
+        self.save_template_btn.setStyleSheet("color: #00ff88; font-weight: bold;")
+        self.save_template_btn.setVisible(False)  # 默认隐藏，阶段2才显示
+        top_bar.addWidget(self.save_template_btn)
+        
+        # ✅ 重置位置按钮
+        self.reset_btn = QPushButton("🔄 重置位置")
+        self.reset_btn.setToolTip("清除当前 ROI，重新框选")
+        self.reset_btn.clicked.connect(self._on_reset_position)
+        self.reset_btn.setStyleSheet("color: #ffba08; font-weight: bold;")
+        top_bar.addWidget(self.reset_btn)
+        
+        # ✅ 回退阶段按钮（仅在阶段2显示）
+        self.back_btn = QPushButton("⬅️ 回退到阶段1")
+        self.back_btn.setToolTip("重新调整背包区域（会重置所有枪械 ROI）")
+        self.back_btn.clicked.connect(self._on_back_to_phase1)
+        self.back_btn.setStyleSheet("color: #ff4444; font-weight: bold;")
+        self.back_btn.setVisible(False)  # 默认隐藏，阶段2才显示
+        top_bar.addWidget(self.back_btn)
+        
         main_layout.addLayout(top_bar)
         
         # 截图显示区域
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(False)
         self.scroll_area.setAlignment(Qt.AlignCenter)
+        # ✅ 设置背景色为深灰色，避免黑边
+        self.scroll_area.setStyleSheet("QScrollArea { background-color: #2b2b2b; }")
         main_layout.addWidget(self.scroll_area, 1)
         
         # 底部按钮：保存仅写入当前类型，不关闭；关闭再结束
@@ -496,30 +667,344 @@ class ROIConfigDialog(QDialog):
         main_layout.addLayout(btn_row)
         
         # 状态栏
-        self.status_label = QLabel("1:1 全屏截图，可拖动滚动条查看；保存当前 ROI 写入一条，全部调好后点「关闭」")
-        self.status_label.setStyleSheet("color: #a0a0b0; padding: 5px;")
+        self.status_label = QLabel(
+            "✅ 1:1 全屏截图 | ✅ 框选坐标 = 真实屏幕坐标 | 🔄 枪械信息自动转换为相对背包坐标 | 📍 可拖动滚动条查看完整截图 | 💾 保存当前 ROI 写入一条，全部调好后点「关闭」"
+        )
+        self.status_label.setStyleSheet("color: #a0a0b0; padding: 5px; font-size: 11px;")
         main_layout.addWidget(self.status_label)
     
     def _load_screenshot(self):
-        """加载截图"""
+        """加载截图（两步流程）"""
         try:
             print("正在截取屏幕...")
-            pixmap = capture_screenshot()
-            print(f"截图完成: {pixmap.width()}x{pixmap.height()}")
+            self._fullscreen_pixmap = capture_screenshot()
+            print(f"截图完成: {self._fullscreen_pixmap.width()}x{self._fullscreen_pixmap.height()}")
             
-            self._roi_label = ROILabel(pixmap, self)
-            self.scroll_area.setWidget(self._roi_label)
+            # ✅ 更新分辨率显示
+            if hasattr(self, 'resolution_label'):
+                self.resolution_label.setText(f"📊 截图分辨率: {self._fullscreen_pixmap.width()}x{self._fullscreen_pixmap.height()}")
             
-            # ✅ 初始化 _last_roi_type
-            self._last_roi_type = self.roi_type_combo.currentData()
-            
-            # 更新当前值显示
-            self._update_current_value()
+            # ✅ 根据是否已配置背包区域决定从哪个阶段开始
+            if self.backpack_roi and len(self.backpack_roi) == 4:
+                # 已配置背包：弹出确认对话框
+                print(f"✅ 检测到已配置的背包区域: {self.backpack_roi}")
+                
+                reply = QMessageBox.question(
+                    self,
+                    "📦 检测到已配置的背包区域",
+                    f"检测到已配置的背包区域：\n"
+                    f"位置: ({self.backpack_roi[0]}, {self.backpack_roi[1]}, {self.backpack_roi[2]}, {self.backpack_roi[3]})\n\n"
+                    f"请选择：\n"
+                    f"• 是 → 直接进入阶段2（调整枪械 ROI）\n"
+                    f"• 否 → 从阶段1开始（重新框选背包）",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes  # 默认选择"是"
+                )
+                
+                if reply == QMessageBox.Yes:
+                    # 用户选择直接进入阶段2
+                    print("✅ 用户选择：直接进入阶段2")
+                    self._extract_backpack_from_fullscreen()
+                    self._setup_phase2_roi_selection()
+                    
+                    # ✅ 自动选择第一个 ROI 类型（如果有配置的话）
+                    self._select_first_configured_roi()
+                else:
+                    # 用户选择从阶段1开始
+                    print("✅ 用户选择：从阶段1开始")
+                    self._setup_phase1_backpack_selection()
+            else:
+                # 未配置背包：从阶段1开始
+                print("⚠️ 未检测到背包区域配置，从阶段1开始")
+                self._setup_phase1_backpack_selection()
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"截图失败: {e}")
-            # 不要调用 reject()，只是关闭对话框
             self.close()
+    
+    def _extract_backpack_from_fullscreen(self):
+        """从全屏截图中提取背包区域"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not self.backpack_roi or len(self.backpack_roi) != 4:
+            logger.warning(f"⚠️ 背包区域配置无效: {self.backpack_roi}")
+            return
+        
+        # 背包区域: (left, top, right, bottom) - 屏幕绝对坐标
+        backpack_left, backpack_top, backpack_right, backpack_bottom = self.backpack_roi
+        
+        # 计算宽高
+        backpack_width = backpack_right - backpack_left
+        backpack_height = backpack_bottom - backpack_top
+        
+        logger.info(f"📦 开始提取背包区域:")
+        logger.info(f"   背包配置（绝对坐标）: left={backpack_left}, top={backpack_top}, right={backpack_right}, bottom={backpack_bottom}")
+        logger.info(f"   背包尺寸: width={backpack_width}, height={backpack_height}")
+        logger.info(f"   全屏截图: {self._fullscreen_pixmap.width()}x{self._fullscreen_pixmap.height()}")
+        
+        # 检查坐标是否有效
+        if backpack_left < 0 or backpack_top < 0:
+            logger.error(f"❌ 背包坐标为负数: left={backpack_left}, top={backpack_top}")
+            return
+        
+        if backpack_width <= 0 or backpack_height <= 0:
+            logger.error(f"❌ 背包尺寸无效: width={backpack_width}, height={backpack_height}")
+            return
+        
+        # 检查是否超出全屏范围
+        if backpack_right > self._fullscreen_pixmap.width():
+            logger.warning(f"⚠️ 背包右边界超出屏幕: {backpack_right} > {self._fullscreen_pixmap.width()}")
+        if backpack_bottom > self._fullscreen_pixmap.height():
+            logger.warning(f"⚠️ 背包下边界超出屏幕: {backpack_bottom} > {self._fullscreen_pixmap.height()}")
+        
+        # 从全屏截图中裁剪背包区域
+        try:
+            self._backpack_pixmap = self._fullscreen_pixmap.copy(
+                int(backpack_left), int(backpack_top), 
+                int(backpack_width), int(backpack_height)
+            )
+            
+            logger.info(f"✅ 背包截图成功: {self._backpack_pixmap.width()}x{self._backpack_pixmap.height()}")
+            
+            # 保存背包绝对坐标（用于阶段2的坐标转换）
+            self._backpack_abs_coords = (
+                backpack_left, backpack_top,
+                backpack_right, backpack_bottom
+            )
+            
+            logger.info(f"✅ 背包绝对坐标: {self._backpack_abs_coords}")
+            
+        except Exception as e:
+            logger.error(f"❌ 裁剪背包区域失败: {e}")
+            logger.error(f"   参数: x={backpack_left}, y={backpack_top}, w={backpack_width}, h={backpack_height}")
+    
+    def _select_first_configured_roi(self):
+        """自动选择第一个已配置的 ROI 类型"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # 优先级：Name_1 > Scope_1 > Muzzle_1 > ... > posture_roi
+        priority_order = [
+            'Name_1', 'Scope_1', 'Muzzle_1', 'Grip_1', 'Stock_1',
+            'Name_2', 'Scope_2', 'Muzzle_2', 'Grip_2', 'Stock_2',
+            'posture_roi'
+        ]
+        
+        for roi_type in priority_order:
+            if roi_type in self.current_rois and self.current_rois[roi_type]:
+                # 找到第一个已配置的 ROI
+                index = self.roi_type_combo.findData(roi_type)
+                if index >= 0:
+                    self.roi_type_combo.blockSignals(True)
+                    self.roi_type_combo.setCurrentIndex(index)
+                    self.roi_type_combo.blockSignals(False)
+                    self._last_roi_type = roi_type
+                    logger.info(f"✅ 自动选择已配置的 ROI: {roi_type}")
+                    return
+        
+        # 如果都没有配置，选择 Name_1
+        index = self.roi_type_combo.findData('Name_1')
+        if index >= 0:
+            self.roi_type_combo.blockSignals(True)
+            self.roi_type_combo.setCurrentIndex(index)
+            self.roi_type_combo.blockSignals(False)
+            self._last_roi_type = 'Name_1'
+            logger.info("✅ 默认选择 Name_1")
+    
+    def _on_back_to_phase1(self):
+        """回退到阶段1：重新调整背包区域"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # ✅ 弹出确认对话框
+        reply = QMessageBox.question(
+            self,
+            "⚠️ 确认回退",
+            "回退到阶段1会：\n"
+            "1. 重新框选背包区域\n"
+            "2. 清除所有枪械 ROI 配置\n"
+            "3. 删除已保存的枪械模板\n\n"
+            "确定要回退吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            logger.info("❌ 用户取消回退")
+            return
+        
+        # ✅ 重置所有枪械 ROI 坐标为 0（但保留背包区域）
+        reset_count = 0
+        for roi_type in list(self.RELATIVE_TO_BACKPACK):
+            if roi_type in self.current_rois:
+                # 重置为 (0, 0, 0, 0)
+                self.current_rois[roi_type] = [0, 0, 0, 0]
+                reset_count += 1
+            # ✅ 同时清除 _last_emitted 中的记录（避免提示未保存）
+            if roi_type in self._last_emitted:
+                del self._last_emitted[roi_type]
+        
+        # ✅ 也要清除背包区域的 _last_emitted（因为要重新框选）
+        if 'guns_backpack_roi' in self._last_emitted:
+            del self._last_emitted['guns_backpack_roi']
+        
+        logger.info(f"✅ 已重置 {reset_count} 个枪械 ROI 坐标")
+        
+        # ✅ 删除已保存的枪械模板（避免使用旧模板）
+        self._delete_gun_templates()
+        
+        # ✅ 重置背包区域（允许重新框选）
+        self.backpack_roi = None
+        self._backpack_pixmap = None
+        self._backpack_abs_coords = None
+        
+        # ✅ 清除 ROI 标签上的显示
+        if hasattr(self, '_roi_label'):
+            self._roi_label._current_roi = None
+            self._roi_label._update_display()
+        
+        # ✅ 重置 ROI 类型下拉框（只显示背包和开镜）
+        self._update_roi_type_combo()
+        
+        # ✅ 切换回背包区域选项
+        index = self.roi_type_combo.findData('guns_backpack_roi')
+        if index >= 0:
+            self.roi_type_combo.blockSignals(True)
+            self.roi_type_combo.setCurrentIndex(index)
+            self.roi_type_combo.blockSignals(False)
+            self._last_roi_type = 'guns_backpack_roi'
+        
+        # ✅ 回到阶段1（显示全屏截图）
+        self._setup_phase1_backpack_selection()
+        
+        # 更新显示
+        self._update_current_value()
+        
+        logger.info("✅ 已回退到阶段1，请重新框选背包区域")
+        self.status_label.setText(
+            "⚠️ 已回退到阶段1 | 所有枪械 ROI 已重置 | 请重新框选背包区域"
+        )
+    
+    def _delete_gun_templates(self):
+        """删除已保存的枪械模板（回退阶段时调用）"""
+        import logging
+        logger = logging.getLogger(__name__)
+        from core.paths import res_path
+        from core import recognition
+        
+        categories = ['Name', 'Scope', 'Muzzle', 'Grip', 'Stock']
+        deleted_count = 0
+        
+        for category in categories:
+            # 检查三个可能的目录（三级降级）
+            template_dirs = [
+                res_path('_internal', 'data', 'firearms', self.resolution, category),
+                res_path('_internal', 'data', 'firearms', 'default', category),
+                res_path('_internal', 'data', 'firearms', category),
+            ]
+            
+            for template_dir in template_dirs:
+                if not os.path.exists(template_dir):
+                    continue
+                
+                # 删除 name_1.png, scope_1.png 等文件（由 ROI 工具自动保存的）
+                for filename in os.listdir(template_dir):
+                    if filename.lower().endswith('.png'):
+                        # 只删除 ROI 工具自动保存的模板（name_1, scope_2 等）
+                        parts = filename.lower().replace('.png', '').split('_')
+                        if len(parts) == 2 and parts[1].isdigit():
+                            try:
+                                filepath = os.path.join(template_dir, filename)
+                                os.remove(filepath)
+                                
+                                # 清除缓存
+                                if filepath in recognition._template_cache:
+                                    del recognition._template_cache[filepath]
+                                
+                                deleted_count += 1
+                                logger.debug(f"🗑️ 已删除模板: {filepath}")
+                            except Exception as e:
+                                logger.warning(f"删除模板失败 {filename}: {e}")
+        
+        if deleted_count > 0:
+            logger.info(f"✅ 已删除 {deleted_count} 个枪械模板")
+    
+    def _setup_phase1_backpack_selection(self):
+        """阶段1：显示全屏截图，框选背包区域"""
+        self._phase = "backpack"
+        
+        # 创建 ROI 标签（全屏模式）
+        self._roi_label = ROILabel(self._fullscreen_pixmap, self, mode="fullscreen")
+        self.scroll_area.setWidget(self._roi_label)
+        
+        # ✅ 隐藏回退按钮和保存模板按钮（阶段1不需要）
+        if hasattr(self, 'back_btn'):
+            self.back_btn.setVisible(False)
+        if hasattr(self, 'save_template_btn'):
+            self.save_template_btn.setVisible(False)
+
+        # ✅ 隐藏固定尺寸配置（阶段1不需要）
+        if hasattr(self, 'roi_size_spin_w'):
+            for w in (self.roi_size_w_label, self.roi_size_x_label, self.roi_size_h_label, self.roi_size_fixed_label):
+                w.setVisible(False)
+            for s in (self.roi_size_spin_w, self.roi_size_spin_h):
+                s.setVisible(False)
+        
+        # 更新状态栏
+        self.status_label.setText(
+            "✅ 【阶段1/2】请框选整个背包区域 → 保存后自动进入阶段2 | 📍 可拖动滚动条查看完整截图"
+        )
+    
+    def _setup_phase2_roi_selection(self):
+        """阶段2：显示背包截图，框选 ROI"""
+        self._phase = "roi"
+        
+        # 移除旧的控件
+        if hasattr(self, '_roi_label'):
+            old_widget = self._roi_label
+            self.scroll_area.setWidget(None)
+            old_widget.deleteLater()
+        
+        # ✅ 创建 ROI 标签（背包模式）
+        self._roi_label = ROILabel(self._backpack_pixmap, self, mode="backpack")
+        self.scroll_area.setWidget(self._roi_label)
+
+        # ✅ 启用固定尺寸模式，从当前所选ROI类型推断尺寸
+        current_type = self.roi_type_combo.currentData()
+        fw, fh = self._determine_fixed_size(current_type)
+        self.roi_size_spin_w.setValue(fw)
+        self.roi_size_spin_h.setValue(fh)
+        self._roi_label.set_fixed_size(fw, fh)
+
+        # ✅ 显示尺寸微调控件
+        for w in (self.roi_size_w_label, self.roi_size_x_label, self.roi_size_h_label, self.roi_size_fixed_label):
+            w.setVisible(True)
+        for s in (self.roi_size_spin_w, self.roi_size_spin_h):
+            s.setVisible(True)
+        
+        # ✅ 显示回退按钮和保存模板按钮（阶段2需要）
+        if hasattr(self, 'back_btn'):
+            self.back_btn.setVisible(True)
+        if hasattr(self, 'save_template_btn'):
+            self.save_template_btn.setVisible(True)
+        
+        # ✅ 加载当前 ROI 类型的坐标（如果有配置）
+        self._update_current_value()
+
+        # ✅ 如果当前没有配置，自动生成居中预览框
+        roi_type = self.roi_type_combo.currentData()
+        if roi_type not in self.current_rois or not self.current_rois.get(roi_type):
+            self._roi_label.reset_to_center()
+            if self._roi_label._current_roi:
+                self.current_rois[roi_type] = list(self._roi_label._current_roi)
+                self._last_emitted[roi_type] = self._norm_roi(self._roi_label._current_roi)
+                self.current_value_label.setText(f"当前: {self._roi_label._current_roi}")
+        
+        # 更新状态栏
+        self.status_label.setText(
+            "✅ 【阶段2/2】在背包图上框选 ROI | 🔄 枪械信息自动保存为相对坐标 | 💾 保存当前 ROI 写入一条"
+        )
     
     def _update_current_value(self):
         """更新当前 ROI 值显示"""
@@ -527,42 +1012,279 @@ class ROIConfigDialog(QDialog):
         current = self.current_rois.get(roi_type)
         
         if current:
+            # ✅ 显示当前配置的坐标
             self.current_value_label.setText(f"当前: {current}")
-            # 更新 ROI 标签上的显示
-            if hasattr(self, '_roi_label'):
-                self._roi_label._current_roi = current
-                self._roi_label._update_display()
+            
+            # ✅ 根据 ROI 类型处理显示
+            if roi_type == 'guns_backpack_roi':
+                # 背包区域: (left, top, right, bottom) - 已经是绝对坐标，直接显示
+                if len(current) == 4:
+                    display_roi = tuple(current)
+                    if hasattr(self, '_roi_label'):
+                        self._roi_label._current_roi = display_roi
+                        self._roi_label._update_display()
+                else:
+                    if hasattr(self, '_roi_label'):
+                        self._roi_label._current_roi = None
+                        self._roi_label._update_display()
+                        
+            elif roi_type == 'right_click_pos':
+                # 开镜坐标: (x, y) -> 不显示框
+                if hasattr(self, '_roi_label'):
+                    self._roi_label._current_roi = None
+                    self._roi_label._update_display()
+                    
+            elif roi_type in self.RELATIVE_TO_BACKPACK:
+                # ✅ 枪械信息: 根据阶段决定如何显示
+                if self._phase == "roi" and hasattr(self._roi_label, '_mode') and self._roi_label._mode == "backpack":
+                    # 阶段2：坐标已经是相对坐标，直接显示
+                    # 固定尺寸模式下，将已有 ROI 缩放到固定尺寸，保持中心
+                    if hasattr(self, '_roi_label'):
+                        if self._roi_label._fixed_size_mode and len(current) == 4:
+                            l, t, r, b = current
+                            cx = (l + r) // 2
+                            cy = (t + b) // 2
+                            fw = self._roi_label._fixed_w
+                            fh = self._roi_label._fixed_h
+                            self._roi_label._current_roi = (
+                                cx - fw // 2, cy - fh // 2,
+                                cx + fw // 2, cy + fh // 2
+                            )
+                        else:
+                            self._roi_label._current_roi = current
+                        self._roi_label._update_display()
+                else:
+                    # 阶段1：相对坐标 -> 转换为屏幕绝对坐标用于显示
+                    if self.backpack_roi and len(self.backpack_roi) == 4 and len(current) == 4:
+                        backpack_left, backpack_top, backpack_right, backpack_bottom = self.backpack_roi
+                        rel_left, rel_top, rel_right, rel_bottom = current
+                        
+                        # 转换为绝对坐标
+                        abs_left = backpack_left + rel_left
+                        abs_top = backpack_top + rel_top
+                        abs_right = backpack_left + rel_right
+                        abs_bottom = backpack_top + rel_bottom
+                        
+                        display_roi = (abs_left, abs_top, abs_right, abs_bottom)
+                        
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.debug(f"🔄 显示转换: {roi_type} 相对{current} → 绝对{display_roi}")
+                        
+                        if hasattr(self, '_roi_label'):
+                            self._roi_label._current_roi = display_roi
+                            self._roi_label._update_display()
+                    else:
+                        # 没有背包区域，无法显示
+                        if hasattr(self, '_roi_label'):
+                            self._roi_label._current_roi = None
+                            self._roi_label._update_display()
+            else:
+                # 标准 ROI 类型，在图片上显示框
+                if hasattr(self, '_roi_label'):
+                    self._roi_label._current_roi = current
+                    self._roi_label._update_display()
         else:
             self.current_value_label.setText("未设置")
             # 清除 ROI 标签上的显示
             if hasattr(self, '_roi_label'):
                 self._roi_label._current_roi = None
                 self._roi_label._update_display()
+
+    def _determine_fixed_size(self, roi_type):
+        """根据 ROI 类型和现有模板推断固定尺寸。返回 (w, h)。"""
+        # 默认值：名称 72×30，配件 60×50
+        name_default = (72, 30)
+        other_default = (60, 50)
+
+        if 'Name' in roi_type:
+            default = name_default
+        else:
+            default = other_default
+
+        # 从现有模板目录推断尺寸
+        from core.paths import res_path
+        category = None
+        if 'Name' in roi_type:
+            category = 'Name'
+        elif 'Scope' in roi_type:
+            category = 'Scope'
+        elif 'Muzzle' in roi_type:
+            category = 'Muzzle'
+        elif 'Grip' in roi_type:
+            category = 'Grip'
+        elif 'Stock' in roi_type:
+            category = 'Stock'
+
+        if not category:
+            return default
+
+        # 优先从本分辨率模板目录读取
+        template_dir = res_path('_internal', 'data', 'firearms', self.resolution, category)
+        if not os.path.exists(template_dir):
+            template_dir = res_path('_internal', 'data', 'firearms', category)
+            if not os.path.exists(template_dir):
+                return default
+
+        import cv2
+        sizes = []
+        for fname in os.listdir(template_dir):
+            if not fname.lower().endswith('.png'):
+                continue
+            fpath = os.path.join(template_dir, fname)
+            img = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                h, w = img.shape[:2]
+                sizes.append((w, h))
+
+        if not sizes:
+            return default
+
+        # 取最常见尺寸（众数）
+        from collections import Counter
+        counter = Counter(sizes)
+        most_common = counter.most_common(1)[0][0]
+        return most_common
+
+    def _on_fixed_size_changed(self):
+        """固定尺寸微调框值改变时，更新 ROILabel 的固定尺寸。"""
+        w = self.roi_size_spin_w.value()
+        h = self.roi_size_spin_h.value()
+        if hasattr(self, '_roi_label') and self._roi_label:
+            # 如果已有 ROI，保持中心位置不变，只更新尺寸
+            old_roi = self._roi_label._current_roi
+            self._roi_label.set_fixed_size(w, h)
+            if old_roi:
+                l, t, r, b = old_roi
+                cx = (l + r) // 2
+                cy = (t + b) // 2
+                new_l = cx - w // 2
+                new_t = cy - h // 2
+                self._roi_label._current_roi = (new_l, new_t, new_l + w, new_t + h)
+                self._roi_label._update_display()
+                if hasattr(self, '_on_roi_dragged'):
+                    self._on_roi_dragged(self._roi_label._current_roi)
     
     def roi_type_changed(self):
         """ROI 类型改变时更新显示"""
         # ✅ 自动保存上一个 ROI 类型的调整结果
         if self._last_roi_type and hasattr(self, '_roi_label') and self._roi_label._current_roi:
             # 保存上一个类型的 ROI
-            self.current_rois[self._last_roi_type] = list(self._roi_label._current_roi)
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"✅ 自动保存 {self._last_roi_type}: {self._roi_label._current_roi}")
+            raw_roi = self._roi_label._current_roi
+            
+            # ✅ 只有标准 ROI 类型才从 _roi_label 获取并保存
+            if self._last_roi_type not in ('guns_backpack_roi', 'right_click_pos'):
+                # 如果是枪械信息，需要转换回屏幕坐标再保存（因为显示的是相对坐标）
+                if self._last_roi_type in self.RELATIVE_TO_BACKPACK and self.backpack_roi:
+                    # TODO: 如果需要反向转换，可以在这里实现
+                    # 目前简单处理：直接保存当前值
+                    self.current_rois[self._last_roi_type] = list(raw_roi)
+                    
+                else:
+                    self.current_rois[self._last_roi_type] = list(raw_roi)
+                
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"✅ 自动保存 {self._last_roi_type}: {raw_roi}")
+
+            # ✅ 同步更新 _last_emitted，避免关闭时误报"未保存"
+            if self._last_roi_type not in ('guns_backpack_roi', 'right_click_pos'):
+                self._last_emitted[self._last_roi_type] = self._norm_roi(raw_roi)
         
         # 更新当前类型
-        self._last_roi_type = self.roi_type_combo.currentData()
+        new_roi_type = self.roi_type_combo.currentData()
+        
+        # ✅ 如果切换到枪械信息类型，检查是否已配置背包区域
+        if new_roi_type in self.RELATIVE_TO_BACKPACK and not self.backpack_roi:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 请先配置背包区域，否则 {new_roi_type} 无法正确转换坐标")
+            
+            # ✅ 弹出提示并自动切换回背包区域选项
+            reply = QMessageBox.question(
+                self,
+                "⚠️ 需要先配置背包区域",
+                f"在配置「{self.ROI_TYPES.get(new_roi_type)}」之前，\n"
+                f"必须先配置「背包截图区域」！\n\n"
+                f"是否现在切换到「背包截图区域」进行配置？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                # 自动切换到背包区域选项
+                index = self.roi_type_combo.findData('guns_backpack_roi')
+                if index >= 0:
+                    self.roi_type_combo.blockSignals(True)  # 阻止信号循环
+                    self.roi_type_combo.setCurrentIndex(index)
+                    self.roi_type_combo.blockSignals(False)
+                    self._last_roi_type = 'guns_backpack_roi'
+                    logger.info("✅ 自动切换到背包区域配置")
+                    # 更新显示
+                    self._update_current_value()
+                    return
+            else:
+                # 用户选择取消，保持原样但给出提示
+                self.status_label.setText(
+                    f"⚠️ 请先配置背包区域，再配置 {self.ROI_TYPES.get(new_roi_type)}"
+                )
+                return
+        
+        self._last_roi_type = new_roi_type
         
         # 更新显示（加载新类型的 ROI）
         self._update_current_value()
+
+        # ✅ 如果处于阶段2固定尺寸模式，更新尺寸微调框
+        if self._phase == "roi" and hasattr(self, '_roi_label') and self._roi_label._fixed_size_mode:
+            if new_roi_type in self.RELATIVE_TO_BACKPACK or new_roi_type in ('posture_roi', 'guns_backpack_roi'):
+                # 枪械配件/姿势/背包区域才显示固定尺寸
+                if new_roi_type in self.RELATIVE_TO_BACKPACK or new_roi_type == 'posture_roi':
+                    fw, fh = self._determine_fixed_size(new_roi_type)
+                    self.roi_size_spin_w.blockSignals(True)
+                    self.roi_size_spin_h.blockSignals(True)
+                    self.roi_size_spin_w.setValue(fw)
+                    self.roi_size_spin_h.setValue(fh)
+                    self.roi_size_spin_w.blockSignals(False)
+                    self.roi_size_spin_h.blockSignals(False)
+                    self._roi_label.set_fixed_size(fw, fh)
+                    # 如果当前有配置，保持中心
+                    if self._roi_label._current_roi:
+                        self._roi_label._update_display()
     
     def _on_roi_dragged(self, new_roi):
         """当用户拖动 ROI 框时调用"""
         if new_roi:
-            # 更新当前值显示
-            self.current_value_label.setText(f"当前: {new_roi}")
-            # 同时更新 current_rois 中的数据
             roi_type = self.roi_type_combo.currentData()
-            self.current_rois[roi_type] = list(new_roi)
+            
+            # ✅ 特殊类型（背包区域、开镜坐标）不在图片上显示框，不处理拖动
+            if roi_type in ('guns_backpack_roi', 'right_click_pos'):
+                return
+            
+            # ✅ 如果是枪械信息 ROI
+            if roi_type in self.RELATIVE_TO_BACKPACK:
+                # 根据阶段决定如何处理坐标
+                if self._phase == "roi" and hasattr(self._roi_label, '_mode') and self._roi_label._mode == "backpack":
+                    # 阶段2：坐标已经是相对坐标，直接使用
+                    relative_roi = new_roi
+                    display_roi = relative_roi
+                    self.current_value_label.setText(f"相对背包: {relative_roi}")
+                else:
+                    # 阶段1：需要转换
+                    relative_roi = self._convert_to_relative(roi_type, new_roi)
+                    display_roi = relative_roi
+                    # 显示两种坐标：屏幕坐标 -> 相对坐标
+                    self.current_value_label.setText(
+                        f"屏幕: {new_roi} → 相对背包: {relative_roi}"
+                    )
+                
+                # 同时更新 current_rois 中的相对坐标
+                self.current_rois[roi_type] = list(relative_roi)
+            else:
+                # 其他类型，直接显示
+                display_roi = new_roi
+                self.current_rois[roi_type] = list(new_roi)
+                self.current_value_label.setText(f"当前: {new_roi}")
             
             # 自动计算置信度
             self._calculate_confidence()
@@ -570,11 +1292,6 @@ class ROIConfigDialog(QDialog):
     def _calculate_confidence(self):
         """计算并显示置信度"""
         roi_type = self.roi_type_combo.currentData()
-        
-        # 姿势识别没有模板
-        if roi_type == 'posture_roi':
-            self.confidence_label.setText("姿势识别无模板")
-            return
         
         # 计算置信度
         confidence = self._roi_label.calculate_confidence(roi_type, self.resolution)
@@ -598,6 +1315,49 @@ class ROIConfigDialog(QDialog):
             return None
         t = v if isinstance(v, tuple) else tuple(v)
         return tuple(int(x) for x in t)
+    
+    def _convert_to_relative(self, roi_type, screen_coords):
+        """
+        将屏幕绝对坐标转换为相对于背包区域的坐标
+        
+        【坐标格式规范】
+        - 输入：(left, top, right, bottom) 屏幕绝对坐标
+        - 输出：(left, top, right, bottom) 相对于背包左上角的相对坐标
+        
+        :param roi_type: ROI 类型
+        :param screen_coords: 屏幕绝对坐标 (left, top, right, bottom)
+        :return: 相对坐标 (left, top, right, bottom)
+        """
+        if roi_type not in self.RELATIVE_TO_BACKPACK:
+            return screen_coords
+        
+        if not self.backpack_roi or len(self.backpack_roi) != 4:
+            # 如果没有背包区域信息，返回原始坐标
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"⚠️ 未配置背包区域，无法转换 {roi_type} 为相对坐标")
+            return screen_coords
+        
+        # 背包区域格式: (left, top, right, bottom) - 屏幕绝对坐标
+        backpack_left, backpack_top, backpack_right, backpack_bottom = self.backpack_roi
+        
+        # 屏幕坐标: (left, top, right, bottom)
+        screen_left, screen_top, screen_right, screen_bottom = screen_coords
+        
+        # 转换为相对坐标
+        relative_left = screen_left - backpack_left
+        relative_top = screen_top - backpack_top
+        relative_right = screen_right - backpack_left
+        relative_bottom = screen_bottom - backpack_top
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"🔄 坐标转换: {roi_type}")
+        logger.info(f"   背包区域（绝对坐标）: left={backpack_left}, top={backpack_top}, right={backpack_right}, bottom={backpack_bottom}")
+        logger.info(f"   屏幕坐标: {screen_coords}")
+        logger.info(f"   相对坐标: ({relative_left}, {relative_top}, {relative_right}, {relative_bottom})")
+        
+        return (relative_left, relative_top, relative_right, relative_bottom)
 
     def _effective_rois(self):
         """与界面一致的 ROI 表（含当前类型下未点「保存」的编辑）。"""
@@ -637,8 +1397,64 @@ class ROIConfigDialog(QDialog):
         )
         return r == QMessageBox.Yes
 
+    def _on_reset_position(self):
+        """重置当前 ROI 位置，允许重新框选"""
+        roi_type = self.roi_type_combo.currentData()
+        roi_name = self.ROI_TYPES.get(roi_type, roi_type)
+        
+        # ✅ 阶段2固定尺寸模式：重置到居中位置
+        if self._phase == "roi" and hasattr(self, '_roi_label') and self._roi_label._fixed_size_mode:
+            self._roi_label.reset_to_center()
+            # 保存到 current_rois
+            if self._roi_label._current_roi:
+                self.current_rois[roi_type] = list(self._roi_label._current_roi)
+                self._last_emitted[roi_type] = self._norm_roi(self._roi_label._current_roi)
+                self.current_value_label.setText(f"当前: {self._roi_label._current_roi}")
+                self.confidence_label.setText("")
+                self.status_label.setText(f"已重置 {roi_name} 到居中位置")
+            return
+        
+        # 清除当前 ROI
+        if hasattr(self, '_roi_label'):
+            self._roi_label._current_roi = None
+            self._roi_label.cancel_ongoing()
+            self._roi_label._update_display()
+        
+        # 从 current_rois 中移除
+        if roi_type in self.current_rois:
+            del self.current_rois[roi_type]
+        
+        # 更新显示
+        self.current_value_label.setText("未设置（请重新框选）")
+        self.confidence_label.setText("")
+        
+        # 提示用户
+        self.status_label.setText(f"已重置 {roi_name}，请在截图上拖动鼠标重新框选")
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"✅ 已重置 {roi_type} 的 ROI 位置")
+    
     def _on_save(self):
         """保存 ROI"""
+        roi_type = self.roi_type_combo.currentData()
+        
+        # ✅ 如果是枪械信息 ROI，必须先配置背包区域
+        if roi_type in self.RELATIVE_TO_BACKPACK:
+            if not self.backpack_roi or len(self.backpack_roi) != 4:
+                QMessageBox.warning(
+                    self,
+                    "⚠️ 需要先配置背包区域",
+                    f"在配置「{self.ROI_TYPES.get(roi_type)}」之前，\n"
+                    f"必须先配置「背包截图区域」！\n\n"
+                    f"操作步骤：\n"
+                    f"1. 在上方下拉框选择「背包截图区域 (GUNS_REOLUTION_SETTINGS)」\n"
+                    f"2. 在全屏截图中框选整个背包区域\n"
+                    f"3. 点击「保存当前 ROI」\n"
+                    f"4. 然后再回来配置枪械信息 ROI"
+                )
+                return
+        
         # 优先使用拖动后的 ROI，如果没有则使用框选的
         roi = self._roi_label._current_roi if self._roi_label._current_roi else self._roi_label.get_roi()
         
@@ -646,25 +1462,678 @@ class ROIConfigDialog(QDialog):
             QMessageBox.warning(self, "提示", "请先框选一个区域或拖动已有区域")
             return
         
-        roi_type = self.roi_type_combo.currentData()
         roi_name = self.ROI_TYPES.get(roi_type, roi_type)
         roi_t = self._norm_roi(roi)
-        self.current_rois[roi_type] = list(roi_t)
         
-        # 发送保存信号
-        self.roi_saved.emit(roi_type, roi)
-        self._last_emitted[roi_type] = roi_t
+        # ✅ 根据 ROI 类型处理坐标
+        saved_coords = None
+        if roi_type == 'guns_backpack_roi':
+            # 背包区域: 直接使用 (left, top, right, bottom) 格式（屏幕绝对坐标）
+            left, top, right, bottom = roi_t
+            backpack_coords = (left, top, right, bottom)
+            
+            self.current_rois[roi_type] = list(backpack_coords)
+            # 发送保存信号（使用原始坐标）
+            self.roi_saved.emit(roi_type, backpack_coords)
+            self._last_emitted[roi_type] = self._norm_roi(backpack_coords)
+            
+            # 更新 backpack_roi（用于后续相对坐标转换）
+            self.backpack_roi = backpack_coords
+            saved_coords = backpack_coords
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"✅ 背包区域已保存: {backpack_coords}")
+            
+            # ✅ 裁剪背包区域，准备阶段2
+            left, top, right, bottom = roi_t
+            width = right - left
+            height = bottom - top
+            self._backpack_abs_coords = (left, top, right, bottom)
+            self._backpack_pixmap = self._fullscreen_pixmap.copy(
+                int(left), int(top), int(width), int(height)
+            )
+            
+            print(f"\n✅ 背包区域已裁剪: {width}x{height}")
+            print(f"   准备进入阶段2...")
+            
+            # ✅ 自动切换到阶段2
+            self._setup_phase2_roi_selection()
+            
+            # ✅ 更新 ROI 类型下拉框（显示所有类型）
+            self._update_roi_type_combo()
+            
+            # 自动切换到第一个 ROI 类型
+            index = self.roi_type_combo.findData('Name_1')
+            if index >= 0:
+                self.roi_type_combo.blockSignals(True)
+                self.roi_type_combo.setCurrentIndex(index)
+                self.roi_type_combo.blockSignals(False)
+                self._last_roi_type = 'Name_1'
+            
+        elif roi_type == 'right_click_pos':
+            # 开镜坐标: 只取左上角点 (x, y)
+            left, top, right, bottom = roi_t
+            click_coords = (left, top)
+            
+            self.current_rois[roi_type] = list(click_coords)
+            self.roi_saved.emit(roi_type, click_coords)
+            self._last_emitted[roi_type] = click_coords
+            saved_coords = click_coords
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"✅ 开镜坐标已保存: {click_coords}")
+            
+        elif roi_type in self.RELATIVE_TO_BACKPACK:
+            # 枪械信息 ROI
+            # ✅ 如果在阶段2（背包模式），坐标天然就是相对坐标，无需转换
+            if self._phase == "roi" and hasattr(self._roi_label, '_mode') and self._roi_label._mode == "backpack":
+                # 直接使用框选的坐标（已经是相对坐标）
+                relative_roi = roi_t
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"✅ 阶段2框选: {roi_type} 直接使用相对坐标: {relative_roi}")
+            else:
+                # 阶段1（全屏模式），需要转换
+                relative_roi = self._convert_to_relative(roi_type, roi_t)
+            
+            self.current_rois[roi_type] = list(relative_roi)
+            # 发送保存信号（使用转换后的相对坐标）
+            self.roi_saved.emit(roi_type, relative_roi)
+            self._last_emitted[roi_type] = self._norm_roi(relative_roi)
+            saved_coords = relative_roi
+            
+        else:
+            # 其他 ROI 类型，直接保存
+            self.current_rois[roi_type] = list(roi_t)
+            # 发送保存信号
+            self.roi_saved.emit(roi_type, roi_t)
+            self._last_emitted[roi_type] = roi_t
+            saved_coords = roi_t
         
         self.status_label.setText(
-            f"已保存到配置: {roi_name} | {roi} | {self.resolution}（可继续调整其他类型）"
+            f"已保存到配置: {roi_name} | {roi_t} | {self.resolution}（可继续调整其他类型）"
         )
+        
+        # ✅ 显示裁剪预览，让用户确认
+        self._show_roi_preview(roi_type, roi_t, saved_coords)
+    
+    def _on_save_template(self):
+        """手动保存当前ROI的模板图片（用户自己选择模板名称）"""
+        import logging
+        logger = logging.getLogger(__name__)
+        from core.paths import res_path
+        
+        roi_type = self.roi_type_combo.currentData()
+        
+        # 非枪械类型不支持模板
+        if roi_type not in self.RELATIVE_TO_BACKPACK:
+            if roi_type == 'posture_roi':
+                # ✅ 姿势识别有固定模板名：None(站立), c(蹲下), z(趴下)
+                # 不用扫描已有模板，直接提供三个固定选项
+                pass  # 继续执行下面的姿势模板保存逻辑
+            else:
+                QMessageBox.information(
+                    self, "提示",
+                    "只有枪械配件类型（名称/倍镜/枪口/握把/枪托）才支持保存模板"
+                )
+                return
+        
+        if self._phase != "roi":
+            QMessageBox.information(
+                self, "提示",
+                "请先进入阶段2（框选背包区域）后再保存模板"
+            )
+            return
+        
+        # 获取当前 ROI 坐标
+        roi = None
+        if hasattr(self, '_roi_label') and self._roi_label:
+            roi = self._roi_label._current_roi or self._roi_label.get_roi()
+        
+        if not roi:
+            QMessageBox.warning(self, "提示", "请先在背包截图中框选一个区域")
+            return
+        
+        # 确定模板类别
+        category = None
+        if 'Name' in roi_type:
+            category = 'Name'
+        elif 'Scope' in roi_type:
+            category = 'Scope'
+        elif 'Muzzle' in roi_type:
+            category = 'Muzzle'
+        elif 'Grip' in roi_type:
+            category = 'Grip'
+        elif 'Stock' in roi_type:
+            category = 'Stock'
+        elif roi_type == 'posture_roi':
+            category = 'zishi'
+        
+        if not category:
+            return
+        
+        if roi_type == 'posture_roi':
+            # ✅ 姿势模板只有三个固定名称，简化流程
+            existing_names = ['None (站立)', 'c (蹲下)', 'z (趴下)']
+            # 跳过自动扫描和自动识别，直接显示选择框
+            selected_name = None
+            retry = True
+            while retry:
+                retry = False
+                selected, ok = QInputDialog.getItem(
+                    self,
+                    f"选择姿势模板 - {self.ROI_TYPES.get(roi_type)}",
+                    f"当前ROI坐标: {roi}\n"
+                    f"请选择对应的姿势:",
+                    existing_names,
+                    0,
+                    False  # 不可编辑，固定三个选项
+                )
+                if not ok or not selected.strip():
+                    logger.info(f"❌ 用户取消保存姿势模板")
+                    return
+                
+                # 提取实际文件名（去掉中文说明）
+                name_map = {'None (站立)': 'None', 'c (蹲下)': 'c', 'z (趴下)': 'z'}
+                selected_name = name_map.get(selected, selected)
+                
+                # 用户确认是否生成
+                reply = QMessageBox.question(
+                    self,
+                    "确认保存姿势模板",
+                    f"即将从当前位置截图生成姿势模板图片：\n"
+                    f"模板名称: {selected_name}.png\n"
+                    f"坐标: {roi}\n\n"
+                    f"确定要生成吗？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    # 执行保存
+                    self._save_template_from_roi(roi_type, roi, template_name=selected_name)
+                    self.status_label.setText(f"✅ 姿势模板已保存: {selected_name}.png")
+                    logger.info(f"✅ 用户保存姿势模板: {roi_type} -> {selected_name}.png")
+                    return
+                elif reply == QMessageBox.No:
+                    retry = True  # 返回重新选择
+            return
+        
+        # 扫描已有模板名称（三级目录优先）
+        existing_names = []
+        search_dirs = [
+            res_path('_internal', 'data', 'firearms', self.resolution, category),
+            res_path('_internal', 'data', 'firearms', 'default', category),
+            res_path('_internal', 'data', 'firearms', category),
+        ]
+        for d in search_dirs:
+            if os.path.exists(d):
+                for f in os.listdir(d):
+                    if f.lower().endswith('.png'):
+                        name = f[:-4]  # 去掉 .png
+                        if name not in existing_names:
+                            existing_names.append(name)
+        
+        # 优先显示已有模板名，none 放在最后
+        if 'none' in existing_names:
+            existing_names.remove('none')
+            existing_names.sort()
+            existing_names.append('none')
+        else:
+            existing_names.sort()
+        
+        # 尝试自动识别最佳匹配作为默认建议
+        # 先截取 ROI 图用于自动识别
+        try:
+            roi_norm = self._norm_roi(roi)
+            rel_left, rel_top, rel_right, rel_bottom = roi_norm
+            width = rel_right - rel_left
+            height = rel_bottom - rel_top
+            
+            if hasattr(self, '_backpack_pixmap') and self._backpack_pixmap and width > 0 and height > 0:
+                roi_pixmap = self._backpack_pixmap.copy(
+                    int(rel_left), int(rel_top), int(width), int(height)
+                )
+                qimage = roi_pixmap.toImage()
+                ptr = qimage.bits()
+                ptr.setsize(qimage.byteCount())
+                arr = np.array(ptr).reshape(qimage.height(), qimage.width(), 4)
+                roi_cv = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+                roi_gray = cv2.cvtColor(roi_cv, cv2.COLOR_BGR2GRAY)
+                auto_name, auto_conf = self._find_best_template_name(roi_gray, category)
+            else:
+                auto_name = None
+                auto_conf = 0.0
+        except Exception:
+            auto_name = None
+            auto_conf = 0.0
+        
+        # 构建选择列表：自动推荐的放最前面
+        all_names = list(existing_names)
+        if auto_name and auto_conf >= 0.3:
+            # 把自动识别到的移到最前面，前面加 ⭐ 标识
+            if auto_name in all_names:
+                all_names.remove(auto_name)
+            default_name = auto_name
+            all_names.insert(0, f"⭐{auto_name} (推荐, {auto_conf:.0%})")
+        else:
+            default_name = None
+        
+        # 再添加一个「输入自定义名称」的占位选项
+        all_names.append("——— 输入自定义名称 ———")
+        
+        # 下拉对话框让用户选择
+        selected, ok = QInputDialog.getItem(
+            self,
+            f"选择模板名称 - {self.ROI_TYPES.get(roi_type)}",
+            f"当前ROI坐标: {roi_norm}\n"
+            f"请选择或输入模板名称（可双击编辑自由输入）:",
+            all_names,
+            0,  # 默认选中第一个
+            True  # 可编辑，用户可自由输入
+        )
+        
+        if not ok or not selected.strip():
+            logger.info(f"❌ 用户取消选择模板名称: {roi_type}")
+            return
+        
+        # 清理用户选择的名称
+        selected_name = selected.strip()
+        # 去掉 ⭐ 前缀和 (推荐, xx%) 后缀
+        if selected_name.startswith('⭐'):
+            # 格式: "⭐xxx (推荐, xx%)"
+            end_idx = selected_name.find(' (推荐')
+            if end_idx > 1:
+                selected_name = selected_name[1:end_idx]
+        if selected_name == "——— 输入自定义名称 ———":
+            # 用户选了输入自定义名称却没改文字，跳到输入框
+            custom_name, ok2 = QInputDialog.getText(
+                self,
+                f"输入模板名称 - {self.ROI_TYPES.get(roi_type)}",
+                f"请输入模板名称（不包含扩展名）:\n"
+                f"可以输入英文或数字，例如: xiexiang\n"
+                f"建议与游戏内配件名称一致，SIFT 识别时根据文件名匹配",
+                QLineEdit.Normal,
+                ""
+            )
+            if not ok2 or not custom_name.strip():
+                logger.info(f"❌ 用户取消输入模板名称: {roi_type}")
+                return
+            selected_name = custom_name.strip()
+        
+        logger.info(f"✅ 用户选择模板名称: {selected_name} ({roi_type})")
+        
+        # 用户确认是否生成
+        roi_name = self.ROI_TYPES.get(roi_type, roi_type)
+        reply = QMessageBox.question(
+            self,
+            "确认保存模板",
+            f"即将从当前「{roi_name}」截图生成模板图片：\n"
+            f"模板名称: {selected_name}.png\n"
+            f"坐标: {roi_norm}\n\n"
+            f"确定要生成吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply != QMessageBox.Yes:
+            logger.info(f"❌ 用户取消保存模板: {roi_type}")
+            return
+        
+        # 执行保存（传入用户指定的名称，跳过自动识别）
+        self._save_template_from_roi(roi_type, roi_norm, template_name=selected_name)
+        
+        
+        self.status_label.setText(f"✅ 模板已保存: {selected_name}.png | 可继续调整其他类型")
+        logger.info(f"✅ 用户手动保存模板: {roi_type} -> {selected_name}.png")
+
+    def _find_best_template_name(self, roi_gray, category):
+        """
+        使用模板匹配找到置信度最高的基础模板名称
+        :param roi_gray: 裁剪后的 ROI 灰度图
+        :param category: 模板类别 (Name/Scope/Muzzle/Grip/Stock)
+        :return: (template_name, confidence) 或 (None, 0.0)
+        """
+        try:
+            from core.paths import res_path
+            
+            # ✅ 三级搜索：分辨率目录 → default 目录 → 根目录
+            search_dirs = [
+                res_path('_internal', 'data', 'firearms', self.resolution, category),
+                res_path('_internal', 'data', 'firearms', 'default', category),
+                res_path('_internal', 'data', 'firearms', category),
+            ]
+            
+            best_score = 0.0
+            best_name = None
+            
+            for search_dir in search_dirs:
+                if not os.path.exists(search_dir):
+                    continue
+                
+                for template_file in os.listdir(search_dir):
+                    if not template_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        continue
+                    
+                    template_path = os.path.join(search_dir, template_file)
+                    template_img = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+                    
+                    if template_img is None:
+                        continue
+                    
+                    try:
+                        from core.recognition import match_sift
+                        max_val = match_sift(roi_gray, template_img)
+                        
+                        if max_val > best_score:
+                            best_score = max_val
+                            # 去掉扩展名作为模板名称
+                            best_name = os.path.splitext(template_file)[0]
+                    except Exception:
+                        continue
+                
+                # ✅ 如果在当前目录找到了高置信度匹配，不再继续降级搜索
+                if best_score > 0.7:
+                    break
+            
+            return (best_name, best_score) if best_name else (None, 0.0)
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"查找最佳模板名失败: {e}")
+            return (None, 0.0)
+    
+    def _save_template_from_roi(self, roi_type, relative_roi, template_name=None):
+        """
+        从当前 ROI 截图中保存模板图片
+        :param roi_type: ROI 类型 (如 'Name_1', 'Scope_1')
+        :param relative_roi: 相对坐标 (left, top, right, bottom)
+        :param template_name: 手动指定的模板名称（不含扩展名），传入则跳过自动识别
+        """
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            from core.paths import res_path
+            
+            # 1. 确定模板类别 (Name/Scope/Muzzle/Grip/Stock/zishi)
+            category = None
+            if 'Name' in roi_type:
+                category = 'Name'
+            elif 'Scope' in roi_type:
+                category = 'Scope'
+            elif 'Muzzle' in roi_type:
+                category = 'Muzzle'
+            elif 'Grip' in roi_type:
+                category = 'Grip'
+            elif 'Stock' in roi_type:
+                category = 'Stock'
+            elif roi_type == 'posture_roi':
+                category = 'zishi'
+            
+            if not category:
+                return  # 不是枪械信息 ROI，不需要保存模板
+            
+            # 2. 从截图中裁剪 ROI
+            is_posture = (category == 'zishi')
+            
+            if is_posture:
+                # ✅ 姿势模板使用全屏截图（坐标是屏幕绝对坐标）
+                if not hasattr(self, '_fullscreen_pixmap') or self._fullscreen_pixmap is None:
+                    logger.warning(f"⚠️ 无法保存姿势模板 {roi_type}: 全屏截图不存在")
+                    return
+                src_pixmap = self._fullscreen_pixmap
+            else:
+                # ✅ 配件模板使用背包截图（坐标是相对背包坐标）
+                if not hasattr(self, '_backpack_pixmap') or self._backpack_pixmap is None:
+                    logger.warning(f"⚠️ 无法保存模板 {roi_type}: 背包截图不存在")
+                    return
+                src_pixmap = self._backpack_pixmap
+            
+            rel_left, rel_top, rel_right, rel_bottom = relative_roi
+            width = rel_right - rel_left
+            height = rel_bottom - rel_top
+            
+            if width <= 0 or height <= 0:
+                logger.warning(f"⚠️ 无法保存模板 {roi_type}: ROI 尺寸无效")
+                return
+            
+            # 从截图中裁剪
+            roi_pixmap = src_pixmap.copy(
+                int(rel_left), int(rel_top), int(width), int(height)
+            )
+            
+            # 3. 转换为 OpenCV 格式
+            qimage = roi_pixmap.toImage()
+            ptr = qimage.bits()
+            ptr.setsize(qimage.byteCount())
+            arr = np.array(ptr).reshape(qimage.height(), qimage.width(), 4)
+            roi_cv = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+            
+            # 4. 确定保存路径（✅ 始终按分辨率存储，不存在则自动创建）
+            template_dir = res_path('_internal', 'data', 'firearms', self.resolution, category)
+            
+            # ✅ 确保目录存在（不存在则自动创建）
+            os.makedirs(template_dir, exist_ok=True)
+            
+            # 5. 保存模板图片（灰度图）
+            roi_gray = cv2.cvtColor(roi_cv, cv2.COLOR_BGR2GRAY)
+            
+            # 6. ✅ 确定模板文件名
+            if template_name and template_name.strip():
+                # ✅ 用户手动指定名称，直接使用
+                tpl_name = template_name.strip()
+                if not tpl_name.endswith('.png'):
+                    tpl_name = f"{tpl_name}.png"
+                logger.info(f"🔍 {roi_type} 使用用户指定名称: {tpl_name}")
+                template_filename = tpl_name
+            else:
+                # ✅ 自动识别最佳名称（降级方案）
+                best_name, confidence = self._find_best_template_name(roi_gray, category)
+                
+                MATCH_NAME_THRESHOLD = 0.3  # 最低匹配置信度阈值
+                if best_name and confidence >= MATCH_NAME_THRESHOLD:
+                    template_filename = f"{best_name}.png"
+                    logger.info(f"🔍 {roi_type} 最佳匹配: {best_name} (置信度: {confidence:.2%})")
+                else:
+                    # 降级：使用 ROI 类型作为文件名
+                    template_filename = f"{roi_type.lower()}.png"
+                    if best_name:
+                        logger.info(f"⚠️ {roi_type} 最佳匹配 {best_name} 置信度 {confidence:.2%} < {MATCH_NAME_THRESHOLD}，使用默认名")
+            
+            template_path = os.path.join(template_dir, template_filename)
+            cv2.imwrite(template_path, roi_gray)
+            
+            logger.info(f"✅ 模板已保存: {template_path} ({width}x{height})")
+            
+            # 7. 清除模板缓存（让识别模块重新加载）
+            from core import recognition
+            if template_path in recognition._template_cache:
+                del recognition._template_cache[template_path]
+                logger.debug(f"🔄 已清除模板缓存: {template_path}")
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"保存模板失败 {roi_type}: {e}")
+    
+    def _show_roi_preview(self, roi_type, screen_coords, saved_coords):
+        """
+        显示 ROI 裁剪预览，让用户确认
+        :param roi_type: ROI 类型
+        :param screen_coords: 屏幕坐标 (left, top, right, bottom)
+        :param saved_coords: 保存的坐标（可能是相对坐标或转换后的坐标）
+        """
+        try:
+            from PIL import ImageGrab
+            import cv2
+            import numpy as np
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"🔍 预览调试: roi_type={roi_type}, screen_coords={screen_coords}, saved_coords={saved_coords}")
+            
+            # ✅ 根据 ROI 类型决定如何裁剪
+            if roi_type == 'guns_backpack_roi':
+                # 背包区域: saved_coords 是 (left, top, right, bottom)
+                left, top, right, bottom = saved_coords
+                bbox = (left, top, right, bottom)
+                preview_title = f"📦 背包区域预览 - {self.resolution}"
+                logger.info(f"📦 背包预览 bbox: {bbox}")
+                
+            elif roi_type == 'right_click_pos':
+                # 开镜坐标: 只显示一个小区域
+                x, y = saved_coords
+                margin = 50  # 周围 50 像素
+                bbox = (max(0, x - margin), max(0, y - margin), 
+                       x + margin, y + margin)
+                preview_title = f"🎯 开镜坐标预览 ({x}, {y})"
+                logger.info(f"🎯 开镜预览 bbox: {bbox}")
+                
+            elif roi_type in self.RELATIVE_TO_BACKPACK:
+                # 枪械信息: 需要从背包区域中裁剪
+                if not self.backpack_roi or len(self.backpack_roi) != 4:
+                    logger.warning(f"⚠️ 无法预览 {roi_type}: 未配置背包区域")
+                    return  # 没有背包区域，无法预览
+                
+                backpack_left, backpack_top, backpack_right, backpack_bottom = self.backpack_roi
+                logger.info(f"📦 背包区域: left={backpack_left}, top={backpack_top}, right={backpack_right}, bottom={backpack_bottom}")
+                
+                # saved_coords 应该是相对坐标 (left, top, right, bottom)
+                rel_left, rel_top, rel_right, rel_bottom = saved_coords
+                logger.info(f"🔄 相对坐标: ({rel_left}, {rel_top}, {rel_right}, {rel_bottom})")
+                
+                # 转换为绝对坐标
+                abs_left = backpack_left + rel_left
+                abs_top = backpack_top + rel_top
+                abs_right = backpack_left + rel_right
+                abs_bottom = backpack_top + rel_bottom
+                
+                bbox = (abs_left, abs_top, abs_right, abs_bottom)
+                preview_title = f"🔫 {self.ROI_TYPES.get(roi_type)} 预览 - 相对背包"
+                logger.info(f"✅ 绝对坐标 bbox: {bbox}")
+                
+            else:
+                # 其他 ROI（如姿势识别）
+                left, top, right, bottom = screen_coords
+                bbox = (left, top, right, bottom)
+                preview_title = f"📍 {self.ROI_TYPES.get(roi_type)} 预览"
+                logger.info(f"📍 其他ROI bbox: {bbox}")
+            
+            # 截取 ROI 区域
+            logger.info(f"📸 开始截图: bbox={bbox}")
+            screenshot = ImageGrab.grab(bbox=bbox)
+            img_np = np.array(screenshot)
+            logger.info(f"✅ 截图成功: {img_np.shape}")
+            
+            # 转换为 OpenCV 格式 (BGR)
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+            
+            # 获取尺寸信息
+            h, w = img_bgr.shape[:2]
+            size_info = f"尺寸: {w}x{h} 像素"
+            
+            # 在图像上添加文字说明
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(img_bgr, preview_title, (5, 20), font, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+            cv2.putText(img_bgr, size_info, (5, 40), font, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
+            
+            # 如果是枪械信息，显示相对坐标
+            if roi_type in self.RELATIVE_TO_BACKPACK:
+                coord_info = f"相对坐标: {saved_coords}"
+                cv2.putText(img_bgr, coord_info, (5, 60), font, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+            
+            # 调整图像大小（如果太大）
+            max_display_size = 400
+            if w > max_display_size or h > max_display_size:
+                scale = min(max_display_size / w, max_display_size / h)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                img_bgr = cv2.resize(img_bgr, (new_w, new_h))
+            
+            # ✅ 使用 PyQt 对话框显示预览（更可靠）
+            self._show_preview_dialog(img_bgr, preview_title, saved_coords, roi_type)
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"✅ 已显示 ROI 预览窗口: {preview_title}")
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"显示 ROI 预览失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # 不弹出错误提示，避免干扰用户
+    
+    def _show_preview_dialog(self, img_bgr, title, saved_coords, roi_type):
+        """
+        使用 PyQt 对话框显示 ROI 预览
+        :param img_bgr: OpenCV 格式的图像 (BGR)
+        :param title: 窗口标题
+        :param saved_coords: 保存的坐标
+        :param roi_type: ROI 类型
+        """
+        try:
+            import cv2
+            from PIL import Image
+            import io
+            
+            # 转换 OpenCV (BGR) -> PIL (RGB)
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+            
+            # 转换为 QPixmap
+            buffer = io.BytesIO()
+            pil_img.save(buffer, format='PNG')
+            buffer.seek(0)
+            
+            pixmap = QPixmap()
+            pixmap.loadFromData(buffer.read())
+            
+            # 创建预览对话框
+            dialog = QDialog(self)
+            dialog.setWindowTitle(title)
+            dialog.setModal(False)  # 非模态，允许继续操作
+            
+            layout = QVBoxLayout(dialog)
+            
+            # 显示图像
+            label = QLabel()
+            label.setPixmap(pixmap)
+            label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(label)
+            
+            # 添加说明文字
+            info_label = QLabel(
+                f"✅ 已保存！\n"
+                f"坐标: {saved_coords}\n"
+                f"如果内容不正确，请重新框选并保存"
+            )
+            info_label.setAlignment(Qt.AlignCenter)
+            info_label.setStyleSheet("color: #00ff00; font-weight: bold; padding: 10px;")
+            layout.addWidget(info_label)
+            
+            # 关闭按钮
+            close_btn = QPushButton("关闭预览")
+            close_btn.clicked.connect(dialog.close)
+            layout.addWidget(close_btn)
+            
+            dialog.setLayout(layout)
+            dialog.show()
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"显示 PyQt 预览失败: {e}")
     
     def _close_dialog(self):
         if not self._ok_to_close():
             return
-        # accept() 会再触发 closeEvent，避免未保存提示弹两次
+        # ✅ 使用 close() 而不是 accept()，避免误触发程序退出
         self._allow_close_without_prompt = True
-        self.accept()
+        self.close()
 
     def closeEvent(self, event):
         if self._allow_close_without_prompt:

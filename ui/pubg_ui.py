@@ -105,6 +105,38 @@ QPushButton#Stopbtn:disabled {
     border-color: #2a2a3a;
 }
 
+/* ── 标题栏齿轮工具按钮 ── */
+QToolButton#ToolsBtn {
+    background-color: transparent;
+    color: #7a7a9a;
+    border: none;
+    font-size: 16pt;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+QToolButton#ToolsBtn:hover {
+    background-color: #2a2a4a;
+    color: #ffba08;
+}
+QToolButton#ToolsBtn::menu-indicator {
+    image: none;
+}
+QMenu#ToolsMenu {
+    background-color: #1a1a2e;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    padding: 4px;
+}
+QMenu#ToolsMenu::item {
+    padding: 6px 20px;
+    color: #e0e0e0;
+    border-radius: 3px;
+}
+QMenu#ToolsMenu::item:selected {
+    background-color: #ffba08;
+    color: #1a1a2e;
+}
+
 /* ── RadioButton ── */
 QRadioButton {
     spacing: 4px;
@@ -287,6 +319,22 @@ class Ui_PUBG(object):
         self._version_label.setObjectName("VersionLabel")
         tb_layout.addWidget(self._version_label)
 
+        # ⚙️ 齿轮工具按钮（ROI 配置 + 批量生成模板）
+        self.ToolsBtn = QtWidgets.QToolButton(title_bar)
+        self.ToolsBtn.setObjectName("ToolsBtn")
+        self.ToolsBtn.setText("⚙")
+        self.ToolsBtn.setToolTip("工具（ROI 配置 / 批量生成模板）")
+        self.ToolsBtn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.ToolsBtn.setArrowType(QtCore.Qt.NoArrow)
+
+        self.ToolsMenu = QtWidgets.QMenu(self.ToolsBtn)
+        self.ToolsMenu.setObjectName("ToolsMenu")
+        self.actionROIConfig = self.ToolsMenu.addAction("ROI 配置 (F8)")
+        self.actionBatchTemplate = self.ToolsMenu.addAction("批量生成模板 (Ctrl+Alt+F8)")
+        self.ToolsBtn.setMenu(self.ToolsMenu)
+
+        tb_layout.addWidget(self.ToolsBtn)
+
         main_layout.addWidget(title_bar)
 
         # ────── 内容区 ──────
@@ -462,10 +510,6 @@ class Ui_PUBG(object):
         self.StatusInfo.setReadOnly(True)
         self.StatusInfo.setText("未启动...")
         btn_row.addWidget(self.StatusInfo, 3)
-
-        self.ROIConfigBtn = QtWidgets.QPushButton("ROI 配置", content)
-        self.ROIConfigBtn.setToolTip("按 F8 快速打开 ROI 配置工具")
-        btn_row.addWidget(self.ROIConfigBtn, 1)
 
         self.DebugModeBtn = QtWidgets.QPushButton("调试: 关", content)
         self.DebugModeBtn.setToolTip("与 F9 相同：全量 DEBUG + INPUT_TRACE + 开镜姿势存图 logs/posture_debug/")

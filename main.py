@@ -9,13 +9,13 @@ from data import fire_data
 from core import process as Process
 from core.paths import res_path
 from PyQt5.QtCore import QThread, Qt, pyqtSignal, QEvent
-from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QMainWindow
+from PyQt5.QtWidgets import QApplication, QWidget, QMessageBox, QMainWindow, QDialog
 from ui.pubg_ui import Ui_PUBG
 from input.mouse_listener import AppMainMouseListener
 from input.key_listener import AppMainKeyListener
 from ui.overlay_hud import GameHUD
 from ui.roi_config_dialog import ROIConfigDialog
-from data.resolution_setting import RESOLUTION_SETTINGS
+import os
 
 VERSION = "1.0.0"
 # 唯一官方发布页（用于启动时醒目标识，减少倒卖与二改包）
@@ -23,6 +23,7 @@ OFFICIAL_GITHUB_URL = "https://github.com/2474942479/PUBG-automatically-recogniz
 OFFICIAL_TAGLINE = "非本仓库/作者渠道获取的版本无保障；禁止商用倒卖与技术盗窃。"
 logger = logging.getLogger(__name__)
 PC = None  # 全局 ProcessClass 实例
+DEBUG_MODE = False  # Nuitka 编译需要模块级声明，默认关闭
 
 
 def setup_logging():
@@ -40,10 +41,6 @@ def setup_logging():
     root = logging.getLogger()
     root.setLevel(logging.INFO)  # ✅ 默认 INFO 级别
     root.addHandler(handler)
-    
-    # 与 F9 / config.debug_mode 同步，启动后在 __main__ 里对齐
-    global DEBUG_MODE
-    DEBUG_MODE = False
 
 
 def setup_exception_handler():
@@ -90,7 +87,7 @@ def toggle_debug_mode():
     - 全量日志级别 DEBUG/INFO
     - [INPUT_TRACE] 行（Tab/开镜等）
     - 开镜姿势识别存图 logs/posture_debug/（与 PC.debug_input_trace 一致）
-    - 写回 config.json 的 debug_mode
+    - 仅在程序生命周期内有效，不持久化到配置
     """
     global DEBUG_MODE
     from core.process import ProcessClass
@@ -99,9 +96,9 @@ def toggle_debug_mode():
     try:
         pc = ProcessClass()
         pc.debug_input_trace = DEBUG_MODE
-        pc.save_config_data("debug_mode", DEBUG_MODE)
+        # ✅ 不再保存到 config.json，仅在程序生命周期内有效
     except Exception as e:
-        logger.warning("保存 debug_mode 失败: %s", e)
+        logger.warning("切换调试模式失败: %s", e)
     if DEBUG_MODE:
         logger.info(
             "调试总开关: ON (F9 关) — DEBUG + INPUT_TRACE + 姿势调试图，见 logs/app.log / posture_debug/"
@@ -127,15 +124,13 @@ def toggle_debug_mode():
 
 def debug_hotkey_f9(key_listener):
     """
-    F9 与主界面「调试」按钮共用：切换调试 + 开时可选跑姿势测试线程。
-    key_listener 可为 None（未点「启动」时仅切换日志开关）。
+    F9 与主界面「调试」按钮共用：仅切换调试开关
+    - 全量日志级别 DEBUG/INFO
+    - [INPUT_TRACE] 行（Tab/开镜等）
+    - 开镜姿势识别存图 logs/posture_debug/（与 PC.debug_input_trace 一致）
+    - 仅在程序生命周期内有效，不持久化到配置
     """
-    from threading import Thread
-    from core.process import ProcessClass
     toggle_debug_mode()
-    import main as m
-    if m.DEBUG_MODE and key_listener and getattr(ProcessClass(), "mouse_listener", None):
-        Thread(target=key_listener._test_posture_recognition).start()
 
 
 class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidget和UI类
@@ -155,6 +150,49 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
                           '8倍(Shift)': '8bei_shift', '15倍(Shift)': '15bei_shift',
                           'shift': 'shift'}
         self.init_ui()  # 调用初始化UI方法
+
+    def closeEvent(self, event):
+        """主窗口关闭事件处理 - 确保关闭主窗口时才退出程序"""
+        # 确认是否真的要退出程序
+        reply = QMessageBox.question(
+            self, 
+            '确认退出',
+            '确定要退出PUBG宏识别工具吗？',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # ✅ 关闭时关闭调试模式（不持久化）
+            try:
+                PC.debug_input_trace = False
+                import main as m
+                m.DEBUG_MODE = False
+            except:
+                pass
+            
+            # 停止所有后台线程和服务
+            if hasattr(self, 'my_mouse_thread') and self.my_mouse_thread:
+                try:
+                    self.my_mouse_thread.stop()
+                except:
+                    pass
+            if hasattr(self, 'my_key_thread') and self.my_key_thread:
+                try:
+                    self.my_key_thread.stop()
+                except:
+                    pass
+            if hasattr(self, '_hud') and self._hud:
+                try:
+                    self._hud.close()
+                except:
+                    pass
+            
+            event.accept()
+            # ✅ 真正退出应用程序
+            QApplication.quit()
+        else:
+            event.ignore()
 
     def init_ui(self):
         self.setupUi(self)
@@ -207,7 +245,9 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.Startbtn.clicked.connect(self.start)  # 绑定开始按钮事件
         self.Stopbtn.clicked.connect(self.stop)  # 绑定停止按钮事件
         self.Pausebtn.clicked.connect(self.pause)  # 绑定暂停按钮事件
-        self.ROIConfigBtn.clicked.connect(self.open_roi_config)  # 绑定 ROI 配置按钮事件
+        # ⚙️ 菜单工具按钮（齿轮图标，标题栏）
+        self.actionROIConfig.triggered.connect(self.open_roi_config)  # ROI 配置
+        self.actionBatchTemplate.triggered.connect(self.batch_generate_templates)  # 批量生成模板
         self.DebugModeBtn.clicked.connect(self.on_debug_mode_clicked)
         self.ResolutionBtn.clicked.connect(self.Save_Config_Resolution)  # 绑定分辨率保存按钮事件
         self.SensitivityBtn.clicked.connect(self.Save_Config_Sensitivity)  # 绑定灵敏度保存按钮事件
@@ -332,22 +372,26 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         :return:
         """
         results = PC.get_guns_result()  # 获取枪械识别结果
+        logger.info(f"📊 UI 更新枪械数据: Result1={results[0]}, Result2={results[1]}")
+        
         for idx, result in enumerate(results, start=1):  # 遍历结果
             # ✅ 修复：只要 result 不是 None 就更新 UI（包括包含 "None" 值的字典）
             if result is not None:  # 如果有结果（即使是空状态）
-                self.__getattribute__(f"Name{idx}Name").setText(self.Get_GUNS_CH(result.get("Name", "None"), "Name"))  # 设置枪械名称
+                name = result.get("Name", "None")
+                scope = result.get("Scope", "none")
+                muzzle = result.get("Muzzle", "none")
+                grip = result.get("Grip", "none")
+                stock = result.get("Stock", "none")
                 
-                # ✅ 修复：使用 get_current_scope() 获取正确的倍镜模式（支持双模式切换）
-                # 临时保存当前枪械槽位，让 get_current_scope() 知道查询哪把枪
-                old_firearms = PC.Current_firearms
-                PC.Current_firearms = idx
-                scope_name = PC.get_current_scope()
-                PC.Current_firearms = old_firearms
+                logger.info(f"🔫 {idx}号枪: Name={name}, Scope={scope}, Muzzle={muzzle}, Grip={grip}, Stock={stock}")
                 
-                self.__getattribute__(f"Scope{idx}Name").setText(self.Get_GUNS_CH(scope_name, "Scope"))  # 设置镜类型
-                self.__getattribute__(f"Muzzle{idx}Name").setText(self.Get_GUNS_CH(result.get("Muzzle", "none"), "Muzzle"))  # 设置枪口类型
-                self.__getattribute__(f"Grip{idx}Name").setText(self.Get_GUNS_CH(result.get("Grip", "none"), "Grip"))  # 设置握把类型
-                self.__getattribute__(f"Butt{idx}Name").setText(self.Get_GUNS_CH(result.get("Stock", "none"), "Stock"))  # 设置枪托类型
+                self.__getattribute__(f"Name{idx}Name").setText(self.Get_GUNS_CH(name, "Name"))  # 设置枪械名称
+                self.__getattribute__(f"Scope{idx}Name").setText(self.Get_GUNS_CH(scope, "Scope"))  # 设置镜类型
+                self.__getattribute__(f"Muzzle{idx}Name").setText(self.Get_GUNS_CH(muzzle, "Muzzle"))  # 设置枪口类型
+                self.__getattribute__(f"Grip{idx}Name").setText(self.Get_GUNS_CH(grip, "Grip"))  # 设置握把类型
+                self.__getattribute__(f"Butt{idx}Name").setText(self.Get_GUNS_CH(stock, "Stock"))  # 设置枪托类型
+            else:
+                logger.warning(f"⚠️ {idx}号枪识别结果为 None")
     
     def Init_UI_Sensitivity(self):  # 初始化UI灵敏度
         SelectValue = self.SensitivitySelect.currentText()  # 获取当前选择的灵敏度
@@ -493,6 +537,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.my_key_thread.keyInfo.connect(self.onKeyPressed)  # 绑定键盘事件
         self.my_mouse_thread.mouseClicked.connect(self.onKeyPressed)  # 绑定鼠标事件
         self.my_key_thread.roi_config_requested.connect(self.open_roi_config)  # 绑定 ROI 配置快捷键
+        self.my_key_thread.batch_template_requested.connect(self.batch_generate_templates)  # 绑定批量生成模板快捷键 (Ctrl+Alt+F8)
         
         self.SetStatus()  # 设置状态
         self.StatusInfo.setText('程序运行中.....')  # 更新状态信息
@@ -549,116 +594,172 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         if action:  # 如果有处理函数
             action(*args)  # 调用处理函数
     
+    def batch_generate_templates(self):
+        """
+        批量生成模板按钮回调。
+        先截屏识别，弹出确认对话框让用户勾选，再写入文件。
+        """
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+
+            # 1. 提示用户准备
+            reply = QMessageBox.question(
+                self,
+                "批量生成模板",
+                "即将从当前屏幕截取画面，批量处理所有背包 ROI 区域。\n\n"
+                "【请先做好准备】\n"
+                " 1. 确保游戏在前台运行\n"
+                " 2. 按 Tab 打开背包\n"
+                " 3. 切换到要制作模板的枪械（1号位或2号位）\n"
+                " 4. 确保已用 ROI 工具配置好所有背包坐标\n\n"
+                "点击「确定」后立即截图。\n"
+                "截图完成后会弹出确认窗口，你可以勾选要保存的项。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+
+            if reply != QMessageBox.Yes:
+                return
+
+            # 2. 第一阶段：收集候选
+            self.Init_UI_LOG("📸 正在截取并识别背包配件…")
+            from PyQt5.QtWidgets import QApplication
+            from core.template_batch import collect_candidates, save_selected
+            import time
+            resolution = PC.Monitor
+            t0 = time.time()
+
+            def _log_callback(msg):
+                self.Init_UI_LOG(msg)
+                QApplication.processEvents()
+
+            candidates, error = collect_candidates(
+                resolution, ui_log_callback=_log_callback
+            )
+            elapsed_phase1 = time.time() - t0
+
+            if error:
+                self.Init_UI_LOG(f"❌ {error}")
+                return
+
+            self.Init_UI_LOG(f"⏱️ 识别完成，耗时: {elapsed_phase1:.1f}秒")
+
+            # 3. 弹出确认对话框
+            from ui.template_confirm_dialog import TemplateConfirmDialog
+            confirm = TemplateConfirmDialog(candidates, self)
+            if confirm.exec_() != QDialog.Accepted:
+                self.Init_UI_LOG("⏹️ 用户取消，未保存任何模板")
+                return
+
+            # 4. 第二阶段：保存选中项
+            t1 = time.time()
+            result = save_selected(
+                candidates, confirm.selected_indices,
+                resolution,
+                name_overrides=getattr(confirm, 'name_overrides', None),
+                ui_log_callback=_log_callback
+            )
+            elapsed_phase2 = time.time() - t1
+            self.Init_UI_LOG(f"⏱️ 保存耗时: {elapsed_phase2:.1f}秒")
+            self.Init_UI_LOG(f"⏱️ 总计耗时: {time.time() - t0:.1f}秒")
+
+        except Exception as e:
+            import traceback
+            self.Init_UI_LOG(f"❌ 批量生成模板失败: {e}\n{traceback.format_exc()}")
+    
     def open_roi_config(self):
         """打开 ROI 配置对话框"""
         try:
+            logger.info("🔍 F8/按钮触发：开始打开 ROI 配置对话框")
             resolution = PC.Monitor
+            logger.info(f"📊 当前分辨率: {resolution}")
             
-            # 获取当前分辨率的所有 ROI 配置
+            # ✅ 暂停自动姿势识别，避免在配置 ROI 时不断截图
+            original_posture_roi = PC.posture_roi
+            PC.posture_roi = None
+            logger.info("已暂停自动姿势识别（ROI 配置中）")
+            
+            # ✅ 从 roi_config.json 加载当前分辨率的所有 ROI 配置
+            import json
+            from core.paths import res_path
+            
+            config_file = res_path('Config', 'roi_config.json')
             current_rois = {}
-            if resolution in RESOLUTION_SETTINGS:
-                current_rois = RESOLUTION_SETTINGS[resolution].copy()
             
-            # 创建对话框
-            dialog = ROIConfigDialog(resolution, current_rois, self)
-            
-            # 连接保存信号
-            dialog.roi_saved.connect(self._on_roi_saved)
-            
-            # 显示对话框
-            dialog.exec_()
-            
-        except Exception as e:
-            import traceback
-            error_msg = traceback.format_exc()
-            logger.error(f"打开 ROI 配置失败: {error_msg}")
-            QMessageBox.critical(self, "错误", f"打开 ROI 配置失败:\n{e}")
-    
-    def _on_roi_saved(self, roi_type, roi_coords):
-        """ROI 保存成功回调"""
-        try:
-            resolution = PC.Monitor
-            
-            # 更新内存中的配置
-            if resolution not in RESOLUTION_SETTINGS:
-                RESOLUTION_SETTINGS[resolution] = {}
-            
-            RESOLUTION_SETTINGS[resolution][roi_type] = list(roi_coords)
-            
-            # 如果是姿势 ROI，同时更新 ProcessClass
-            if roi_type == 'posture_roi':
-                PC.posture_roi = roi_coords
-                logger.info(f"姿势识别 ROI 已更新: {roi_coords}")
-            
-            # 保存到文件
-            self._save_resolution_setting_file()
-            
-            # 显示提示
-            roi_names = {
-                'posture_roi': '姿势识别',
-                'Name_1': '1号枪-名称',
-                'Scope_1': '1号枪-倍镜',
-                'Muzzle_1': '1号枪-枪口',
-                'Grip_1': '1号枪-握把',
-                'Stock_1': '1号枪-枪托',
-                'Name_2': '2号枪-名称',
-                'Scope_2': '2号枪-倍镜',
-                'Muzzle_2': '2号枪-枪口',
-                'Grip_2': '2号枪-握把',
-                'Stock_2': '2号枪-枪托',
-            }
-            roi_name = roi_names.get(roi_type, roi_type)
-            self.Init_UI_LOG(f"✅ {roi_name} ROI 已保存: {roi_coords}")
-            
-        except Exception as e:
-            import traceback
-            error_msg = traceback.format_exc()
-            logger.error(f"保存 ROI 失败: {error_msg}")
-            QMessageBox.critical(self, "错误", f"保存 ROI 失败:\n{e}")
-    
-    def _save_resolution_setting_file(self):
-        """保存 resolution_setting.py 文件"""
-        import os
-        import re
-        
-        setting_file = res_path('data', 'resolution_setting.py')
-        
-        try:
-            # 读取原文件
-            with open(setting_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # 为每个分辨率生成新的字典内容
-            resolution = PC.Monitor
-            if resolution in RESOLUTION_SETTINGS:
-                # 构建新的分辨率配置字符串
-                new_config = self._build_resolution_config(resolution, RESOLUTION_SETTINGS[resolution])
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    roi_config = json.load(f)
                 
-                # 使用正则表达式替换对应分辨率的配置
-                pattern = rf"('{resolution}'\s*:\s*\{{)[^}}]*(\}},?)"
-                replacement = f"\\1\n{new_config}\n    \\2"
-                new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-                
-                if new_content != content:
-                    with open(setting_file, 'w', encoding='utf-8') as f:
-                        f.write(new_content)
-                    logger.info(f"配置文件已更新: {setting_file}")
+                if resolution in roi_config:
+                    current_rois = roi_config[resolution].copy()
+                    logger.info(f"📋 从 roi_config.json 加载了 {len(current_rois)} 个 ROI 配置")
                 else:
-                    logger.warning("未能更新配置文件，请手动检查")
-        
-        except Exception as e:
-            logger.error(f"保存配置文件失败: {e}")
-            raise
-    
-    def _build_resolution_config(self, resolution, config_dict):
-        """构建分辨率配置字符串"""
-        lines = []
-        for key, value in config_dict.items():
-            if isinstance(value, (list, tuple)):
-                lines.append(f"        '{key}': {list(value)},")
+                    logger.warning(f"⚠️ 分辨率 {resolution} 在 roi_config.json 中没有配置")
             else:
-                lines.append(f"        '{key}': {value},")
-        return '\n'.join(lines)
+                logger.warning(f"⚠️ ROI 配置文件不存在: {config_file}")
+            
+            # ✅ 加载特殊配置：背包区域和开镜坐标（从 roi_config.json 读取）
+            # 【格式规范】背包区域: [left, top, right, bottom]（屏幕绝对坐标）
+            with open(config_file, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+            
+            guns_backpack = full_config.get('_GUNS_REOLUTION_SETTINGS', {}).get(resolution)
+            if guns_backpack:
+                current_rois['guns_backpack_roi'] = list(guns_backpack)
+                logger.info(f"📦 加载背包区域: {guns_backpack}")
+            else:
+                logger.warning(f"⚠️ 未找到分辨率 {resolution} 的背包区域配置")
+            
+            # 创建对话框（不设置父窗口，使其成为独立窗口）
+            logger.info("🛠️ 创建 ROIConfigDialog...")
+            dialog = ROIConfigDialog(resolution, current_rois)
+            logger.info("✅ ROIConfigDialog 创建成功")
+            
+            # ✅ 连接 roi_saved 信号：每次保存立即写入 roi_config.json
+            def on_roi_saved(roi_type, roi_coords):
+                try:
+                    config_file = res_path('Config', 'roi_config.json')
+                    config_data = {}
+                    if os.path.exists(config_file):
+                        with open(config_file, 'r', encoding='utf-8') as f:
+                            config_data = json.load(f)
+                    
+                    if roi_type == 'guns_backpack_roi':
+                        if '_GUNS_REOLUTION_SETTINGS' not in config_data:
+                            config_data['_GUNS_REOLUTION_SETTINGS'] = {}
+                        config_data['_GUNS_REOLUTION_SETTINGS'][resolution] = list(roi_coords)
+                    elif roi_type == 'right_click_pos':
+                        if '_CLICK_POSITION' not in config_data:
+                            config_data['_CLICK_POSITION'] = {}
+                        config_data['_CLICK_POSITION'][resolution] = list(roi_coords)
+                    else:
+                        if resolution not in config_data:
+                            config_data[resolution] = {}
+                        config_data[resolution][roi_type] = list(roi_coords)
+                    
+                    with open(config_file, 'w', encoding='utf-8') as f:
+                        json.dump(config_data, f, ensure_ascii=False, indent=2)
+                    logger.info(f"💾 {roi_type} 已写入 roi_config.json")
+                except Exception as ex:
+                    logger.error(f"❌ 写入 ROI 配置失败: {ex}")
+            
+            dialog.roi_saved.connect(on_roi_saved)
+                
+            # 显示对话框（阻塞直到关闭）
+            logger.info("📖 显示 ROI 配置对话框 (exec_)...")
+            result = dialog.exec_()
+            logger.info(f"📕 ROI 配置对话框关闭，返回码: {result}")
+                
+            # ✅ 恢复自动姿势识别（重新加载最新配置）
+            PC._load_posture_roi_from_resolution()
+            logger.info("已恢复自动姿势识别（重新加载配置）")
+            
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            logger.error(f"❌ 打开 ROI 配置失败: {error_msg}")
+            QMessageBox.critical(self, "错误", f"打开 ROI 配置失败:\n{e}")
 
 if __name__ == '__main__':
     setup_logging()
@@ -667,10 +768,15 @@ if __name__ == '__main__':
     logger.info("%s", OFFICIAL_TAGLINE)
 
     app = QApplication([])
+    # 设置退出策略：不自动退出，由我们控制
+    app.setQuitOnLastWindowClosed(False)
     PC = Process.ProcessClass()
-    sync_debug_mode_from_config()
-    if DEBUG_MODE:
-        logger.info("已从 config 恢复调试总开关: ON (F9 关闭)")
+    
+    # ✅ 调试模式默认关闭，仅在程序生命周期内有效，不从配置加载
+    import main as m
+    m.DEBUG_MODE = False
+    _apply_debug_state_to_logging()
+    logger.info("📝 调试模式: 关闭 (F9 开启，仅本次运行有效)")
 
     Main = AppManager()
     Main.show()
