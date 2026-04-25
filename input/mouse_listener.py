@@ -129,7 +129,8 @@ class AppMainMouseListener(QThread):  # 定义鼠标监听器类，继承自QThr
     def _auto_recognize_posture(self):
         """
         自动识别姿势（在独立线程中执行）
-        ✅ 每次开镜都强制识别和更新，不跳过
+        ✅ 识别成功时直接赋值（不走 Change_posture 的 toggle 逻辑）
+        ✅ 识别失败时保持当前姿势不变
         """
         import time
         
@@ -140,14 +141,15 @@ class AppMainMouseListener(QThread):  # 定义鼠标监听器类，继承自QThr
         posture = self.PC.capture_and_recognize_posture(debug=dbg)
 
         if posture:
-            # ✅ 每次都更新姿势，不跳过
-            self.PC.Change_posture(posture)
+            # ✅ 直接赋值，不用 Change_posture（图像识别是绝对结果，不需要 toggle）
+            self.PC.Current_posture = posture
             self.mouseClicked.emit('p', (posture,))
             mode_name = {"None": "站立", "c": "蹲下", "z": "趴下"}.get(posture, "未知")
             self.mouseClicked.emit('l', (f"🎯 姿势识别: {mode_name}",))
         else:
+            # ✅ 识别失败，保持当前姿势不变（不默认站立）
             if dbg:
-                self.mouseClicked.emit('l', ("⚠️ 姿势识别失败，请查看 logs/posture_debug/ 目录中的截图",))
+                self.mouseClicked.emit('l', ("⚠️ 姿势识别失败，保持当前姿势不变",))
 
     def stop_listener(self):  # 停止鼠标监听
         if self.listener:  # 如果鼠标监听器存在

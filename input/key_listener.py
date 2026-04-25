@@ -136,6 +136,8 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
             )
             
             if posture:
+                # ✅ 直接赋值，不用 Change_posture（图像识别是绝对结果）
+                self.PC.Current_posture = posture
                 mode_name = {"None": "站立", "c": "蹲下", "z": "趴下"}.get(posture, "未知")
                 self.keyInfo.emit('l', (f"✅ 姿势识别测试成功: {mode_name}",))
                 self.keyInfo.emit('p', (posture,))
