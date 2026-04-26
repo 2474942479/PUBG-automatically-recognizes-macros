@@ -41,19 +41,66 @@ def setup_logging():
             except Exception:
                 pass  # 文件被占用时跳过
     os.makedirs(log_dir, exist_ok=True)
-    handler = RotatingFileHandler(
+    
+    # ✅ 通用日志：所有模块都写入 app.log
+    app_handler = RotatingFileHandler(
         os.path.join(log_dir, 'app.log'),
         mode='w',  # 每次启动清空旧日志
         maxBytes=5 * 1024 * 1024,
         backupCount=3,
         encoding='utf-8'
     )
-    handler.setFormatter(logging.Formatter(
+    app_handler.setFormatter(logging.Formatter(
         '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     ))
+    
+    # ✅ 背包配件识别日志：只记录 core.recognition 模块的输出
+    backpack_handler = RotatingFileHandler(
+        os.path.join(log_dir, 'backpack_recognition.log'),
+        mode='w',
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding='utf-8'
+    )
+    backpack_handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s'
+    ))
+    backpack_handler.addFilter(_BackpackLogFilter())
+    
+    # ✅ HUD 枪械识别日志：只记录 HUD 枪械图标相关的输出
+    hud_handler = RotatingFileHandler(
+        os.path.join(log_dir, 'hud_recognition.log'),
+        mode='w',
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding='utf-8'
+    )
+    hud_handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s'
+    ))
+    hud_handler.addFilter(_HUDLogFilter())
+    
     root = logging.getLogger()
     root.setLevel(logging.INFO)  # ✅ 默认 INFO 级别
-    root.addHandler(handler)
+    root.addHandler(app_handler)
+    root.addHandler(backpack_handler)
+    root.addHandler(hud_handler)
+
+
+class _BackpackLogFilter(logging.Filter):
+    """背包配件识别日志过滤器：记录 core.recognition 中所有非 HUD 枪械图标的日志"""
+    def filter(self, record):
+        # 只接受来自 core.recognition 模块的日志
+        if record.name != 'core.recognition':
+            return False
+        # 排除 HUD 枪械图标识别的日志（由 hud_recognition.log 负责）
+        return '[枪械图标]' not in record.getMessage()
+
+
+class _HUDLogFilter(logging.Filter):
+    """HUD 枪械识别日志过滤器：只记录含 [枪械图标] 标签的日志"""
+    def filter(self, record):
+        return '[枪械图标]' in record.getMessage()
 
 
 def setup_exception_handler():
@@ -693,7 +740,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
             PC.posture_roi = None
             logger.info("已暂停自动姿势识别（ROI 配置中）")
             
-            # ✅ 从 roi_config.json 加载当前分辨率的所有 ROI 配置
+            # ✅ 从 roi_config.json 加载阶段1需要的配置（不加载阶段2的枪械配件 ROI）
             import json
             from core.paths import res_path
             
@@ -702,27 +749,41 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
             
             if os.path.exists(config_file):
                 with open(config_file, 'r', encoding='utf-8') as f:
-                    roi_config = json.load(f)
+                    full_config = json.load(f)
                 
-                if resolution in roi_config:
-                    current_rois = roi_config[resolution].copy()
-                    logger.info(f"📋 从 roi_config.json 加载了 {len(current_rois)} 个 ROI 配置")
+                # ✅ 只加载阶段1的特殊配置（背包区域、HUD 区域、姿势区域、开镜坐标）
+                # 不加载分辨率下的枪械配件 ROI（Name_1、Scope_1 等）
+                
+                # 加载背包区域
+                guns_backpack = full_config.get('_GUNS_REOLUTION_SETTINGS', {}).get(resolution)
+                if guns_backpack:
+                    current_rois['guns_backpack_roi'] = list(guns_backpack)
+                    logger.info(f"📦 加载背包区域: {guns_backpack}")
                 else:
-                    logger.warning(f"⚠️ 分辨率 {resolution} 在 roi_config.json 中没有配置")
+                    logger.warning(f"⚠️ 未找到分辨率 {resolution} 的背包区域配置")
+                
+                # 加载 HUD 区域配置（类似背包区域）
+                hud_settings = full_config.get('_GUN_HUD_SETTINGS', {}).get(resolution)
+                if hud_settings:
+                    current_rois['_GUN_HUD_SETTINGS'] = {resolution: list(hud_settings)}
+                    logger.info(f"🎯 加载 HUD 枪械图标区域: {hud_settings}")
+                else:
+                    logger.warning(f"⚠️ 未找到分辨率 {resolution} 的 HUD 区域配置")
+                
+                # 加载姿势区域（如果有）
+                if resolution in full_config and 'posture_roi' in full_config[resolution]:
+                    current_rois['posture_roi'] = full_config[resolution]['posture_roi']
+                    logger.info(f"🎭 加载姿势区域: {current_rois['posture_roi']}")
+                
+                # 加载开镜坐标（如果有）
+                click_pos = full_config.get('_CLICK_POSITION', {}).get(resolution)
+                if click_pos:
+                    current_rois['right_click_pos'] = list(click_pos)
+                    logger.info(f"🖱️ 加载开镜坐标: {click_pos}")
+                
+                logger.info(f"📋 从 roi_config.json 加载了 {len(current_rois)} 个阶段1配置")
             else:
                 logger.warning(f"⚠️ ROI 配置文件不存在: {config_file}")
-            
-            # ✅ 加载特殊配置：背包区域和开镜坐标（从 roi_config.json 读取）
-            # 【格式规范】背包区域: [left, top, right, bottom]（屏幕绝对坐标）
-            with open(config_file, 'r', encoding='utf-8') as f:
-                full_config = json.load(f)
-            
-            guns_backpack = full_config.get('_GUNS_REOLUTION_SETTINGS', {}).get(resolution)
-            if guns_backpack:
-                current_rois['guns_backpack_roi'] = list(guns_backpack)
-                logger.info(f"📦 加载背包区域: {guns_backpack}")
-            else:
-                logger.warning(f"⚠️ 未找到分辨率 {resolution} 的背包区域配置")
             
             # 创建对话框（不设置父窗口，使其成为独立窗口）
             logger.info("🛠️ 创建 ROIConfigDialog...")
@@ -742,6 +803,11 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
                         if '_GUNS_REOLUTION_SETTINGS' not in config_data:
                             config_data['_GUNS_REOLUTION_SETTINGS'] = {}
                         config_data['_GUNS_REOLUTION_SETTINGS'][resolution] = list(roi_coords)
+                    elif roi_type == 'hud_gun_icons':
+                        # HUD 区域配置保存到独立节点（类似背包区域）
+                        if '_GUN_HUD_SETTINGS' not in config_data:
+                            config_data['_GUN_HUD_SETTINGS'] = {}
+                        config_data['_GUN_HUD_SETTINGS'][resolution] = list(roi_coords)
                     elif roi_type == 'right_click_pos':
                         if '_CLICK_POSITION' not in config_data:
                             config_data['_CLICK_POSITION'] = {}

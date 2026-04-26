@@ -478,12 +478,21 @@ class ROIConfigDialog(QDialog):
         # ✅ 新增：背包截图区域和开镜点击坐标
         'guns_backpack_roi': '背包截图区域 (GUNS_REOLUTION_SETTINGS)',
         'right_click_pos': '右键开镜点击坐标 (Click)',
+        # ✅ 新增：HUD 枪械图标区域（一次截图+裁剪）
+        'hud_gun_icons': 'HUD 枪械图标区域（右下角）',
+        'Gun_1': '1号枪图标 (相对 HUD)',
+        'Gun_2': '2号枪图标 (相对 HUD)',
     }
     
     # ✅ 需要转换为相对坐标的ROI类型（相对于背包区域）
     RELATIVE_TO_BACKPACK = {
         'Name_1', 'Scope_1', 'Muzzle_1', 'Grip_1', 'Stock_1',
         'Name_2', 'Scope_2', 'Muzzle_2', 'Grip_2', 'Stock_2',
+    }
+    
+    # ✅ 需要转换为相对坐标的ROI类型（相对于 HUD 区域）
+    RELATIVE_TO_HUD = {
+        'Gun_1', 'Gun_2',
     }
     
     def __init__(self, resolution, current_rois=None, parent=None):
@@ -496,6 +505,9 @@ class ROIConfigDialog(QDialog):
         # 打开对话框时已存在配置（与「保存当前」写入磁盘）对齐的快照
         self._last_emitted = {}
         for k, v in self.current_rois.items():
+            # ✅ 跳过特殊配置节点（_GUN_HUD_SETTINGS、_GUNS_REOLUTION_SETTINGS 等）
+            if k.startswith('_'):
+                continue
             if v is not None:
                 self._last_emitted[k] = self._norm_roi(v)
         self._allow_close_without_prompt = False
@@ -520,6 +532,20 @@ class ROIConfigDialog(QDialog):
                 logger = logging.getLogger(__name__)
                 logger.info(f"✅ 加载背包区域（绝对坐标）: {self.backpack_roi}")
         
+        # ✅ HUD 枪械图标区域坐标（用于相对坐标转换）
+        # 【格式规范】统一使用 (left, top, right, bottom) - 屏幕绝对坐标，存储在 _GUN_HUD_SETTINGS 中
+        self.hud_roi = None
+        # 从 _GUN_HUD_SETTINGS 加载（类似 _GUNS_REOLUTION_SETTINGS）
+        if current_rois and '_GUN_HUD_SETTINGS' in current_rois:
+            hud_settings = current_rois['_GUN_HUD_SETTINGS']
+            if isinstance(hud_settings, dict) and resolution in hud_settings:
+                hud_data = hud_settings[resolution]
+                if len(hud_data) == 4:
+                    self.hud_roi = tuple(hud_data)
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"✅ 加载 HUD 枪械图标区域（绝对坐标）: {self.hud_roi}")
+        
         # ✅ 新增：两步流程状态管理
         self._phase = "backpack"  # 当前阶段: 'backpack' 或 'roi'
         self._backpack_pixmap = None  # 背包截图（用于阶段2）
@@ -531,12 +557,12 @@ class ROIConfigDialog(QDialog):
         self._load_screenshot()
     
     def _update_roi_type_combo(self):
-        """更新 ROI 类型下拉框（阶段1显示姿势/背包/开镳，阶段2只显示枪械配件）"""
+        """更新 ROI 类型下拉框（阶段1显示姿势/背包/开镜/HUD，阶段2只显示枪械配件）"""
         self.roi_type_combo.blockSignals(True)
         self.roi_type_combo.clear()
             
         if self._phase == "roi":
-            # ✅ 阶段2：只显示枪械配件类型（姿势/背包/开镳不在这里配置）
+            # ✅ 阶段2：只显示枪械配件类型（姿势/背包/开镜/HUD不在这里配置）
             phase2_types = [
                 'Name_1', 'Scope_1', 'Muzzle_1', 'Grip_1', 'Stock_1',
                 'Name_2', 'Scope_2', 'Muzzle_2', 'Grip_2', 'Stock_2',
@@ -544,11 +570,12 @@ class ROIConfigDialog(QDialog):
             for key in phase2_types:
                 self.roi_type_combo.addItem(self.ROI_TYPES[key], key)
         else:
-            # ✅ 阶段1：只显示姿势/背包/开镳坐标
+            # ✅ 阶段1：显示姿势/背包/开镜坐标 + HUD枪械图标区域
             phase1_types = [
                 ('guns_backpack_roi', '背包截图区域 (GUNS_REOLUTION_SETTINGS)'),
                 ('posture_roi',       '姿势识别区域'),
-                ('right_click_pos',   '右键开镳点击坐标 (Click)'),
+                ('right_click_pos',   '右键开镜点击坐标 (Click)'),
+                ('hud_gun_icons',     'HUD 枪械图标区域（右下角）'),
             ]
             for key, name in phase1_types:
                 self.roi_type_combo.addItem(name, key)
@@ -687,40 +714,11 @@ class ROIConfigDialog(QDialog):
             # ✅ 更新分辨率显示
             if hasattr(self, 'resolution_label'):
                 self.resolution_label.setText(f"📊 截图分辨率: {self._fullscreen_pixmap.width()}x{self._fullscreen_pixmap.height()}")
-            
-            # ✅ 根据是否已配置背包区域决定从哪个阶段开始
-            if self.backpack_roi and len(self.backpack_roi) == 4:
-                # 已配置背包：弹出确认对话框
-                print(f"✅ 检测到已配置的背包区域: {self.backpack_roi}")
-                
-                reply = QMessageBox.question(
-                    self,
-                    "📦 检测到已配置的背包区域",
-                    f"检测到已配置的背包区域：\n"
-                    f"位置: ({self.backpack_roi[0]}, {self.backpack_roi[1]}, {self.backpack_roi[2]}, {self.backpack_roi[3]})\n\n"
-                    f"请选择：\n"
-                    f"• 是 → 直接进入阶段2（调整枪械 ROI）\n"
-                    f"• 否 → 从阶段1开始（重新框选背包）",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes  # 默认选择"是"
-                )
-                
-                if reply == QMessageBox.Yes:
-                    # 用户选择直接进入阶段2
-                    print("✅ 用户选择：直接进入阶段2")
-                    self._extract_backpack_from_fullscreen()
-                    self._setup_phase2_roi_selection()
-                    
-                    # ✅ 自动选择第一个 ROI 类型（如果有配置的话）
-                    self._select_first_configured_roi()
-                else:
-                    # 用户选择从阶段1开始
-                    print("✅ 用户选择：从阶段1开始")
-                    self._setup_phase1_backpack_selection()
-            else:
-                # 未配置背包：从阶段1开始
-                print("⚠️ 未检测到背包区域配置，从阶段1开始")
-                self._setup_phase1_backpack_selection()
+                        
+            # ✅ 始终从阶段1开始，让用户自己选择配置什么（背包/姿势/开镜/HUD）
+            # 不再自动提示进入背包二阶段，避免干扰只想配置 HUD 的用户
+            print("✅ 从阶段1开始，用户可自由选择配置背包或 HUD")
+            self._setup_phase1_backpack_selection()
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"截图失败: {e}")
@@ -816,9 +814,38 @@ class ROIConfigDialog(QDialog):
             self.roi_type_combo.setCurrentIndex(index)
             self.roi_type_combo.blockSignals(False)
             self._last_roi_type = 'Name_1'
-            # ✅ combo 已跳转，同步更新画布显示
             self._update_current_value()
-            logger.info("✅ 默认选择 Name_1")
+    
+    def _select_first_configured_hud_roi(self):
+        """自动选择第一个已配置的 HUD ROI 类型（Gun_1 或 Gun_2）"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # 优先级：Gun_1 > Gun_2
+        priority_order = ['Gun_1', 'Gun_2']
+        
+        for roi_type in priority_order:
+            if roi_type in self.current_rois and self.current_rois[roi_type]:
+                # 找到第一个已配置的 HUD ROI
+                index = self.roi_type_combo.findData(roi_type)
+                if index >= 0:
+                    self.roi_type_combo.blockSignals(True)
+                    self.roi_type_combo.setCurrentIndex(index)
+                    self.roi_type_combo.blockSignals(False)
+                    self._last_roi_type = roi_type
+                    self._update_current_value()
+                    logger.info(f"✅ 自动选择已配置的 HUD ROI: {roi_type}")
+                    return
+        
+        # 如果都没有配置，选择 Gun_1
+        index = self.roi_type_combo.findData('Gun_1')
+        if index >= 0:
+            self.roi_type_combo.blockSignals(True)
+            self.roi_type_combo.setCurrentIndex(index)
+            self.roi_type_combo.blockSignals(False)
+            self._last_roi_type = 'Gun_1'
+            self._update_current_value()
+            logger.info("✅ 默认选择 Gun_1")
     
     def _on_back_to_phase1(self):
         """回退到阶段1：重新调整背包区域"""
@@ -968,6 +995,31 @@ class ROIConfigDialog(QDialog):
         """阶段2：显示背包截图，框选 ROI"""
         self._phase = "roi"
         
+        # ✅ 阶段2：从 roi_config.json 加载分辨率下的枪械配件 ROI 配置
+        import json
+        import os
+        from core.paths import res_path
+        
+        config_file = res_path('Config', 'roi_config.json')
+        if os.path.exists(config_file):
+            with open(config_file, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+            
+            # 加载分辨率下的枪械配件 ROI（Name_1、Scope_1 等）
+            if self.resolution in full_config:
+                res_config = full_config[self.resolution]
+                for key, value in res_config.items():
+                    # 跳过 posture_roi（已在阶段1处理）
+                    if key == 'posture_roi':
+                        continue
+                    # 加载到 current_rois
+                    if value is not None and isinstance(value, (list, tuple)):
+                        self.current_rois[key] = list(value)
+                
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"✅ 阶段2：加载了 {len([k for k in res_config.keys() if k != 'posture_roi'])} 个枪械配件 ROI 配置")
+        
         # ✅ 切换下拉框为阶段2选项（仅枪械配件）
         self._update_roi_type_combo()
         
@@ -1017,10 +1069,121 @@ class ROIConfigDialog(QDialog):
             "✅ 【阶段2/2】在背包图上框选 ROI | 🔄 枪械信息自动保存为相对坐标 | 💾 保存当前 ROI 写入一条"
         )
     
+    def _setup_hud_mode(self):
+        """HUD 配置模式：显示 HUD 截图，框选 Gun_1 和 Gun_2"""
+        # ✅ HUD 模式：从 roi_config.json 加载分辨率下的 Gun_1 和 Gun_2 配置
+        import json
+        import os
+        from core.paths import res_path
+        
+        config_file = res_path('Config', 'roi_config.json')
+        if os.path.exists(config_file):
+            with open(config_file, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+            
+            # 加载分辨率下的 Gun_1 和 Gun_2
+            if self.resolution in full_config:
+                res_config = full_config[self.resolution]
+                for key in ['Gun_1', 'Gun_2']:
+                    if key in res_config and res_config[key] is not None:
+                        self.current_rois[key] = list(res_config[key])
+                
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"✅ HUD 模式：加载了 Gun_1={self.current_rois.get('Gun_1')}, Gun_2={self.current_rois.get('Gun_2')}")
+        
+        # 移除旧的控件
+        if hasattr(self, '_roi_label'):
+            old_widget = self._roi_label
+            self.scroll_area.setWidget(None)
+            old_widget.deleteLater()
+        
+        # ✅ 创建 ROI 标签（HUD 模式）
+        self._roi_label = ROILabel(self._hud_pixmap, self, mode="hud")
+        self.scroll_area.setWidget(self._roi_label)
+
+        # ✅ 启用固定尺寸模式（枪械图标约 284x104）
+        # 根据分辨率缩放（以 3840x2160 为基准）
+        base_w, base_h = 284, 104
+        current_w = self._hud_pixmap.width()
+        scale = current_w / 3840.0
+        
+        # ✅ 优先使用已配置的 Gun_1 或 Gun_2 的框大小，如果没有则使用默认值
+        fw, fh = None, None
+        for key in ['Gun_1', 'Gun_2']:
+            if key in self.current_rois and self.current_rois[key]:
+                roi_data = self.current_rois[key]
+                if len(roi_data) == 4:
+                    l, t, r, b = roi_data
+                    fw = r - l
+                    fh = b - t
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"✅ HUD 模式：使用已配置的 {key} 框大小: {fw}x{fh}")
+                    break
+        
+        # 如果没有已配置的数据，使用默认值
+        if fw is None or fh is None:
+            fw = max(50, int(base_w * scale))
+            fh = max(30, int(base_h * scale))
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"✅ HUD 模式：使用默认框大小: {fw}x{fh}")
+        
+        self.roi_size_spin_w.setValue(fw)
+        self.roi_size_spin_h.setValue(fh)
+        self._roi_label.set_fixed_size(fw, fh)
+
+        # ✅ 显示尺寸微调控件
+        for w in (self.roi_size_w_label, self.roi_size_x_label, self.roi_size_h_label, self.roi_size_fixed_label):
+            w.setVisible(True)
+        for s in (self.roi_size_spin_w, self.roi_size_spin_h):
+            s.setVisible(True)
+        
+        # ✅ 隐藏回退按钮（HUD 配置不需要）
+        if hasattr(self, 'back_btn'):
+            self.back_btn.setVisible(False)
+        # ✅ 显示保存模板按钮（HUD 配置需要保存枪械图标模板）
+        if hasattr(self, 'save_template_btn'):
+            self.save_template_btn.setVisible(True)
+        
+        # ✅ 更新下拉框为 HUD 选项（只显示 Gun_1 和 Gun_2）
+        self.roi_type_combo.blockSignals(True)
+        self.roi_type_combo.clear()
+        hud_types = ['Gun_1', 'Gun_2']
+        for key in hud_types:
+            self.roi_type_combo.addItem(self.ROI_TYPES[key], key)
+        self.roi_type_combo.blockSignals(False)
+        
+        # ✅ 加载当前 ROI 类型的坐标（如果有配置）
+        self._update_current_value()
+
+        # ✅ 如果当前没有配置，自动生成居中预览框
+        roi_type = self.roi_type_combo.currentData()
+        if roi_type in self.RELATIVE_TO_HUD:
+            if roi_type not in self.current_rois or not self.current_rois.get(roi_type):
+                self._roi_label.reset_to_center()
+                if self._roi_label._current_roi:
+                    self.current_rois[roi_type] = list(self._roi_label._current_roi)
+                    self._last_emitted[roi_type] = self._norm_roi(self._roi_label._current_roi)
+                    self.current_value_label.setText(f"相对HUD: {self._roi_label._current_roi}")
+        
+        # 更新状态栏
+        self.status_label.setText(
+            "✅ 【HUD 配置】在 HUD 截图中框选 Gun_1 和 Gun_2 | 🔄 坐标自动保存为相对 HUD 的坐标"
+        )
+        
+        print(f"   ✅ 已切换到 HUD 配置模式")
+    
     def _update_current_value(self):
         """更新当前 ROI 值显示"""
         roi_type = self.roi_type_combo.currentData()
-        current = self.current_rois.get(roi_type)
+        
+        # ✅ 特殊处理：hud_gun_icons 从 self.hud_roi 读取（存储在 _GUN_HUD_SETTINGS 中）
+        if roi_type == 'hud_gun_icons':
+            current = self.hud_roi
+        else:
+            current = self.current_rois.get(roi_type)
         
         # ✅ 切换类型时先清空旧 ROI，避免残留显示上一次选择的类型的框
         if hasattr(self, '_roi_label') and self._roi_label:
@@ -1052,6 +1215,42 @@ class ROIConfigDialog(QDialog):
                 if hasattr(self, '_roi_label'):
                     self._roi_label._current_roi = None
                     self._roi_label._update_display()
+            
+            elif roi_type == 'hud_gun_icons':
+                # HUD 区域: (left, top, right, bottom) - 已经是绝对坐标，直接显示
+                if len(current) == 4:
+                    display_roi = tuple(current)
+                    if hasattr(self, '_roi_label'):
+                        self._roi_label._current_roi = display_roi
+                        self._roi_label._update_display()
+                else:
+                    if hasattr(self, '_roi_label'):
+                        self._roi_label._current_roi = None
+                        self._roi_label._update_display()
+                    
+            elif roi_type in self.RELATIVE_TO_HUD:
+                # 枪械图标: 相对于 HUD 区域的坐标，直接在 HUD 截图上显示
+                if hasattr(self, '_hud_pixmap') and self._hud_pixmap:
+                    # 显示在 HUD 截图上（坐标已经是相对的）
+                    if hasattr(self, '_roi_label'):
+                        if self._roi_label._fixed_size_mode and len(current) == 4:
+                            l, t, r, b = current
+                            cx = (l + r) // 2
+                            cy = (t + b) // 2
+                            fw = self._roi_label._fixed_w
+                            fh = self._roi_label._fixed_h
+                            self._roi_label._current_roi = (
+                                cx - fw // 2, cy - fh // 2,
+                                cx + fw // 2, cy + fh // 2
+                            )
+                        else:
+                            self._roi_label._current_roi = current
+                        self._roi_label._update_display()
+                    self.current_value_label.setText(f"相对HUD: {current}")
+                else:
+                    if hasattr(self, '_roi_label'):
+                        self._roi_label._current_roi = None
+                        self._roi_label._update_display()
                     
             elif roi_type in self.RELATIVE_TO_BACKPACK:
                 # ✅ 枪械信息: 根据阶段决定如何显示
@@ -1229,6 +1428,64 @@ class ROIConfigDialog(QDialog):
         # 更新当前类型
         new_roi_type = self.roi_type_combo.currentData()
         
+        # ✅ 如果选择背包区域且已配置，提示是否直接进入二阶段
+        if new_roi_type == 'guns_backpack_roi' and self.backpack_roi and len(self.backpack_roi) == 4:
+            reply = QMessageBox.question(
+                self,
+                "📦 检测到已配置的背包区域",
+                f"背包区域已配置：\n"
+                f"位置: ({self.backpack_roi[0]}, {self.backpack_roi[1]}, {self.backpack_roi[2]}, {self.backpack_roi[3]})\n\n"
+                f"是否直接进入阶段2（调整枪械 ROI）？\n"
+                f"• 是 → 进入阶段2\n"
+                f"• 否 → 重新框选背包区域",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                # 直接进入阶段2
+                print("✅ 用户选择：直接进入背包阶段2")
+                self._extract_backpack_from_fullscreen()
+                self._setup_phase2_roi_selection()
+                self._select_first_configured_roi()
+                return
+            else:
+                # 用户选择重新框选，继续正常流程
+                print("✅ 用户选择：重新框选背包区域")
+        
+        # ✅ 如果选择 HUD 区域且已配置，提示是否直接进入 HUD 配置模式
+        if new_roi_type == 'hud_gun_icons' and self.hud_roi and len(self.hud_roi) == 4:
+            reply = QMessageBox.question(
+                self,
+                "🎯 检测到已配置的 HUD 区域",
+                f"HUD 枪械图标区域已配置：\n"
+                f"位置: ({self.hud_roi[0]}, {self.hud_roi[1]}, {self.hud_roi[2]}, {self.hud_roi[3]})\n\n"
+                f"是否直接进入 HUD 配置模式（调整 Gun_1 和 Gun_2）？\n"
+                f"• 是 → 进入 HUD 配置\n"
+                f"• 否 → 重新框选 HUD 区域",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                # 直接进入 HUD 配置模式
+                print("✅ 用户选择：直接进入 HUD 配置模式")
+                # 裁剪 HUD 区域
+                left, top, right, bottom = self.hud_roi
+                width = right - left
+                height = bottom - top
+                self._hud_pixmap = self._fullscreen_pixmap.copy(
+                    int(left), int(top), int(width), int(height)
+                )
+                # 切换到 HUD 模式
+                self._setup_hud_mode()
+                # 自动选择第一个已配置的 Gun
+                self._select_first_configured_hud_roi()
+                return
+            else:
+                # 用户选择重新框选，继续正常流程
+                print("✅ 用户选择：重新框选 HUD 区域")
+        
         # ✅ 如果切换到枪械信息类型，检查是否已配置背包区域
         if new_roi_type in self.RELATIVE_TO_BACKPACK and not self.backpack_roi:
             logger.warning(f"⚠️ 请先配置背包区域，否则 {new_roi_type} 无法正确转换坐标")
@@ -1263,6 +1520,36 @@ class ROIConfigDialog(QDialog):
                 )
                 return
         
+        # ✅ 如果切换到 HUD 枪械图标类型，检查是否已配置 HUD 区域
+        if new_roi_type in self.RELATIVE_TO_HUD and not self.hud_roi:
+            logger.warning(f"⚠️ 请先配置 HUD 枪械图标区域，否则 {new_roi_type} 无法正确转换坐标")
+            
+            reply = QMessageBox.question(
+                self,
+                "⚠️ 需要先配置 HUD 区域",
+                f"在配置「{self.ROI_TYPES.get(new_roi_type)}」之前，\n"
+                f"必须先配置「HUD 枪械图标区域」！\n\n"
+                f"是否现在切换到「HUD 枪械图标区域」进行配置？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                index = self.roi_type_combo.findData('hud_gun_icons')
+                if index >= 0:
+                    self.roi_type_combo.blockSignals(True)
+                    self.roi_type_combo.setCurrentIndex(index)
+                    self.roi_type_combo.blockSignals(False)
+                    self._last_roi_type = 'hud_gun_icons'
+                    logger.info("✅ 自动切换到 HUD 枪械图标区域配置")
+                    self._update_current_value()
+                    return
+            else:
+                self.status_label.setText(
+                    f"⚠️ 请先配置 HUD 枪械图标区域，再配置 {self.ROI_TYPES.get(new_roi_type)}"
+                )
+                return
+        
         self._last_roi_type = new_roi_type
         
         # ✅ 先更新固定尺寸（必须在 _update_current_value 之前，否则会用旧类型的尺寸显示新类型的框）
@@ -1289,11 +1576,11 @@ class ROIConfigDialog(QDialog):
         if new_roi:
             roi_type = self.roi_type_combo.currentData()
             
-            # ✅ 特殊类型（背包区域、开镜坐标）不在图片上显示框，不处理拖动
-            if roi_type in ('guns_backpack_roi', 'right_click_pos'):
+            # ✅ 特殊类型（背包区域、开镜坐标、HUD区域）不在图片上显示框，不处理拖动
+            if roi_type in ('guns_backpack_roi', 'right_click_pos', 'hud_gun_icons'):
                 return
             
-            # ✅ 如果是枪械信息 ROI
+            # ✅ 如果是枪械信息 ROI（相对于背包）
             if roi_type in self.RELATIVE_TO_BACKPACK:
                 # 根据阶段决定如何处理坐标
                 if self._phase == "roi" and hasattr(self._roi_label, '_mode') and self._roi_label._mode == "backpack":
@@ -1312,6 +1599,15 @@ class ROIConfigDialog(QDialog):
                 
                 # 同时更新 current_rois 中的相对坐标
                 self.current_rois[roi_type] = list(relative_roi)
+            
+            # ✅ 如果是枪械图标 ROI（相对于 HUD）
+            elif roi_type in self.RELATIVE_TO_HUD:
+                # 坐标已经是相对于 HUD 大图的坐标，直接使用
+                relative_roi = new_roi
+                display_roi = relative_roi
+                self.current_value_label.setText(f"相对HUD: {relative_roi}")
+                self.current_rois[roi_type] = list(relative_roi)
+            
             else:
                 # 其他类型，直接显示
                 display_roi = new_roi
@@ -1393,7 +1689,9 @@ class ROIConfigDialog(QDialog):
 
     def _effective_rois(self):
         """与界面一致的 ROI 表（含当前类型下未点「保存」的编辑）。"""
-        eff = {k: v for k, v in self.current_rois.items() if v is not None}
+        # ✅ 过滤掉特殊配置节点（_GUN_HUD_SETTINGS 等）
+        eff = {k: v for k, v in self.current_rois.items() 
+               if v is not None and not k.startswith('_')}
         t = self.roi_type_combo.currentData()
         if not hasattr(self, "_roi_label") or self._roi_label is None:
             return eff
@@ -1418,16 +1716,8 @@ class ROIConfigDialog(QDialog):
         return False
 
     def _ok_to_close(self):
-        if not self._has_unsaved_changes():
-            return True
-        r = QMessageBox.question(
-            self,
-            "未保存的修改",
-            "有 ROI 已调整但尚未点「保存当前 ROI」写入配置文件，确定要关闭吗？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        return r == QMessageBox.Yes
+        # ✅ 关闭时直接丢弃所有未保存的修改，不提示、不自动保存
+        return True
 
     def _on_reset_position(self):
         """重置当前 ROI 位置，允许重新框选"""
@@ -1495,6 +1785,22 @@ class ROIConfigDialog(QDialog):
                     f"2. 在全屏截图中框选整个背包区域\n"
                     f"3. 点击「保存当前 ROI」\n"
                     f"4. 然后再回来配置枪械信息 ROI"
+                )
+                return
+        
+        # ✅ 如果是枪械图标 ROI，必须先配置 HUD 区域
+        if roi_type in self.RELATIVE_TO_HUD:
+            if not self.hud_roi or len(self.hud_roi) != 4:
+                QMessageBox.warning(
+                    self,
+                    "⚠️ 需要先配置 HUD 区域",
+                    f"在配置「{self.ROI_TYPES.get(roi_type)}」之前，\n"
+                    f"必须先配置「HUD 枪械图标区域」！\n\n"
+                    f"操作步骤：\n"
+                    f"1. 在上方下拉框选择「HUD 枪械图标区域（右下角）」\n"
+                    f"2. 在全屏截图中框选 HUD 区域（包含两把枪图标）\n"
+                    f"3. 点击「保存当前 ROI」\n"
+                    f"4. 然后再回来配置 Gun_1 和 Gun_2"
                 )
                 return
         
@@ -1566,6 +1872,60 @@ class ROIConfigDialog(QDialog):
             import logging
             logger = logging.getLogger(__name__)
             logger.info(f"✅ 开镜坐标已保存: {click_coords}")
+        
+        elif roi_type == 'hud_gun_icons':
+            # HUD 枪械图标区域: 使用屏幕绝对坐标 (left, top, right, bottom)
+            left, top, right, bottom = roi_t
+            hud_coords = (left, top, right, bottom)
+            
+            self.current_rois[roi_type] = list(hud_coords)
+            self.roi_saved.emit(roi_type, hud_coords)
+            self._last_emitted[roi_type] = self._norm_roi(hud_coords)
+            
+            # 更新 hud_roi（用于后续相对坐标转换）
+            self.hud_roi = hud_coords
+            saved_coords = hud_coords
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"✅ HUD 枪械图标区域已保存: {hud_coords}")
+            
+            # ✅ 裁剪 HUD 区域，用于后续配置 Gun_1 和 Gun_2
+            left, top, right, bottom = roi_t
+            width = right - left
+            height = bottom - top
+            self._hud_pixmap = self._fullscreen_pixmap.copy(
+                int(left), int(top), int(width), int(height)
+            )
+            
+            print(f"\n✅ HUD 枪械图标区域已裁剪: {width}x{height}")
+            print(f"   准备进入 HUD 配置模式...")
+            
+            # ✅ 切换到 HUD 配置模式（类似阶段2）
+            self._setup_hud_mode()
+            
+            # 自动切换到 Gun_1
+            index = self.roi_type_combo.findData('Gun_1')
+            if index >= 0:
+                self.roi_type_combo.blockSignals(True)
+                self.roi_type_combo.setCurrentIndex(index)
+                self.roi_type_combo.blockSignals(False)
+                self._last_roi_type = 'Gun_1'
+            self._update_current_value()
+        
+        elif roi_type in self.RELATIVE_TO_HUD:
+            # 枪械图标 ROI（相对于 HUD 区域）
+            # 坐标已经是相对于 HUD 大图的坐标，直接使用
+            relative_roi = roi_t
+            
+            self.current_rois[roi_type] = list(relative_roi)
+            self.roi_saved.emit(roi_type, relative_roi)
+            self._last_emitted[roi_type] = self._norm_roi(relative_roi)
+            saved_coords = relative_roi
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"✅ {roi_type} 已保存 (相对HUD): {relative_roi}")
             
         elif roi_type in self.RELATIVE_TO_BACKPACK:
             # 枪械信息 ROI
@@ -1601,6 +1961,184 @@ class ROIConfigDialog(QDialog):
         # ✅ 显示裁剪预览，让用户确认
         self._show_roi_preview(roi_type, roi_t, saved_coords)
     
+    def _on_save_hud_gun_template(self, roi_type):
+        """保存 HUD 枪械图标模板（Gun_1 或 Gun_2）"""
+        import logging
+        logger = logging.getLogger(__name__)
+        from core.paths import res_path
+        
+        # 1. 获取当前 ROI 坐标
+        roi = None
+        if hasattr(self, '_roi_label') and self._roi_label:
+            roi = self._roi_label._current_roi or self._roi_label.get_roi()
+        
+        if not roi:
+            QMessageBox.warning(self, "提示", "请先在 HUD 截图中框选一个区域")
+            return
+        
+        # 2. 扫描已有枪械图标模板名称
+        existing_names = []
+        search_dirs = [
+            res_path('_internal', 'data', 'firearms', self.resolution, 'gun'),
+            res_path('_internal', 'data', 'firearms', 'gun'),
+        ]
+        for d in search_dirs:
+            if os.path.exists(d):
+                for f in os.listdir(d):
+                    if f.lower().endswith('.png'):
+                        name = f[:-4]  # 去掉 .png
+                        if name not in existing_names:
+                            existing_names.append(name)
+        
+        # 排序：none 放最后
+        if 'none' in existing_names:
+            existing_names.remove('none')
+            existing_names.sort()
+            existing_names.append('none')
+        else:
+            existing_names.sort()
+        
+        # 添加自定义名称选项
+        existing_names.append("——— 输入自定义名称 ———")
+        
+        # 3. 下拉对话框让用户选择模板名称
+        selected, ok = QInputDialog.getItem(
+            self,
+            f"选择枪械图标模板 - {self.ROI_TYPES.get(roi_type)}",
+            f"当前ROI坐标: {roi}\n"
+            f"请选择或输入模板名称（可双击编辑自由输入）:\n"
+            f"建议与游戏内枪械名称一致",
+            existing_names,
+            0,
+            True  # 可编辑
+        )
+        
+        if not ok or not selected.strip():
+            logger.info(f"❌ 用户取消选择枪械图标模板: {roi_type}")
+            return
+        
+        # 清理用户选择的名称
+        selected_name = selected.strip()
+        if selected_name == "——— 输入自定义名称 ———":
+            # 用户选了输入自定义名称却没改文字，跳到输入框
+            custom_name, ok2 = QInputDialog.getText(
+                self,
+                f"输入枪械图标模板名称 - {self.ROI_TYPES.get(roi_type)}",
+                f"请输入模板名称（不包含扩展名）:\n"
+                f"例如: m416, m762, kar98k\n"
+                f"建议与游戏内枪械名称一致",
+                QLineEdit.Normal,
+                ""
+            )
+            if not ok2 or not custom_name.strip():
+                logger.info(f"❌ 用户取消输入枪械图标模板名称: {roi_type}")
+                return
+            selected_name = custom_name.strip()
+        
+        logger.info(f"✅ 用户选择枪械图标模板名称: {selected_name} ({roi_type})")
+        
+        # 4. 用户确认是否生成
+        roi_name = self.ROI_TYPES.get(roi_type, roi_type)
+        reply = QMessageBox.question(
+            self,
+            "确认保存枪械图标模板",
+            f"即将从当前「{roi_name}」截图生成枪械图标模板：\n"
+            f"模板名称: {selected_name}.png\n"
+            f"坐标: {roi}\n\n"
+            f"如果存在同名文件，将会覆盖！\n\n"
+            f"确定要生成吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply != QMessageBox.Yes:
+            logger.info(f"❌ 用户取消保存枪械图标模板: {roi_type}")
+            return
+        
+        # 5. 执行保存
+        self._save_hud_gun_template_from_roi(roi_type, roi, selected_name)
+        
+        self.status_label.setText(f"✅ 枪械图标模板已保存: {selected_name}.png | 可继续调整其他类型")
+        logger.info(f"✅ 用户手动保存枪械图标模板: {roi_type} -> {selected_name}.png")
+    
+    def _save_hud_gun_template_from_roi(self, roi_type, relative_roi, template_name):
+        """
+        从 HUD ROI 截图中保存枪械图标模板
+        :param roi_type: ROI 类型 ('Gun_1' 或 'Gun_2')
+        :param relative_roi: 相对 HUD 区域的坐标 (left, top, right, bottom)
+        :param template_name: 模板名称（不含扩展名）
+        """
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            from core.paths import res_path
+            
+            # 1. 从 HUD 截图中裁剪 ROI
+            if not hasattr(self, '_hud_pixmap') or self._hud_pixmap is None:
+                logger.warning(f"⚠️ 无法保存枪械图标模板 {roi_type}: HUD 截图不存在")
+                return
+            
+            rel_left, rel_top, rel_right, rel_bottom = relative_roi
+            width = rel_right - rel_left
+            height = rel_bottom - rel_top
+            
+            if width <= 0 or height <= 0:
+                logger.warning(f"⚠️ 无法保存枪械图标模板 {roi_type}: ROI 尺寸无效")
+                return
+            
+            # 从 HUD 截图中裁剪
+            roi_pixmap = self._hud_pixmap.copy(
+                int(rel_left), int(rel_top), int(width), int(height)
+            )
+            
+            # 2. 转换为 OpenCV 格式
+            qimage = roi_pixmap.toImage()
+            ptr = qimage.bits()
+            ptr.setsize(qimage.byteCount())
+            arr = np.array(ptr).reshape(qimage.height(), qimage.width(), 4)
+            roi_cv = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+            
+            # 3. 确定保存路径（按分辨率存储）
+            template_dir = res_path('_internal', 'data', 'firearms', self.resolution, 'gun')
+            
+            # 确保目录存在
+            os.makedirs(template_dir, exist_ok=True)
+            
+            # 4. 保存模板图片（灰度图）
+            roi_gray = cv2.cvtColor(roi_cv, cv2.COLOR_BGR2GRAY)
+            
+            # 5. 确定模板文件名
+            tpl_name = template_name.strip()
+            if not tpl_name.endswith('.png'):
+                tpl_name = f"{tpl_name}.png"
+            
+            template_path = os.path.join(template_dir, tpl_name)
+            
+            # 如果文件已存在，备份旧文件
+            if os.path.exists(template_path):
+                backup_path = template_path + '.tmp'
+                try:
+                    import shutil
+                    shutil.copy2(template_path, backup_path)
+                    logger.info(f"📦 已备份旧模板: {backup_path}")
+                except Exception as e:
+                    logger.warning(f"备份旧模板失败: {e}")
+            
+            cv2.imwrite(template_path, roi_gray)
+            
+            logger.info(f"✅ 枪械图标模板已保存: {template_path} ({width}x{height})")
+            
+            # 6. 清除模板缓存（让识别模块重新加载）
+            from core import recognition
+            if template_path in recognition._template_cache:
+                del recognition._template_cache[template_path]
+                logger.debug(f"🔄 已清除枪械图标模板缓存: {template_path}")
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"保存枪械图标模板失败 {roi_type}: {e}")
+    
     def _on_save_template(self):
         """手动保存当前ROI的模板图片（用户自己选择模板名称）"""
         import logging
@@ -1608,6 +2146,11 @@ class ROIConfigDialog(QDialog):
         from core.paths import res_path
         
         roi_type = self.roi_type_combo.currentData()
+        
+        # ✅ HUD 枪械图标模板保存
+        if roi_type in self.RELATIVE_TO_HUD:
+            self._on_save_hud_gun_template(roi_type)
+            return
         
         # 非枪械类型不支持模板
         if roi_type not in self.RELATIVE_TO_BACKPACK:
@@ -1618,7 +2161,7 @@ class ROIConfigDialog(QDialog):
             else:
                 QMessageBox.information(
                     self, "提示",
-                    "只有枪械配件类型（名称/倍镜/枪口/握把/枪托）才支持保存模板"
+                    "只有枪械配件类型（名称/倍镜/枪口/握把/枪托）和枪械图标才支持保存模板"
                 )
                 return
         

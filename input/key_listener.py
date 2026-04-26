@@ -70,8 +70,10 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
             actual_key = key_map.get(Keys, Keys)
             self.PC.StartFire = False  # 设置开镜状态为False
             self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
-            self.PC.Change_firearms(actual_key)  # 更改枪械
+            self.PC.Change_firearms(actual_key)  # 先切换枪械槽位
             self.keyInfo.emit('e', (self.PC.Current_firearms,))  # 发送枪械信息信号
+            # ✅ 触发枪械图标识别（异步线程，不阻塞按键处理）
+            Thread(target=self.PC.recognize_gun_icons, args=(self.keyInfo.emit,)).start()
         elif Keys in "345gx#$":  # 如果按下3、4、5、g、x或Shift+3(#)、Shift+4($)
             self.PC.StartFire = False  # 设置开镜状态为False
             self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号

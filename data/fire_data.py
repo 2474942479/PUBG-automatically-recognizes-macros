@@ -144,3 +144,110 @@ SCOPE_FACTOR = {
 # 倍镜名 → data.txt A 位编码
 # ═══════════════════════════════════════════════════════════
 SCOPE_TO_A_CODE = KEY_DATA_V3["Scope"]
+
+# ═══════════════════════════════════════════════════════════
+# 枪械-配件限制映射（完整版）
+#   槽位级：每把枪支持的配件槽位 (Scope 全部支持，已省略)
+#   类型级：枪口/握把/枪托的模板限制
+#   未列入的枪械默认检测所有配件槽位
+# ═══════════════════════════════════════════════════════════
+
+# 枪口模板分类（步枪/冲锋枪/狙击枪）
+MUZZLE_RIFLE = {"buqiangbuchang", "buqiangxiaoyan", "xiaoyin"}
+MUZZLE_SMG = {"chongfengqiangbuchang", "chongfengqiangxiaoyan", "xiaoyin"}
+MUZZLE_SNIPER = {"jujiqiangbuchang", "jujiqiangxiaoyan", "xiaoyin"}
+
+# 握把模板（所有支持握把的枪都相同）
+GRIP_ALL = {"chuizhi", "banjieshi", "muzhi", "xiexiang"}
+
+# 枪托模板分类（步枪枪托/狙击枪托/冲锋枪枪托/子弹袋/折叠式）
+STOCK_RIFLE = {"zhanshuqiangtuo", "zhongxinqiangtuo"}  # 步枪/冲锋枪通用的战术枪托、重型枪托
+STOCK_SNIPER = {"tuosaiban"}  # 狙击枪专用托腮板
+STOCK_FOLDING = {"zhedieshiqiangtuo"}  # 折叠式枪托（仅UZI）
+STOCK_BULLET_BAG = {"zidandai"}  # 子弹袋（仅S1897、98K）
+
+# 枪械配件支持表（完整版）
+# 格式: gun_name -> {
+#   "slots": {支持的槽位},
+#   "muzzle": 枪口模板集合或None,
+#   "grip": 握把模板集合或None,
+#   "stock": 枪托模板集合或None,
+# }
+# slots 不含 Scope（所有枪械均支持 Scope）
+# None 表示不限制该配件类型（使用目录下的所有模板）
+# 未列入的枪械 → 默认检测所有配件槽位和所有模板（向后兼容）
+GUN_ACCESSORIES = {
+    # === 突击步枪 AR ===
+    "m416":   {"slots": {"Muzzle", "Grip", "Stock"},  "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": STOCK_RIFLE},
+    "akm":    {"slots": {"Muzzle"},                   "muzzle": MUZZLE_RIFLE,  "grip": None,       "stock": None},
+    "m762":   {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "scar-l": {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "aug":    {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "qbz":    {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "g36c":   {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "ace32":  {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "k2":     {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "mk47":   {"slots": {"Muzzle", "Grip", "Stock"},  "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": STOCK_RIFLE},
+    "famas":  {"slots": {"Muzzle"},                   "muzzle": MUZZLE_RIFLE,  "grip": None,       "stock": None},
+    "groza":  {"slots": {"Muzzle"},                   "muzzle": MUZZLE_RIFLE,  "grip": None,       "stock": None},
+    "m16a4":  {"slots": {"Muzzle", "Stock"},          "muzzle": MUZZLE_RIFLE,  "grip": None,       "stock": STOCK_RIFLE},
+
+    # === 冲锋枪 SMG ===
+    "ump45":  {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_SMG,    "grip": GRIP_ALL,   "stock": None},
+    "vector": {"slots": {"Muzzle", "Grip", "Stock"},  "muzzle": MUZZLE_SMG,    "grip": GRIP_ALL,   "stock": STOCK_RIFLE},
+    "mp5k":   {"slots": {"Muzzle", "Grip", "Stock"},  "muzzle": MUZZLE_SMG,    "grip": GRIP_ALL,   "stock": STOCK_RIFLE},
+    "uzi":    {"slots": {"Muzzle", "Stock"},          "muzzle": MUZZLE_SMG,    "grip": None,       "stock": STOCK_FOLDING},
+    "pp19":   {"slots": {"Muzzle"},                   "muzzle": MUZZLE_SMG,    "grip": None,       "stock": None},
+    "mp9":    {"slots": {"Muzzle"},                   "muzzle": MUZZLE_SMG,    "grip": None,       "stock": None},
+    "js9":    {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_SMG,    "grip": GRIP_ALL,   "stock": None},
+    "tangmuxunchongfengqiang": {"slots": {"Muzzle", "Grip"},    "muzzle": MUZZLE_SMG,    "grip": GRIP_ALL,   "stock": None},
+    "p90":    {"slots": set(),                        "muzzle": None,          "grip": None,       "stock": None},
+
+    # === 射手步枪 DMR ===
+    "mini14": {"slots": {"Muzzle"},                   "muzzle": MUZZLE_RIFLE,  "grip": None,       "stock": None},
+    "sks":    {"slots": {"Muzzle", "Grip", "Stock"},  "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": STOCK_RIFLE},
+    "mk12":   {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "mk14":   {"slots": {"Muzzle", "Stock"},          "muzzle": MUZZLE_SNIPER, "grip": None,       "stock": STOCK_SNIPER},
+    "qbu":    {"slots": {"Muzzle"},                   "muzzle": MUZZLE_RIFLE,  "grip": None,       "stock": None},
+    "vss":    {"slots": {"Stock"},                    "muzzle": None,          "grip": None,       "stock": STOCK_SNIPER},
+    "delagongnuofu": {"slots": {"Muzzle", "Stock"},   "muzzle": MUZZLE_SNIPER, "grip": None,       "stock": STOCK_SNIPER},
+
+    # === 轻机枪 LMG ===
+    "m249":   {"slots": {"Stock"},                     "muzzle": None,          "grip": None,       "stock": STOCK_RIFLE},
+    "dp28":   {"slots": set(),                         "muzzle": None,          "grip": None,       "stock": None},
+    "mg3":    {"slots": set(),                         "muzzle": None,          "grip": None,       "stock": None},
+
+    # === 特殊 ===
+    "zidongzhuangtianbuqiang": {"slots": {"Muzzle", "Stock"},        "muzzle": MUZZLE_RIFLE,          "grip": None,       "stock": STOCK_SNIPER},
+}
+
+
+def get_allowed_templates(gun_name, slot_type):
+    """
+    获取枪械在指定槽位允许的模板名称集合（完整版）
+    :param gun_name: 枪械名称 (如 'm416')
+    :param slot_type: 槽位类型 ('Scope', 'Muzzle', 'Grip', 'Stock')
+    :return: 
+        - None: 不限制（使用目录下所有模板）
+        - set(): 空集，表示不支持该槽位，直接跳过
+        - {模板名...}: 只检测这些模板文件（不含扩展名）
+    """
+    if not gun_name or gun_name.lower() == "none":
+        return None  # 未知枪械，不限制
+    
+    gun_info = GUN_ACCESSORIES.get(gun_name.lower())
+    if not gun_info:
+        return None  # 未列入的枪械，不限制（向后兼容）
+    
+    # Scope 所有枪械都支持，不限制模板类型
+    if slot_type == "Scope":
+        return None
+    
+    # 槽位级限制：该枪不支持这个槽位，直接跳过所有模板匹配
+    if slot_type not in gun_info.get("slots", set()):
+        return set()
+    
+    # 类型级限制：获取该枪对该配件类型的模板限制（可为 None 表示不限制）
+    # 从枪的配置中读取对应 slot_type 的模板集合（小写键名）
+    allowed = gun_info.get(slot_type.lower(), None)
+    return allowed  # None = 不限制，set() = 指定模板列表

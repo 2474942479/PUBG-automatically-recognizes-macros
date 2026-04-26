@@ -37,7 +37,28 @@ PADDING = 2
 CONSENSUS_WINDOW = 3
 CONSENSUS_MIN_VOTES = 2
 _slot_history = {}  # {"Name_1": ["m416", "m416", "m416"], ...}
-_slot_locked = {}   # {"Name_1": "m416", ...}  锁定后的兜底值
+_slot_locked = {}   # {"Name_1": "m416", ...}  锁定后的兰底值
+
+# ============================================================
+# HUD 枪械图标识别稳定性机制（最高优先准确性）
+# ============================================================
+# 多帧共识：Gun_1 / Gun_2 的近 N 帧识别历史，与当前帧不一致时
+# 用共识结果兰底，避免单帧误识导致压枪数据错乱。
+_HUD_CONSENSUS_WINDOW = 3
+_HUD_CONSENSUS_MIN_VOTES = 2
+_hud_slot_history = {"Gun_1": [], "Gun_2": []}
+
+# ⚠️ 已弃用：亮度判活已由按键（1/2）驱动替代，HUD 识别不再决定当前持枪。
+# 保留亮度字段仅用于调试日志输出，不参与决策。
+
+# Otsu 阈值跨帧 EMA 平滑：消除同一枪图标帧间阈值抖动导致的分数波动，
+# 以 (slot_key, current_res) 为键。所有通道中唯一的带状态磁贴。
+_otsu_threshold_ema = {}
+_OTSU_EMA_ALPHA = 0.3  # 新帧权重：0.3 新帧 + 0.7 历史，平滑强度适中
+
+# HUD 区分度判定门槛：Top1-Top2 gap 过小 且 分数未达到高分线，拒绝识别。
+_HUD_GAP_MIN = 0.03      # 最小差距
+_HUD_HIGH_SCORE = 0.60   # 高分线：达到此分数即使 gap 小也接受
 
 def _get_sift_detector():
     """获取或创建 SIFT 检测器（单例模式）"""
@@ -106,6 +127,44 @@ def _get_clahe_params(tier, scale):
         return 1.5, (3, 3)
     else:
         return 1.2, (2, 2)
+
+
+def _preprocess_gun_icon(img_gray, tier='large', fixed_threshold=None):
+    """
+    HUD 枪械图标预处理 - 抗游戏滤镜干扰
+    
+    流程：CLAHE(增强对比度) → Otsu二值化(去颜色/亮度差异) → 中值滤波(去噪)
+    
+    原理：
+    - 游戏滤镜主要改变颜色和整体亮度，但枪械轮廓形状不变
+    - Otsu 二值化自动找最佳阈值，将图像转为黑白，去除滤镜带来的差异
+    - 只保留枪械图标的黑白轮廓，不管滤镜怎么变，二值化后都接近
+    
+    注意：如果传入 fixed_threshold，则使用固定阈值进行二值化，
+          确保模板和截图使用相同的阈值（必须两者都用相同阈值才有效）
+    
+    :param img_gray: 灰度图
+    :param tier: 分辨率等级
+    :param fixed_threshold: 固定阈值（用于确保模板和截图使用相同阈值）
+    :return: 预处理后的图像
+    """
+    # 1. CLAHE 增强对比度（与现有逻辑一致）
+    clip_limit, tile_grid = _get_clahe_params(tier, 1.0)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
+    img_enhanced = clahe.apply(img_gray)
+    
+    # 2. 二值化
+    if fixed_threshold is not None:
+        # 使用固定阈值（确保模板和截图使用相同阈值）
+        _, img_binary = cv2.threshold(img_enhanced, fixed_threshold, 255, cv2.THRESH_BINARY)
+    else:
+        # Otsu 自动计算阈值
+        _, img_binary = cv2.threshold(img_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 3. 中值滤波去噪（平滑二值化带来的噪点）
+    img_clean = cv2.medianBlur(img_binary, 3)
+    
+    return img_clean
 
 
 def _get_canny_params(tier):
@@ -194,6 +253,97 @@ def _match_icon_orb(src, tmpl):
     good = [m for m in matches if m.distance < 60]
     max_possible = max(len(kp1), len(kp2))
     return min(len(good) / (max_possible + 0.1), 1.0)
+
+
+def _match_hud_gun_icon(roi_gray, tmpl_img, tier, scale, slot_key, current_res):
+    """
+    HUD 枪械图标多通道融合匹配（最高优先准确性）
+
+    融合通道（取 max）：
+      1. CLAHE + TM_CCOEFF_NORMED   — 灰度底层匹配
+      2. Sobel 梯度                   — 抜除绝对亮度，只留梯度结构
+      3. Canny 边缘                   — 更鲁棒的轮廓提取，不对亮度敏感
+      4. Otsu 二值化（跨帧 EMA 平滑阈值）
+
+    关键鲁棒性设计：
+      - 四通道任一失效，剩余通道仍能给出正确判断
+      - Otsu 阈值跨帧 EMA 平滑，消除同一枪帧间阈值抖动导致的分数波动
+      - 所有通道用同一组 CLAHE 增强后的灰度图作输入，避免重复计算
+      - 对尺寸不同的 roi/tmpl 使用 matchTemplate 滑动窗口匹配
+
+    :param roi_gray: HUD 枪械图标的 ROI 灰度图（带 PADDING 边距）
+    :param tmpl_img: 枪械模板灰度图
+    :param tier: 分辨率等级 'large'/'medium'/'small'
+    :param scale: 分辨率缩放系数
+    :param slot_key: 'Gun_1' 或 'Gun_2'（用于 Otsu EMA 缓存的按槽位隔离）
+    :param current_res: 当前分辨率字符串（用于 Otsu EMA 缓存键）
+    :return: best_score float ∈ [0, 1]
+    """
+    hs, ws = roi_gray.shape[:2]
+    ht, wt = tmpl_img.shape[:2]
+    if hs < ht or ws < wt:
+        return 0.0
+
+    # 统一 CLAHE 预处理（所有通道共用，避免重复计算）
+    clip_limit, tile_grid = _get_clahe_params(tier, 1.0)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
+    roi_c = clahe.apply(roi_gray)
+    tmpl_c = clahe.apply(tmpl_img)
+
+    scores = []
+
+    # 通道 1：CLAHE 灰度 CCOEFF_NORMED
+    try:
+        r1 = cv2.matchTemplate(roi_c, tmpl_c, cv2.TM_CCOEFF_NORMED)
+        _, s1, _, _ = cv2.minMaxLoc(r1)
+        scores.append(float(s1))
+    except cv2.error:
+        pass
+
+    # 通道 2：Sobel 梯度（对亮度偏移免疫）
+    try:
+        sobel_thresh = 20 if tier == 'large' else (15 if tier == 'medium' else 10)
+        s2 = _match_icon_sobel(roi_c, tmpl_c, sobel_thresh)
+        scores.append(float(s2))
+    except cv2.error:
+        pass
+
+    # 通道 3：Canny 边缘（滑动窗口匹配，不要求等尺寸）
+    try:
+        lo, hi = _get_canny_params(tier)
+        e1 = cv2.Canny(roi_c, lo, hi)
+        e2 = cv2.Canny(tmpl_c, lo, hi)
+        if cv2.countNonZero(e1) >= 20 and cv2.countNonZero(e2) >= 20:
+            r3 = cv2.matchTemplate(e1, e2, cv2.TM_CCOEFF_NORMED)
+            _, s3, _, _ = cv2.minMaxLoc(r3)
+            scores.append(float(s3))
+    except cv2.error:
+        pass
+
+    # 通道 4：Otsu 二值化（阈值跨帧 EMA 平滑，根治帧间波动）
+    try:
+        raw_otsu, _ = cv2.threshold(roi_c, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        raw_otsu = float(raw_otsu)
+        ema_key = (slot_key, current_res)
+        prev = _otsu_threshold_ema.get(ema_key)
+        if prev is None:
+            _otsu_threshold_ema[ema_key] = raw_otsu
+            t = int(raw_otsu)
+        else:
+            smoothed = _OTSU_EMA_ALPHA * raw_otsu + (1.0 - _OTSU_EMA_ALPHA) * prev
+            _otsu_threshold_ema[ema_key] = smoothed
+            t = int(smoothed)
+        _, b1 = cv2.threshold(roi_c, t, 255, cv2.THRESH_BINARY)
+        _, b2 = cv2.threshold(tmpl_c, t, 255, cv2.THRESH_BINARY)
+        b1 = cv2.medianBlur(b1, 3)
+        b2 = cv2.medianBlur(b2, 3)
+        r4 = cv2.matchTemplate(b1, b2, cv2.TM_CCOEFF_NORMED)
+        _, s4, _, _ = cv2.minMaxLoc(r4)
+        scores.append(float(s4))
+    except cv2.error:
+        pass
+
+    return max(scores) if scores else 0.0
 
 def _load_roi_config():
     """
@@ -403,7 +553,7 @@ def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0):
     """
     分辨率自适应匹配（4K/2K/1080p 自动分流）
 
-    large  (>=4K):  CLAHE + CCOEFF + Sobel + Canny  (现有最优 pipeline)
+    large  (>=4K):  CLAHE + CCOEFF + Sobel + Otsu  (抗背景亮度差异)
     medium (2K):     CLAHE + CCOEFF + CCORR + Sobel  (双路归一化，放弃易噪的 Canny)
     small  (<=1080p): 委托 _match_icon_small           (CCORR + 双边滤波 + 多尺度 ORB)
     """
@@ -431,22 +581,26 @@ def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0):
     sobel_thresh = 20 if tier == 'large' else 15  # medium 用更低阈值
     score_sobel = _match_icon_sobel(src_c, tmpl_c, sobel_thresh)
 
+    # --- 方法3：Canny 边缘匹配（large + medium，押滤镜端部透明背景） ---
+    # 完全忽略绝对亮度，只看结构轮廓 → 滤镜鲁棒
+    score_canny = _match_icon_canny(src_c, tmpl_c)
+
     # --- 中图分支：CCORR_NORMED 替代 Canny（更稳定） ---
     if tier == 'medium':
         score_ccorr = _match_icon_ccorr(src_c, tmpl_c)
-        return max(score_ccoeff, score_sobel, score_ccorr)
+        return max(score_ccoeff, score_sobel, score_ccorr, score_canny)
 
-    # --- 大图分支：加 Canny 边缘（4K 专享，像素最多效果最好） ---
-    canny_lo, canny_hi = _get_canny_params(tier)
-    e1 = cv2.Canny(src_c, canny_lo, canny_hi)
-    e2 = cv2.Canny(tmpl_c, canny_lo, canny_hi)
-    if cv2.countNonZero(e1) >= 20 and cv2.countNonZero(e2) >= 20:
-        result_c = cv2.matchTemplate(e1, e2, cv2.TM_CCOEFF_NORMED)
-        _, score_canny, _, _ = cv2.minMaxLoc(result_c)
+    # --- 大图分支：Otsu 二值化（4K 专享，抗背景亮度差异，替代 Canny） ---
+    # Canny 在 4K 半透明背景下仅 0.19-0.22 分，Otsu 可达 0.44-0.46
+    _, bin1 = cv2.threshold(src_c, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, bin2 = cv2.threshold(tmpl_c, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if cv2.countNonZero(bin1) >= 20 and cv2.countNonZero(bin2) >= 20:
+        result_b = cv2.matchTemplate(bin1, bin2, cv2.TM_CCOEFF_NORMED)
+        _, score_otsu, _, _ = cv2.minMaxLoc(result_b)
     else:
-        score_canny = 0.0
+        score_otsu = 0.0
 
-    return max(score_ccoeff, score_sobel, score_canny)
+    return max(score_ccoeff, score_sobel, score_otsu, score_canny)
 
 def match_sift(img1, img2, current_res=None):
     """
@@ -569,11 +723,12 @@ async def capture_and_compare(Data):
         empty_img = np.zeros((50, 50), dtype=np.uint8)
         return Keys, empty_img
 
-async def capture_all_guns(pathData, current_res=None):
+async def capture_all_guns(pathData, current_res=None, gun_name=None):
     """
     识别枪械配件
     :param pathData: {key: img} 待识别的 ROI 图像
     :param current_res: 当前分辨率（如 '2560x1440'）
+    :param gun_name: 已识别的枪械名称，用于配件限制过滤
     :return: 识别结果字典
     """
     # ✅ 提前检查调试模式
@@ -585,6 +740,20 @@ async def capture_all_guns(pathData, current_res=None):
     for mode, img1 in pathData.items():
         if debug_mode:
             logger.debug(f"[DEBUG] 开始识别 {mode}")
+        
+        # ✅ 配件限制过滤：根据枪械名称跳过不支持的槽位/模板
+        slot_type = mode[:-2]  # 'Muzzle_1' -> 'Muzzle'
+        if gun_name and slot_type not in ("Name",):
+            from data.fire_data import get_allowed_templates
+            allowed = get_allowed_templates(gun_name, slot_type)
+            if allowed is not None and len(allowed) == 0:
+                # 该枪不支持此槽位，直接跳过
+                ReturnData[slot_type] = "none"
+                if debug_mode:
+                    logger.info(f"[配件限制] {mode} 跳过（{gun_name} 不支持 {slot_type}）")
+                continue
+        else:
+            allowed = None
         
         # 验证图像
         if img1 is None or img1.size == 0:
@@ -613,6 +782,16 @@ async def capture_all_guns(pathData, current_res=None):
             continue
         
         content = os.listdir(match_Path)
+        
+        # ✅ 类型级过滤：只保留允许的模板文件
+        # 大小写归一化：将模板文件名与 allowed 集合统一转小写后比较
+        # 防御性措施：避免因模板文件名大小写（如 BanJieShi.png）导致过滤失效
+        if allowed is not None and len(allowed) > 0:
+            original_count = len(content)
+            allowed_lower = {n.lower() for n in allowed}
+            content = [f for f in content if f[:-4].lower() in allowed_lower or f[:-4].lower() == "none"]
+            if debug_mode:
+                logger.info(f"[配件限制] {mode} 模板过滤: {original_count} -> {len(content)} ({gun_name})")
         if debug_mode:
             logger.debug(f"[DEBUG] {mode} 模板目录: {match_Path}")
             logger.debug(f"[DEBUG] {mode} 模板数量: {len(content)}")
@@ -621,8 +800,9 @@ async def capture_all_guns(pathData, current_res=None):
         from concurrent.futures import ThreadPoolExecutor
         
         # 准备任务列表（传入 current_res 以启用分辨率自适应匹配）
+        # 模板名统一转小写，确保与 KEY_DATA_V3/ACCESSORIES_CH 的键匹配
         tasks = [
-            (img1, match_Path + each, each[:-4], current_res)
+            (img1, match_Path + each, each[:-4].lower(), current_res)
             for each in content
         ]
         
@@ -806,13 +986,21 @@ async def capture_all_positions_thread(current_res, resolution_settings=None, gu
                 height = bottom - top
                 logger.debug(f"🔄 [DEBUG] {key}: 相对坐标({left},{top},{right},{bottom}), 尺寸: {width}x{height}, 截图尺寸: {roi_gray.shape}")
                 
-                # ✅ 调试模式：保存截取的 ROI 图片
+                # ✅ 调试模式：保存截取的 ROI 图片（按类型分组）
                 try:
                     from datetime import datetime
-                    debug_dir = res_path('logs', 'roi_debug')
-                    os.makedirs(debug_dir, exist_ok=True)
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-                    save_path = os.path.join(debug_dir, f"{key}_{timestamp}.png")
+                    base_debug_dir = res_path('logs', 'roi_debug')
+                    os.makedirs(base_debug_dir, exist_ok=True)
+                    
+                    # 按配件类型分组
+                    category = key.split('_')[0]  # Name, Scope, Muzzle, Grip, Stock
+                    slot = key.split('_')[1] if '_' in key else ''  # 1 or 2
+                    category_dir = os.path.join(base_debug_dir, f'{category}_{slot}')
+                    os.makedirs(category_dir, exist_ok=True)
+                    
+                    # 时间戳格式：精确到秒，可读格式
+                    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                    save_path = os.path.join(category_dir, f"{timestamp}.png")
                     cv2.imwrite(save_path, roi_color)
                     logger.debug(f"💾 [DEBUG] 已保存 ROI 图: {save_path}")
                 except Exception as e:
@@ -830,11 +1018,26 @@ async def capture_all_positions_thread(current_res, resolution_settings=None, gu
     Guns1 = {k: img for k, img in captured_images[0:5]}
     Guns2 = {k: img for k, img in captured_images[5:10]}
 
+    # ✅ 获取已识别的枪械名称，用于配件限制过滤
+    gun_name_1 = None
+    gun_name_2 = None
+    try:
+        if hasattr(pc, '_Result1') and pc._Result1:
+            gun_name_1 = pc._Result1.get('Name')
+        if hasattr(pc, '_Result2') and pc._Result2:
+            gun_name_2 = pc._Result2.get('Name')
+        if gun_name_1:
+            logger.info(f"✅ 配件限制: 槽位1 枪械={gun_name_1}")
+        if gun_name_2:
+            logger.info(f"✅ 配件限制: 槽位2 枪械={gun_name_2}")
+    except Exception:
+        pass
+
     # 对这些图像进行进一步处理
     t_match = time.time()
     ReturnData = await asyncio.gather(
-        capture_all_guns(Guns1, current_res),  # ✅ 传入分辨率
-        capture_all_guns(Guns2, current_res)   # ✅ 传入分辨率
+        capture_all_guns(Guns1, current_res, gun_name=gun_name_1),  # ✅ 传入枪械名
+        capture_all_guns(Guns2, current_res, gun_name=gun_name_2)   # ✅ 传入枪械名
     )
     match_time = time.time() - t_match
     
@@ -888,4 +1091,331 @@ def recogniseif_firearm(current_res):
         return True
     else:
         return False
+
+
+def capture_hud_area(hud_roi):
+    """
+    截取 HUD 区域大图（一次截图）
+    :param hud_roi: (left, top, right, bottom) - HUD 枪械图标区域包围框（屏幕绝对坐标）
+    :return: (hud_gray, hud_color) 或 (None, None) 如果失败
+    """
+    if not hud_roi or len(hud_roi) != 4:
+        logger.error(f"HUD ROI 坐标无效: {hud_roi}")
+        return None, None
+    
+    norm = _normalize_roi_ltrb(hud_roi)
+    if not norm:
+        logger.error(f"无效的 HUD ROI 坐标: {hud_roi}")
+        return None, None
+    
+    left, top, right, bottom = norm
+    width = right - left
+    height = bottom - top
+    
+    try:
+        with _mss_capture_lock:
+            with mss.mss() as sct:
+                monitor = {"top": top, "left": left, "width": width, "height": height}
+                img = sct.grab(monitor)
+        img_np = np.array(img)
+        
+        if img_np is None or img_np.size == 0:
+            logger.error(f"HUD 截图失败，ROI: {hud_roi}")
+            return None, None
+        
+        # BGRA → BGR → Gray
+        img_color = cv2.cvtColor(img_np, cv2.COLOR_BGRA2BGR)
+        img_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+        
+        return img_gray, img_color
+    except Exception as e:
+        logger.error(f"HUD 截图异常: {e}")
+        return None, None
+
+
+def _crop_from_image(img_gray, img_color, roi):
+    """
+    从已截取的图像中裁剪出子 ROI（相对坐标）
+    :param img_gray: 灰度图
+    :param img_color: 彩色图
+    :param roi: (left, top, right, bottom) - 相对于 HUD 大图的坐标（可以是相对或绝对）
+    :return: (roi_gray, roi_color) 或 (None, None)
+    """
+    if not roi or len(roi) != 4:
+        return None, None
+    
+    left, top, right, bottom = roi
+    
+    # ✅ 裁剪时加 PADDING 边距，用于补偿 HUD UI 抖动导致的 ±1~2px 偏移
+    # matchTemplate 滑动窗口会自动找最佳对齐位置（与背包配件识别算法一致）
+    h, w = img_gray.shape[:2]
+    left_pad = max(0, left - PADDING)
+    top_pad = max(0, top - PADDING)
+    right_pad = min(w, right + PADDING)
+    bottom_pad = min(h, bottom + PADDING)
+    
+    roi_color = img_color[top_pad:bottom_pad, left_pad:right_pad]
+    roi_gray = img_gray[top_pad:bottom_pad, left_pad:right_pad]
+    
+    # 验证裁剪结果
+    if roi_gray.size == 0:
+        logger.warning(f"裁剪 ROI 为空: ({left},{top},{right},{bottom})")
+        return None, None
+    
+    return roi_gray, roi_color
+
+
+def capture_gun_icons(current_res):
+    """
+    从 HUD 右下角截取枪械图标，识别两把枪械名称并通过亮度判断当前使用的枪械
+    
+    优化方案：先截取 HUD 大图（一次 mss 调用），再裁剪两个 ROI（纯 NumPy 操作）
+    
+    :param current_res: 当前分辨率（如 '3840x2160'）
+    :return: {"Gun_1": name, "Gun_2": name, "active": 1|2} 或 None
+    """
+    from core.process import ProcessClass
+    pc = ProcessClass._instance if hasattr(ProcessClass, '_instance') else ProcessClass()
+    debug_mode = getattr(pc, 'debug_input_trace', False)
+    
+    # 1. 读取 HUD 枪械图标区域配置（从独立配置节点读取，类似背包区域）
+    user_config = _load_roi_config()
+    
+    # 读取 HUD 包围框（屏幕绝对坐标，类似 _GUNS_REOLUTION_SETTINGS）
+    hud_settings = user_config.get('_GUN_HUD_SETTINGS', {})
+    hud_roi = hud_settings.get(current_res)
+    
+    # 读取 Gun_1 和 Gun_2（相对于 hud_roi 的坐标，在分辨率配置下）
+    res_config = user_config.get(current_res, {})
+    gun1_roi_rel = res_config.get('Gun_1')
+    gun2_roi_rel = res_config.get('Gun_2')
+    
+    if not hud_roi or not gun1_roi_rel or not gun2_roi_rel:
+        logger.warning(f"未找到分辨率 {current_res} 的 HUD 枪械图标配置: _GUN_HUD_SETTINGS={hud_roi}, Gun_1={gun1_roi_rel}, Gun_2={gun2_roi_rel}")
+        return None
+    
+    # 2. 截取 HUD 大图（仅一次 mss 调用）
+    hud_gray, hud_color = capture_hud_area(hud_roi)
+    if hud_gray is None:
+        logger.error(f"截取 HUD 大图失败: {hud_roi}")
+        return None
+    
+    if debug_mode:
+        logger.info(f"[枪械图标] HUD 大图截取成功: {hud_gray.shape[1]}x{hud_gray.shape[0]}")
+    
+    # 3. 从 HUD 大图中裁剪两个枪械图标 ROI（纯 NumPy 操作，零开销）
+    gun1_gray, gun1_color = _crop_from_image(hud_gray, hud_color, gun1_roi_rel)
+    gun2_gray, gun2_color = _crop_from_image(hud_gray, hud_color, gun2_roi_rel)
+    
+    if gun1_gray is None or gun2_gray is None:
+        logger.error(f"从 HUD 大图中裁剪 ROI 失败: Gun_1={gun1_roi_rel}, Gun_2={gun2_roi_rel}")
+        return None
+    
+    if debug_mode:
+        logger.info(f"[枪械图标] ROI 裁剪成功: Gun_1={gun1_gray.shape}, Gun_2={gun2_gray.shape}")
+        logger.info(f"[枪械图标] ROI 配置: Gun_1={gun1_roi_rel}, Gun_2={gun2_roi_rel}")
+        logger.info(f"[枪械图标] HUD 包围框: {hud_roi}")
+    
+    # 4. 亮度仅用于调试日志（不再参与枪位决策；当前持枪由按键 1/2 驱动）
+    brightness_1 = float(np.mean(gun1_gray))
+    brightness_2 = float(np.mean(gun2_gray))
+    if debug_mode:
+        logger.info(f"[枪械图标] 亮度: Gun_1={brightness_1:.1f}, Gun_2={brightness_2:.1f} (仅调试，不判活)")
+    
+    # 5. 加载枪械图标模板
+    gun_template_dir = None
+    candidate = res_path('_internal', 'data', 'firearms', current_res, 'gun')
+    if os.path.exists(candidate):
+        gun_template_dir = candidate
+        if debug_mode:
+            logger.info(f"[枪械图标] 使用分辨率特定模板: {candidate}")
+    else:
+        # 降级到根目录
+        fallback = res_path('_internal', 'data', 'firearms', 'gun')
+        if os.path.exists(fallback):
+            gun_template_dir = fallback
+            if debug_mode:
+                logger.info(f"[枪械图标] 降级使用根目录模板: {fallback}")
+    
+    if not gun_template_dir:
+        logger.warning("枪械图标模板目录不存在")
+        return {"Gun_1": "none", "Gun_2": "none"}
+    
+    # 枚举所有模板文件（.bmp 和 .png）
+    template_files = [f for f in os.listdir(gun_template_dir) 
+                      if f.lower().endswith(('.bmp', '.png'))]
+    
+    if not template_files:
+        logger.warning(f"枪械图标模板目录为空: {gun_template_dir}")
+        return {"Gun_1": "none", "Gun_2": "none"}
+    
+    if debug_mode:
+        logger.info(f"[枪械图标] 模板目录: {gun_template_dir}")
+        logger.info(f"[枪械图标] 模板文件列表: {template_files}")
+        logger.info(f"[枪械图标] 模板总数: {len(template_files)}")
+    
+    # 5. 对两把枪分别进行模板匹配
+    tier, scale = _classify_resolution(current_res) if current_res else ('large', 1.0)
+    results = {}
+    
+    if debug_mode:
+        logger.info(f"[枪械图标] 分辨率等级: {tier}, 缩放比例: {scale:.2f}")
+    
+    for slot_key, roi_gray, roi_color in [("Gun_1", gun1_gray, gun1_color), ("Gun_2", gun2_gray, gun2_color)]:
+        best_name = "none"
+        best_score = 0.0
+        scores_detail = []
+        
+        if debug_mode:
+            logger.info(f"[枪械图标] ===== 开始匹配 {slot_key} =====")
+            logger.info(f"[枪械图标] {slot_key} ROI 尺寸: {roi_gray.shape[1]}x{roi_gray.shape[0]} (宽x高)")
+        
+        matched_count = 0
+        skipped_count = 0
+        
+        for tmpl_file in template_files:
+            tmpl_path = os.path.join(gun_template_dir, tmpl_file)
+            tmpl_img = _load_template_cached(tmpl_path)
+            if tmpl_img is None:
+                continue
+            
+            # 使用 CLAHE + TM_CCOEFF_NORMED 进行匹配
+            # 枪械图标尺寸较大 (~284x104)，用 matchTemplate 滑动窗口
+            hs, ws = roi_gray.shape[:2]
+            ht, wt = tmpl_img.shape[:2]
+            
+            if hs < ht or ws < wt:
+                # ROI 比模板小，跳过
+                skipped_count += 1
+                if debug_mode:
+                    logger.debug(f"[枪械图标]   跳过 {tmpl_file}: 模板尺寸({wt}x{ht}) > ROI尺寸({ws}x{hs})")
+                continue
+            
+            # ✅ 多通道融合匹配（CLAHE + Sobel + Canny + Otsu EMA）
+            # 任一通道失效不影响整体判断，Otsu 阈值跨帧平滑根治分数波动
+            score = _match_hud_gun_icon(roi_gray, tmpl_img, tier, scale, slot_key, current_res)
+            
+            tmpl_name = os.path.splitext(tmpl_file)[0]  # 去掉扩展名
+            scores_detail.append((tmpl_name, score))
+            
+            if score > best_score:
+                best_score = score
+                best_name = tmpl_name
+                matched_count += 1
+                if debug_mode:
+                    logger.debug(f"[枪械图标]   {tmpl_file}: {score:.4f} ★ 新的最佳匹配")
+            elif debug_mode and score > 0.3:
+                logger.debug(f"[枪械图标]   {tmpl_file}: {score:.4f}")
+        
+        if debug_mode:
+            logger.info(f"[枪械图标] {slot_key} 匹配统计: 成功匹配{matched_count}个, 跳过{skipped_count}个")
+        
+        # ✅ 判定门槛：绝对阈值 + 区分度 (Top1-Top2 gap) 双保险
+        # - 高分线（score >= _HUD_HIGH_SCORE）：直接接受
+        # - 中等分 + 高 gap：接受（区分度满足）
+        # - 中等分 + 低 gap：拒绝（防止误识）
+        scores_detail.sort(key=lambda x: x[1], reverse=True)
+        MATCH_THRESHOLD = max(0.38, 0.50 * scale)
+        second_best = scores_detail[1][1] if len(scores_detail) >= 2 else 0.0
+        gap = best_score - second_best
+        
+        if debug_mode:
+            logger.info(f"[枪械图标] {slot_key} 判定阈值: {MATCH_THRESHOLD:.4f} (基于 scale={scale:.2f}), gap门槛={_HUD_GAP_MIN}, 高分线={_HUD_HIGH_SCORE}")
+        
+        # 分级接受逻辑
+        accept = False
+        reject_reason = ""
+        if best_score >= _HUD_HIGH_SCORE:
+            accept = True
+        elif best_score >= MATCH_THRESHOLD and gap >= _HUD_GAP_MIN:
+            accept = True
+        elif best_score >= MATCH_THRESHOLD:
+            reject_reason = f"区分度不足(gap={gap:.4f}<{_HUD_GAP_MIN})"
+        else:
+            reject_reason = f"分数低于阈值({best_score:.4f}<{MATCH_THRESHOLD:.4f})"
+        
+        if accept:
+            results[slot_key] = best_name
+            if debug_mode:
+                logger.info(f"[枪械图标] {slot_key} ✅ 匹配成功: {best_name} (置信度={best_score:.4f}, gap={gap:.4f})")
+        else:
+            results[slot_key] = "none"
+            if debug_mode:
+                logger.warning(f"[枪械图标] {slot_key} ❌ 匹配失败: 最佳={best_name}({best_score:.4f}), 理由={reject_reason}")
+        
+        if debug_mode:
+            top5 = scores_detail[:5]
+            top5_str = ", ".join([f"{n}:{s:.4f}" for n, s in top5])
+            logger.info(f"[枪械图标] {slot_key} Top5: {top5_str}")
+            
+            # 输出置信度差距分析
+            if len(scores_detail) >= 2:
+                gap = scores_detail[0][1] - scores_detail[1][1]
+                logger.info(f"[枪械图标] {slot_key} 置信度差距: Top1-Top2 = {gap:.4f} ({'明显' if gap > 0.1 else '接近'})")
+        
+        if results[slot_key] != "none":
+            logger.info(f"枪械图标 {slot_key}={results[slot_key]}({best_score:.4f})")
+    
+    # ✅ 多帧共识投票：当前帧识别与历史不一致时，用共识结果兜底
+    # 目的：拒绝单帧误识导致压枪数据错乱，唯有近 N 帧达成共识才切枪
+    for slot_key in ("Gun_1", "Gun_2"):
+        hist = _hud_slot_history[slot_key]
+        hist.append(results[slot_key])
+        if len(hist) > _HUD_CONSENSUS_WINDOW:
+            hist.pop(0)
+        
+        # 共识投票：窗口内最高频结果
+        if len(hist) >= _HUD_CONSENSUS_MIN_VOTES:
+            top, count = Counter(hist).most_common(1)[0]
+            # 当前帧与共识结果不一致 且 共识达成最小票数 → 用共识结果覆盖
+            if count >= _HUD_CONSENSUS_MIN_VOTES and top != results[slot_key]:
+                if debug_mode:
+                    logger.info(f"[HUD CONSENSUS] {slot_key} {results[slot_key]}→{top} (窗口{_HUD_CONSENSUS_WINDOW}帧中{count}票)")
+                results[slot_key] = top
+    
+    # 6. 调试模式：保存 HUD 截图和匹配结果分析（按类型分组）
+    if debug_mode:
+        try:
+            from datetime import datetime
+            base_debug_dir = res_path('logs', 'roi_debug')
+            os.makedirs(base_debug_dir, exist_ok=True)
+            
+            # 时间戳格式：精确到秒，可读格式
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            
+            # 按类型创建子目录
+            gun1_dir = os.path.join(base_debug_dir, 'Gun_1_ROI')
+            gun2_dir = os.path.join(base_debug_dir, 'Gun_2_ROI')
+            result_dir = os.path.join(base_debug_dir, 'Recognition_Results')
+            
+            os.makedirs(gun1_dir, exist_ok=True)
+            os.makedirs(gun2_dir, exist_ok=True)
+            os.makedirs(result_dir, exist_ok=True)
+            
+            # 保存原始 ROI 截图（按类型分组）
+            cv2.imwrite(os.path.join(gun1_dir, f"{timestamp}.png"), gun1_color)
+            cv2.imwrite(os.path.join(gun2_dir, f"{timestamp}.png"), gun2_color)
+            
+            # 保存匹配结果摘要
+            result_summary = (
+                f"时间: {timestamp}\n"
+                f"分辨率: {current_res}\n"
+                f"HUD 包围框: {hud_roi}\n"
+                f"Gun_1 ROI: {gun1_roi_rel} -> 识别: {results.get('Gun_1', 'none')}\n"
+                f"Gun_2 ROI: {gun2_roi_rel} -> 识别: {results.get('Gun_2', 'none')}\n"
+                f"当前枪械: 由按键驱动（HUD 不再判活）\n"
+                f"亮度(仅调试): Gun_1={brightness_1:.1f}, Gun_2={brightness_2:.1f}"
+            )
+            summary_file = os.path.join(result_dir, f"{timestamp}.txt")
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write(result_summary)
+            
+            logger.info(f"[枪械图标] 调试信息已保存: {base_debug_dir}")
+            logger.info(f"[枪械图标]   - Gun_1 ROI: {gun1_dir}")
+            logger.info(f"[枪械图标]   - Gun_2 ROI: {gun2_dir}")
+            logger.info(f"[枪械图标]   - 识别结果: {result_dir}")
+        except Exception as e:
+            logger.debug(f"保存枪械图标调试图失败: {e}")
+    
+    return results
 

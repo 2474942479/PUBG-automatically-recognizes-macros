@@ -515,8 +515,29 @@ class GameHUD(QWidget):
         # ✅ 透明背景：不绘制任何背景和边框
         # 直接绘制文字，实现完全透明效果
 
+        font = self._font('main', QFont.Bold)
+        p.setFont(font)
+        fm = QFontMetrics(font)
+
+        # ⚠️ 识别失败警告：连续失败 ≥ 阈值时，HUD 整行红字警告，提醒用户游戏内无法获取信息
+        if getattr(pc, '_recognition_failed', False):
+            p.setPen(QPen(self._COL_RED))
+            warn = f'⚠️ 识别失败 ({getattr(pc, "_tab_fail_count", 0)}次) 请确认背包已打开并重按 Tab'
+            p.drawText(10, 22, warn)
+            return
+
         gun, slot = self._get_current_gun()
         gun_name = _gun_cn(gun.get('Name')) if gun else '—'
+        
+        # ⚠️ 双源冲突检测：背包 Name vs HUD Name_hud，不一致时在枪名后追加冲突标记
+        name_conflict = None  # 例如 "HUD=AKM"
+        if gun:
+            bag_name_raw = str(gun.get('Name', '') or '').lower()
+            hud_name_raw = str(gun.get('Name_hud', '') or '').lower()
+            if bag_name_raw and bag_name_raw not in ('none', '') \
+                    and hud_name_raw and hud_name_raw not in ('none', '') \
+                    and bag_name_raw != hud_name_raw:
+                name_conflict = _gun_cn(hud_name_raw)
         
         # ✅ 使用 get_current_scope() 获取正确的倍镜模式（支持双模式切换）
         scope_raw = pc.get_current_scope() if gun else 'none'
@@ -528,10 +549,6 @@ class GameHUD(QWidget):
         muzzle = _accessory_cn(gun.get('Muzzle'), 'muzzle') if gun else ''
         grip = _accessory_cn(gun.get('Grip'), 'grip') if gun else ''
         stock = _accessory_cn(gun.get('Stock'), 'stock') if gun else ''
-
-        font = self._font('main', QFont.Bold)
-        p.setFont(font)
-        fm = QFontMetrics(font)
 
         x = 10
         y_pos = 22  # ✅ 调整垂直位置，适应 32px 高度
@@ -547,10 +564,16 @@ class GameHUD(QWidget):
         p.drawText(x, y_pos, '|')
         x += 8
         
-        # ✅ 2. 枪械名称 - 金色
-        p.setPen(QPen(self._COL_GOLD))
-        p.drawText(x, y_pos, gun_name)
-        x += fm.horizontalAdvance(gun_name) + 6
+        # ✅ 2. 枪械名称 - 金色（冲突时替换为红色并追加 HUD 候选名）
+        if name_conflict:
+            p.setPen(QPen(self._COL_RED))
+            conflict_text = f'{gun_name}⚠HUD={name_conflict}'
+            p.drawText(x, y_pos, conflict_text)
+            x += fm.horizontalAdvance(conflict_text) + 6
+        else:
+            p.setPen(QPen(self._COL_GOLD))
+            p.drawText(x, y_pos, gun_name)
+            x += fm.horizontalAdvance(gun_name) + 6
         
         # 分隔符
         p.setPen(QPen(QColor(255, 255, 255, 100)))
