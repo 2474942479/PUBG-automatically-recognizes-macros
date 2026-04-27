@@ -132,6 +132,20 @@ def train_one(
         project=str(weights_dir),
         name="train",
         exist_ok=True,           # 允许覆盖已有的训练结果
+        # ✅ 关闭数据增强，让模型学习原始图片特征（推理时无增强）
+        augment=False,           # 关闭几何增强（翻转、旋转等）
+        auto_augment=None,       # 关闭自动增强（randaugment 等）
+        erasing=0.0,             # 关闭随机擦除
+        degrees=0.0,             # 关闭旋转
+        translate=0.0,           # 关闭平移
+        scale=0.0,               # 关闭缩放
+        shear=0.0,               # 关闭剪切
+        hsv_h=0.0,               # 关闭色调变化
+        hsv_s=0.0,               # 关闭饱和度变化
+        hsv_v=0.0,               # 关闭亮度变化
+        fliplr=0.0,              # 关闭左右翻转
+        flipud=0.0,              # 关闭上下翻转
+        mosaic=0.0,              # 关闭 Mosaic 拼接（分类任务不需要）
     )
     if device:
         train_kw["device"] = device

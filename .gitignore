@@ -10,3 +10,8 @@ test/
 *.spec
 logs/
 calibration/roi_output/
+
+# 模型训练数据
+datasets/
+models_export/
+_internal/models

@@ -82,11 +82,25 @@ def setup_logging():
     ))
     hud_handler.addFilter(_HUDLogFilter())
     
+    # ✅ ONNX/YOLO 模型识别日志：只记录含 [ONNX] 标签的日志
+    onnx_handler = RotatingFileHandler(
+        os.path.join(log_dir, 'onnx_recognition.log'),
+        mode='w',
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding='utf-8'
+    )
+    onnx_handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s'
+    ))
+    onnx_handler.addFilter(_ONNXLogFilter())
+    
     root = logging.getLogger()
     root.setLevel(logging.INFO)  # ✅ 默认 INFO 级别
     root.addHandler(app_handler)
     root.addHandler(backpack_handler)
     root.addHandler(hud_handler)
+    root.addHandler(onnx_handler)
 
 
 class _BackpackLogFilter(logging.Filter):
@@ -103,6 +117,12 @@ class _HUDLogFilter(logging.Filter):
     """HUD 枪械识别日志过滤器：只记录含 [枪械图标] 标签的日志"""
     def filter(self, record):
         return '[枪械图标]' in record.getMessage()
+
+
+class _ONNXLogFilter(logging.Filter):
+    """ONNX/YOLO 模型识别日志过滤器：只记录含 [ONNX] 标签的日志"""
+    def filter(self, record):
+        return '[ONNX]' in record.getMessage()
 
 
 def setup_exception_handler():

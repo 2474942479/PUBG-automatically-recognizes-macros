@@ -73,13 +73,13 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
             self.PC.StartFire = False  # 设置开镜状态为False
             self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
 
-            # ✅ 双源冲突解决：若当前槽位存在未解决冲突，按 1/2 = 接受 HUD 结果
-            if self.PC._conflict_pending.get(slot_num):
-                self.PC.confirm_hud_result(slot_num, self.keyInfo.emit)
-
-            self.PC.Change_firearms(actual_key)  # 先切换枪械槽位
+            # 切枪是即时动作：按几就是几号枪
+            self.PC.Change_firearms(actual_key)
             self.keyInfo.emit('e', (self.PC.Current_firearms,))  # 发送枪械信息信号
-            # ✅ 触发枪械图标识别（异步线程，不阻塞按键处理）
+            # 后台静默触发 HUD 图标识别（更新 Name_hud）
+            Thread(target=self.PC.recognize_gun_icons, args=(self.keyInfo.emit,)).start()
+        elif Keys == "f":
+            # 手动触发 HUD 识别刷新
             Thread(target=self.PC.recognize_gun_icons, args=(self.keyInfo.emit,)).start()
         elif Keys in "345gx#$":  # 如果按下3、4、5、g、x或Shift+3(#)、Shift+4($)
             self.PC.StartFire = False  # 设置开镜状态为False
