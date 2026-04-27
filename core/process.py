@@ -103,6 +103,14 @@ class ProcessClass:
         self._recognition_failed = False
         self._TAB_FAIL_THRESHOLD = 2
 
+        # ═══ 双源冲突状态 ═══
+        # _conflict_pending[slot]: 当前是否存在未解决的识别冲突（背包 vs HUD）
+        # _conflict_hud_name[slot]: 冲突时 HUD 识别到的枪名（供确认提示用）
+        # 用户按 1/2 → confirm_hud_result(slot) → 以 HUD 为准，清除冲突
+        # 用户按 Tab（新一轮背包识别） → 冲突自动清除，结果以新背包识别为准
+        self._conflict_pending = {}   # {1: True/False, 2: True/False}
+        self._conflict_hud_name = {}  # {1: 'akm', 2: None}
+
     def move_mouse(self, x, y):
         self._gd.mouse_R(x, y)
 
@@ -165,6 +173,9 @@ class ProcessClass:
         # 重置识别自愈状态
         self._tab_fail_count = 0
         self._recognition_failed = False
+        # 重置双源冲突状态
+        self._conflict_pending = {}
+        self._conflict_hud_name = {}
 
     def read_gun_data(self, fileName) -> dict:
         """读取 v3 枪械弹道数据（直接读取 JSON）"""
@@ -575,6 +586,11 @@ class ProcessClass:
                 _input_trace.log("Tab识别 已取消(背包关)")
                 return
 
+            # Tab 开始新一轮识别：清除所有未解决的双源冲突
+            # 规则：Tab = 用户想看背包，以本次背包识别结果为准
+            self._conflict_pending = {}
+            self._conflict_hud_name = {}
+
             # ✅ 优化：降低等待时间（180ms → 100ms），提升响应速度
             time.sleep(0.10)
             if not self.TabKey:
@@ -653,16 +669,46 @@ class ProcessClass:
             # 对应 Python 中 Current_firearms==3 (手枪位)
             self.all_ratio = 0.9 if self.Current_firearms == 3 else 1.0
 
+    def confirm_hud_result(self, slot, Emit=None):
+        """
+        用户按 1/2 确认接受 HUD 识别结果（在冲突状态下）。
+        将 Name_hud 写入权威 Name 字段，清除冲突标志。
+
+        :param slot: 枪械槽位编号 (1 或 2)
+        :param Emit: UI 信号回调
+        """
+        result_attr = '_Result1' if slot == 1 else '_Result2'
+        existing = getattr(self, result_attr, None)
+        if not existing:
+            return
+
+        hud_name = existing.get("Name_hud", "")
+        if not hud_name or hud_name.lower() in ("none", ""):
+            return
+
+        old_name = existing.get("Name", "")
+        existing["Name"] = hud_name.lower()
+        self._conflict_pending[slot] = False
+        self._conflict_hud_name.pop(slot, None)
+
+        logger.info(f"✅ 用户确认槽{slot} 以 HUD 为准: {old_name} → {hud_name}")
+        _input_trace.log("冲突解决 槽%s 用户选HUD: %s→%s", slot, old_name, hud_name)
+
+        if Emit:
+            Emit('g', (None,))
+            Emit('l', (f"✅ 槽{slot} 已采用 HUD 识别结果: {hud_name}",))
+
     def recognize_gun_icons(self, Emit=None):
         """
-        从 HUD 右下角识别枪械图标，作为背包识别的**独立双源**，不相互覆盖。
+        从 HUD 右下角识别枪械图标（1/2 切枪时触发）。
 
-        关键设计（用户可见的冲突提示）：
-        - Tab 背包识别结果→ _Result*["Name"]（压枪算法权威来源）
-        - HUD 图标识别结果→ _Result*["Name_hud"]（**不**覆盖权威字段，只做旁证）
-        - 两者均保留，overlay_hud 绘制层检测 Name != Name_hud 时 → 给出冲突提示，
-          用户自己判断哪个源准确，必要时重按 Tab 决斗。
-        - 原因：单源每当有错识，自动覆盖会让用户无感知；双源并列让误差浮出水面。
+        冲突处理逻辑（用户主导）：
+          - HUD 与背包一致 → 静默更新 Name_hud，无提示
+          - HUD 与背包冲突 → 记录冲突，提示用户：
+              "按 1/2 = 接受 HUD 结果 | 按 Tab = 重新识别背包"
+          - 用户按 1/2 → confirm_hud_result(slot) → Name = Name_hud，冲突清除
+          - 用户按 Tab → recognize_all_guns_info 自动清除冲突，以背包为准
+          - 背包未识别时 → HUD 临时填补 Name（标注为临时），建议按 Tab 确认
         当前持枪由按键 1/2 驱动，HUD 不再改写 Current_firearms。
         """
         try:
@@ -674,8 +720,9 @@ class ProcessClass:
             gun1_name = result.get("Gun_1", "none")
             gun2_name = result.get("Gun_2", "none")
 
-            # 双源并存：HUD 写入 Name_hud 独立字段，不触碰权威 Name
-            conflicts = []
+            new_conflicts = []
+            resolved_conflicts = []
+
             for slot_idx, hud_name, result_attr in (
                 (1, gun1_name, '_Result1'),
                 (2, gun2_name, '_Result2'),
@@ -685,7 +732,7 @@ class ProcessClass:
                     existing = {}
                     setattr(self, result_attr, existing)
 
-                # 无论 HUD 识别到什么，都写入 Name_hud（无值时写 none 保持一致）
+                # 始终更新 Name_hud（供 HUD 面板展示用）
                 existing["Name_hud"] = hud_name
 
                 existing_name = str(existing.get("Name", "") or "").lower()
@@ -693,26 +740,52 @@ class ProcessClass:
                 has_bag = existing_name and existing_name not in ("none", "")
                 has_hud = hud_name_l and hud_name_l not in ("none", "")
 
-                if has_bag and has_hud and existing_name != hud_name_l:
-                    conflicts.append((slot_idx, existing_name, hud_name_l))
-                    logger.warning(
-                        f"枪械识别冲突 槽{slot_idx}: 背包={existing_name} vs HUD={hud_name_l}（两源并存，不自动决断）"
-                    )
+                if has_bag and has_hud:
+                    if existing_name != hud_name_l:
+                        # 冲突：背包与 HUD 不一致
+                        was_pending = self._conflict_pending.get(slot_idx, False)
+                        self._conflict_pending[slot_idx] = True
+                        self._conflict_hud_name[slot_idx] = hud_name_l
+                        if not was_pending:
+                            # 新冲突，打印提示
+                            new_conflicts.append((slot_idx, existing_name, hud_name_l))
+                        logger.warning(
+                            f"枪械识别冲突 槽{slot_idx}: 背包={existing_name} vs HUD={hud_name_l}"
+                        )
+                    else:
+                        # 一致：冲突自动消解
+                        if self._conflict_pending.get(slot_idx):
+                            resolved_conflicts.append(slot_idx)
+                        self._conflict_pending[slot_idx] = False
+                        self._conflict_hud_name.pop(slot_idx, None)
+
                 elif has_hud and not has_bag:
-                    # 背包未识别过（用户还没按过 Tab）：容许 HUD 充当临时数据源，但标记 Name 仅旁证
-                    existing["Name"] = hud_name_l  # 作为临时 Name，供压枪使用
-                    logger.info(f"HUD 临时填补槽{slot_idx} Name={hud_name_l}（背包未识别，建议按 Tab 确认）")
+                    # 背包还未识别 → HUD 作为临时来源
+                    existing["Name"] = hud_name_l
+                    self._conflict_pending[slot_idx] = False
+                    logger.info(f"HUD 临时填补槽{slot_idx} Name={hud_name_l}（建议按 Tab 确认）")
 
             _input_trace.log(
-                "枪械图标识别 完成 Gun_1=%s Gun_2=%s 当前持枪=%s(按键驱动) 冲突=%s",
-                gun1_name, gun2_name, self.Current_firearms, conflicts or "无"
+                "枪械图标识别 完成 Gun_1=%s Gun_2=%s 持枪=%s(按键驱动) 新冲突=%s",
+                gun1_name, gun2_name, self.Current_firearms,
+                new_conflicts if new_conflicts else "无",
             )
 
             if Emit:
-                Emit('g', (None,))  # 刷新 UI显示
-                if conflicts:
-                    parts = [f"槽{s}：背包={b}/HUD={h}" for s, b, h in conflicts]
-                    Emit('l', (f"⚠️ 识别源冲突，建议重按 Tab 确认：{'; '.join(parts)}",))
+                Emit('g', (None,))
+                if new_conflicts:
+                    parts = [
+                        f"槽{s}：背包={b} / HUD={h}"
+                        for s, b, h in new_conflicts
+                    ]
+                    Emit('l', (
+                        f"⚠️ 识别冲突：{'; '.join(parts)}  "
+                        f"→ 按 {'/'.join(str(s) for s, *_ in new_conflicts)} 接受HUD，按Tab重新识别背包",
+                    ))
+                if resolved_conflicts:
+                    Emit('l', (
+                        f"✅ 槽{'、'.join(str(s) for s in resolved_conflicts)} 冲突已自动消解（HUD 与背包一致）",
+                    ))
 
         except Exception as e:
             logger.error(f"枪械图标识别异常: {e}")

@@ -222,6 +222,23 @@ GUN_ACCESSORIES = {
 }
 
 
+def get_allowed_slots(gun_name):
+    """
+    获取枪械支持的配件槽位集合（用于两阶段识别：先识枪名，再裁剪允许的配件）
+    :param gun_name: 枪械名称 (如 'm416')
+    :return:
+        - None: 未知枪械，不限制（识别所有槽位）
+        - set: 支持的槽位集合，已自动包含 'Scope'（所有枪都支持）
+    """
+    if not gun_name or gun_name.lower() == "none":
+        return None  # 未知枪械，不限制
+    gun_info = GUN_ACCESSORIES.get(gun_name.lower())
+    if not gun_info:
+        return None  # 未列入的枪械，不限制（向后兼容）
+    # slots 不含 Scope，这里补上
+    return gun_info.get("slots", set()) | {"Scope"}
+
+
 def get_allowed_templates(gun_name, slot_type):
     """
     获取枪械在指定槽位允许的模板名称集合（完整版）

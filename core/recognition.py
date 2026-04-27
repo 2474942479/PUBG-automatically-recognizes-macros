@@ -32,20 +32,21 @@ _roi_config_cache_ttl = 60  # 缓存 60 秒
 # 裁剪时扩边 → matchTemplate 滑动窗口自动找最佳对齐位置
 PADDING = 2
 
-# 多帧共识投票：每槽位保留最近 N 帧识别结果
-# 当最近 3 帧中 ≥2 帧一致时锁定结果，消除偶发单帧漏检
-CONSENSUS_WINDOW = 3
-CONSENSUS_MIN_VOTES = 2
-_slot_history = {}  # {"Name_1": ["m416", "m416", "m416"], ...}
-_slot_locked = {}   # {"Name_1": "m416", ...}  锁定后的兰底值
+# 单次 Tab 多帧截图投票（FPS 游戏实时性要求高，不依赖跨次 Tab 累积历史）
+# 每次按 Tab 快速截取 N 帧背包大图，对每帧独立识别，投票取共识结果
+# 帧间隔 ≥ 1 个游戏渲染帧（60fps=16.7ms），确保是不同画面
+MULTI_FRAME_COUNT = 3         # 截取帧数
+MULTI_FRAME_INTERVAL = 0.04   # 帧间隔 40ms
+MULTI_FRAME_MIN_VOTES = 2     # 投票最少一致票数
 
 # ============================================================
 # HUD 枪械图标识别稳定性机制（最高优先准确性）
 # ============================================================
 # 多帧共识：Gun_1 / Gun_2 的近 N 帧识别历史，与当前帧不一致时
 # 用共识结果兰底，避免单帧误识导致压枪数据错乱。
-_HUD_CONSENSUS_WINDOW = 3
-_HUD_CONSENSUS_MIN_VOTES = 2
+# FPS 游戏：1/2 切枪频繁，5 帧 / 3 票避免切枪瞬间的单帧噪声
+_HUD_CONSENSUS_WINDOW = 5
+_HUD_CONSENSUS_MIN_VOTES = 3
 _hud_slot_history = {"Gun_1": [], "Gun_2": []}
 
 # ⚠️ 已弃用：亮度判活已由按键（1/2）驱动替代，HUD 识别不再决定当前持枪。
@@ -56,9 +57,23 @@ _hud_slot_history = {"Gun_1": [], "Gun_2": []}
 _otsu_threshold_ema = {}
 _OTSU_EMA_ALPHA = 0.3  # 新帧权重：0.3 新帧 + 0.7 历史，平滑强度适中
 
+# 背包配件 Otsu EMA 缓存（与 HUD 隔离）
+# 仅在单次 Tab 的多帧之内有效，每次 Tab 开始时清空
+_backpack_otsu_ema = {}
+
 # HUD 区分度判定门槛：Top1-Top2 gap 过小 且 分数未达到高分线，拒绝识别。
 _HUD_GAP_MIN = 0.03      # 最小差距
 _HUD_HIGH_SCORE = 0.60   # 高分线：达到此分数即使 gap 小也接受
+
+# 背包配件区分度判定门槛（与 HUD 参数独立，可单独调优）
+_BACKPACK_GAP_MIN = 0.03
+_BACKPACK_HIGH_SCORE = 0.55
+
+
+def clear_backpack_otsu_ema():
+    """每次 Tab 开始时清空背包配件 Otsu EMA 缓存，避免跨次 Tab 干扰"""
+    global _backpack_otsu_ema
+    _backpack_otsu_ema = {}
 
 def _get_sift_detector():
     """获取或创建 SIFT 检测器（单例模式）"""
@@ -458,10 +473,13 @@ def _ensure_min_size(img, min_dim=200):
 def _match_single_template(args):
     """
     并行化 SIFT 匹配任务（用于 ThreadPoolExecutor）
-    :param args: (img1, template_path, template_name, current_res)
+    :param args: (img1, template_path, template_name, current_res[, slot_key])
     :return: (template_name, score) 或 None
     """
-    if len(args) == 4:
+    slot_key = None
+    if len(args) == 5:
+        img1, template_path, template_name, current_res, slot_key = args
+    elif len(args) == 4:
         img1, template_path, template_name, current_res = args
     else:
         img1, template_path, template_name = args
@@ -472,10 +490,9 @@ def _match_single_template(args):
         return None
     
     try:
-        score = match_sift(img1, img2, current_res)
+        score = match_sift(img1, img2, current_res, slot_key=slot_key)
         return (template_name, score)
     except Exception as e:
-        # ✅ 只在调试模式下记录异常
         from core.process import ProcessClass
         pc = ProcessClass()
         if getattr(pc, 'debug_input_trace', False):
@@ -549,13 +566,21 @@ def compute_matches_mask(matches, distance_threshold):
     return matchesMask, matchedPoints1
 
 
-def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0):
+def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0, slot_key=None, current_res=None):
     """
     分辨率自适应匹配（4K/2K/1080p 自动分流）
 
     large  (>=4K):  CLAHE + CCOEFF + Sobel + Otsu  (抗背景亮度差异)
     medium (2K):     CLAHE + CCOEFF + CCORR + Sobel  (双路归一化，放弃易噪的 Canny)
     small  (<=1080p): 委托 _match_icon_small           (CCORR + 双边滤波 + 多尺度 ORB)
+
+    Otsu 通道改进（移植自 _match_hud_gun_icon）：
+      - 统一阈值：src 和 tmpl 使用同一个 Otsu 阈值做二值化
+      - EMA 平滑：同一 slot_key 的阈值跨帧平滑，消除帧间波动
+      - 中值滤波：二值化后 medianBlur(3) 去噪
+
+    :param slot_key: 槽位标识（如 'Muzzle_1'），用于 EMA 缓存隔离
+    :param current_res: 当前分辨率字符串，用于 EMA 缓存键
     """
     # 尺寸保护：src 任一维小于 tmpl → matchTemplate 会断言失败
     hs, ws = src.shape[:2]
@@ -582,7 +607,6 @@ def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0):
     score_sobel = _match_icon_sobel(src_c, tmpl_c, sobel_thresh)
 
     # --- 方法3：Canny 边缘匹配（large + medium，押滤镜端部透明背景） ---
-    # 完全忽略绝对亮度，只看结构轮廓 → 滤镜鲁棒
     score_canny = _match_icon_canny(src_c, tmpl_c)
 
     # --- 中图分支：CCORR_NORMED 替代 Canny（更稳定） ---
@@ -590,24 +614,44 @@ def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0):
         score_ccorr = _match_icon_ccorr(src_c, tmpl_c)
         return max(score_ccoeff, score_sobel, score_ccorr, score_canny)
 
-    # --- 大图分支：Otsu 二值化（4K 专享，抗背景亮度差异，替代 Canny） ---
-    # Canny 在 4K 半透明背景下仅 0.19-0.22 分，Otsu 可达 0.44-0.46
-    _, bin1 = cv2.threshold(src_c, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    _, bin2 = cv2.threshold(tmpl_c, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if cv2.countNonZero(bin1) >= 20 and cv2.countNonZero(bin2) >= 20:
-        result_b = cv2.matchTemplate(bin1, bin2, cv2.TM_CCOEFF_NORMED)
-        _, score_otsu, _, _ = cv2.minMaxLoc(result_b)
-    else:
-        score_otsu = 0.0
+    # --- 大图分支：Otsu 二值化（统一阈值 + EMA 平滑 + 中值滤波） ---
+    score_otsu = 0.0
+    try:
+        raw_otsu, _ = cv2.threshold(src_c, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        raw_otsu = float(raw_otsu)
+
+        if slot_key is not None:
+            ema_key = (slot_key, current_res)
+            prev = _backpack_otsu_ema.get(ema_key)
+            if prev is None:
+                _backpack_otsu_ema[ema_key] = raw_otsu
+                t = int(raw_otsu)
+            else:
+                smoothed = _OTSU_EMA_ALPHA * raw_otsu + (1.0 - _OTSU_EMA_ALPHA) * prev
+                _backpack_otsu_ema[ema_key] = smoothed
+                t = int(smoothed)
+        else:
+            t = int(raw_otsu)
+
+        _, bin1 = cv2.threshold(src_c, t, 255, cv2.THRESH_BINARY)
+        _, bin2 = cv2.threshold(tmpl_c, t, 255, cv2.THRESH_BINARY)
+        bin1 = cv2.medianBlur(bin1, 3)
+        bin2 = cv2.medianBlur(bin2, 3)
+        if cv2.countNonZero(bin1) >= 20 and cv2.countNonZero(bin2) >= 20:
+            result_b = cv2.matchTemplate(bin1, bin2, cv2.TM_CCOEFF_NORMED)
+            _, score_otsu, _, _ = cv2.minMaxLoc(result_b)
+    except cv2.error:
+        pass
 
     return max(score_ccoeff, score_sobel, score_otsu, score_canny)
 
-def match_sift(img1, img2, current_res=None):
+def match_sift(img1, img2, current_res=None, slot_key=None):
     """
     SIFT 特征匹配
     :param img1: 待匹配的图像（灰度图）
     :param img2: 模板图像（灰度图）
     :param current_res: 当前分辨率字符串（如 '2560x1440'）
+    :param slot_key: 槽位标识（如 'Muzzle_1'），用于 Otsu EMA 缓存隔离
     :return: 匹配率
     """
     # 验证输入图像
@@ -638,7 +682,7 @@ def match_sift(img1, img2, current_res=None):
         tier, scale = _classify_resolution(current_res) if current_res else ('large', 1.0)
         # 路径1：尺寸完全一致 → 分辨率自适应多通道融合
         if img1.shape == img2.shape:
-            score_tm = _match_icon_hybrid(img1, img2, tier, scale)
+            score_tm = _match_icon_hybrid(img1, img2, tier, scale, slot_key=slot_key, current_res=current_res)
             score_orb = _match_icon_orb(img1, img2)
             return float(max(score_tm, score_orb))
         
@@ -651,7 +695,7 @@ def match_sift(img1, img2, current_res=None):
                 src, tmpl = img1, img2
             else:
                 src, tmpl = img2, img1
-            score_tm = _match_icon_hybrid(src, tmpl, tier, scale)
+            score_tm = _match_icon_hybrid(src, tmpl, tier, scale, slot_key=slot_key, current_res=current_res)
             # ORB: 裁取源图中心区域（去掉 padding 边距）
             h_s, w_s = src.shape[:2]
             h_t, w_t = tmpl.shape[:2]
@@ -799,10 +843,10 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
         # ✅ 并行化 SIFT 匹配（使用线程池）
         from concurrent.futures import ThreadPoolExecutor
         
-        # 准备任务列表（传入 current_res 以启用分辨率自适应匹配）
+        # 准备任务列表（传入 current_res + slot_key 以启用 EMA 平滑匹配）
         # 模板名统一转小写，确保与 KEY_DATA_V3/ACCESSORIES_CH 的键匹配
         tasks = [
-            (img1, match_Path + each, each[:-4].lower(), current_res)
+            (img1, match_Path + each, each[:-4].lower(), current_res, mode)
             for each in content
         ]
         
@@ -860,8 +904,13 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
             accept = True
             if debug_mode:
                 logger.info(f"[DEBUG] {mode} 低分高区分度({MatchName}={MatchValue:.4f},ratio={ratio:.1f}x,gap={gap:.4f})")
-        elif MatchValue >= MATCH_THRESHOLD:
+        elif MatchValue >= _BACKPACK_HIGH_SCORE:
             accept = True
+        elif MatchValue >= MATCH_THRESHOLD and gap >= _BACKPACK_GAP_MIN:
+            accept = True
+        elif MatchValue >= MATCH_THRESHOLD:
+            if debug_mode:
+                logger.info(f"[DEBUG] {mode} 区分度不足，拒绝({MatchName}={MatchValue:.4f},gap={gap:.4f}<{_BACKPACK_GAP_MIN})")
         
         if debug_mode:
             logger.info(f"[匹配详情] {mode}: 最佳={MatchName}({MatchValue:.4f}) gap={gap:.4f} | Top5: {top5_str}")
@@ -874,190 +923,234 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
             logger.info(f"{mode}={MatchName}({MatchValue:.4f},gap={gap:.4f})")
         
         ReturnData[mode[:-2]] = MatchName
-    
-    # ✅ 多帧共识投票：单帧漏检时用历史结果兜底
-    # 只在原始结果为 "none" 时触发，不影响正常识别和装备切换
-    for slot, raw_name in ReturnData.items():
-        if slot not in _slot_history:
-            _slot_history[slot] = []
-        hist = _slot_history[slot]
-        hist.append(raw_name)
-        if len(hist) > CONSENSUS_WINDOW:
-            hist.pop(0)
         
-        if raw_name == "none" and len(hist) >= CONSENSUS_MIN_VOTES:
-            # 统计窗口内非 none 的最高频结果
-            candidates = [n for n in hist if n != "none"]
-            if candidates:
-                top, count = Counter(candidates).most_common(1)[0]
-                if count >= CONSENSUS_MIN_VOTES:
-                    ReturnData[slot] = top
-                    _slot_locked[slot] = top
-                    if debug_mode:
-                        logger.info(f"[CONSENSUS] {slot} none→{top} (窗口{CONSENSUS_WINDOW}帧内{count}票)")
+        # ✅ 调试模式：识别完成后，将 ROI 图片保存到 {category}/{result_name}/ 子目录
+        # 文件名格式: {result_name}_{timestamp}.png
+        # - 目录名 = 结果名（YOLO 分类任务的类别标签，直接符合训练数据规范）
+        # - 文件名也带结果名（拖出目录后仍能一眼看出类别，批量确认时无需逐个打开）
+        # 目录结构示例: logs/training_data/Muzzle/buqiangbuchang/buqiangbuchang_2026-04-27_17-30-00_123.png
+        if debug_mode and img1 is not None and img1.size > 0:
+            try:
+                from datetime import datetime
+                category = mode[:-2]   # 'Muzzle_1' → 'Muzzle'
+                base_train_dir = res_path('logs', 'training_data', category, MatchName)
+                os.makedirs(base_train_dir, exist_ok=True)
+                timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')[:-3]
+                save_path = os.path.join(base_train_dir, f"{MatchName}_{timestamp}.png")
+                cv2.imwrite(save_path, img1)
+            except Exception:
+                pass
     
     return ReturnData
 
+def _crop_backpack_roi(key, coords, backpack_gray, backpack_color, debug_mode):
+    """
+    从背包大图中裁剪单个 ROI，带 PADDING 边距。
+    :return: (roi_gray, roi_color) 或空图
+    """
+    norm = _normalize_roi_ltrb(coords)
+    if not norm:
+        logger.error(f"无效 ROI: {key}={coords}")
+        empty = np.zeros((50, 50), dtype=np.uint8)
+        return empty, cv2.cvtColor(empty, cv2.COLOR_GRAY2BGR)
+
+    left, top, right, bottom = norm
+    hs, ws = backpack_gray.shape[:2]
+    l_p = max(0, left - PADDING)
+    t_p = max(0, top - PADDING)
+    r_p = min(ws, right + PADDING)
+    b_p = min(hs, bottom + PADDING)
+    roi_gray = backpack_gray[t_p:b_p, l_p:r_p]
+    roi_color = backpack_color[t_p:b_p, l_p:r_p]
+
+    if roi_gray.size == 0:
+        logger.warning(f"裁剪 ROI {key} 为空: ({left},{top},{right},{bottom})")
+        empty = np.zeros((50, 50), dtype=np.uint8)
+        return empty, cv2.cvtColor(empty, cv2.COLOR_GRAY2BGR)
+
+    if debug_mode:
+        logger.debug(
+            f"🔄 [DEBUG] {key}: 相对坐标({left},{top},{right},{bottom}), "
+            f"尺寸: {right-left}x{bottom-top}, 截图尺寸: {roi_gray.shape}"
+        )
+        # 保存原始 ROI 图片（按槽位分组，不含识别结果，用于 ROI 框位置调试）
+        try:
+            from datetime import datetime
+            base_debug_dir = res_path('logs', 'roi_debug')
+            category = key.split('_')[0]
+            slot = key.split('_')[1] if '_' in key else ''
+            category_dir = os.path.join(base_debug_dir, f'{category}_{slot}')
+            os.makedirs(category_dir, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            cv2.imwrite(os.path.join(category_dir, f"{timestamp}.png"), roi_color)
+        except Exception:
+            pass
+
+    return roi_gray, roi_color
+
+
+async def _recognize_single_frame(backpack_gray, backpack_color, Guns_img, current_res, debug_mode, is_last_frame):
+    """
+    对单帧背包大图执行两阶段识别。
+    :param is_last_frame: 是否最后一帧（仅最后一帧保存调试 ROI 截图，避免重复保存）
+    :return: (result_slot1_dict, result_slot2_dict)
+    """
+    from data.fire_data import get_allowed_slots
+
+    save_debug = debug_mode and is_last_frame
+
+    # 阶段1: Name
+    name_rois_1, name_rois_2 = {}, {}
+    if "Name_1" in Guns_img:
+        roi_gray, _ = _crop_backpack_roi("Name_1", Guns_img["Name_1"], backpack_gray, backpack_color, save_debug)
+        name_rois_1["Name_1"] = roi_gray
+    if "Name_2" in Guns_img:
+        roi_gray, _ = _crop_backpack_roi("Name_2", Guns_img["Name_2"], backpack_gray, backpack_color, save_debug)
+        name_rois_2["Name_2"] = roi_gray
+
+    name_r1, name_r2 = await asyncio.gather(
+        capture_all_guns(name_rois_1, current_res, gun_name=None),
+        capture_all_guns(name_rois_2, current_res, gun_name=None),
+    )
+    gun_name_1 = name_r1.get('Name')
+    gun_name_2 = name_r2.get('Name')
+
+    # 阶段2: 根据枪名裁剪/识别配件
+    def _build_acc_rois(slot_suffix, gun_name):
+        allowed_slots = get_allowed_slots(gun_name)
+        rois = {}
+        for key, coords in Guns_img.items():
+            if key == "posture_roi" or not key.endswith(slot_suffix):
+                continue
+            slot_type = key[:-len(slot_suffix)]
+            if slot_type == "Name":
+                continue
+            if allowed_slots is not None and slot_type not in allowed_slots:
+                continue
+            roi_gray, _ = _crop_backpack_roi(key, coords, backpack_gray, backpack_color, save_debug)
+            rois[key] = roi_gray
+        return rois
+
+    acc_rois_1 = _build_acc_rois('_1', gun_name_1)
+    acc_rois_2 = _build_acc_rois('_2', gun_name_2)
+
+    acc_r1, acc_r2 = await asyncio.gather(
+        capture_all_guns(acc_rois_1, current_res, gun_name=gun_name_1),
+        capture_all_guns(acc_rois_2, current_res, gun_name=gun_name_2),
+    )
+
+    return {**name_r1, **acc_r1}, {**name_r2, **acc_r2}
+
+
+def _vote_frame_results(results_list, debug_mode):
+    """
+    对多帧识别结果做 majority vote（按字段独立投票）。
+    :param results_list: [dict, dict, ...] 每帧同一槽位的识别结果
+    :return: 投票后的结果字典
+    """
+    if not results_list:
+        return {}
+    all_keys = set()
+    for r in results_list:
+        all_keys.update(r.keys())
+
+    voted = {}
+    for key in all_keys:
+        values = [r.get(key, "none") for r in results_list]
+        counter = Counter(values)
+        top_val, top_count = counter.most_common(1)[0]
+        voted[key] = top_val
+        if debug_mode and top_count < len(results_list):
+            logger.info(f"[多帧投票] {key}: {dict(counter)} → {top_val} ({top_count}/{len(results_list)}票)")
+    return voted
+
+
 async def capture_all_positions_thread(current_res, resolution_settings=None, guns_resolution_settings=None):
     """
-    捕获所有位置的图像并进行识别
-    :param current_res: 当前分辨率
-    :param resolution_settings: ROI 配置字典（未使用，直接读取JSON）
-    :param guns_resolution_settings: 背包区域配置字典（未使用，直接读取JSON）
+    多帧两阶段背包识别：
+      1. 快速截取 MULTI_FRAME_COUNT 帧背包大图（帧间隔 MULTI_FRAME_INTERVAL）
+      2. 对每帧独立做两阶段识别（先枪名 → 再配件）
+      3. 对多帧结果按字段 majority vote，消除单帧噪声
+    适用于 FPS 游戏：单次 Tab 即可得到稳定结果，不依赖跨次 Tab 累积历史。
     """
     start_time = time.time()
-    
-    # ✅ 提前检查调试模式，避免重复查询
+
+    # 每次 Tab 清空背包 Otsu EMA 缓存，避免上次 Tab 的历史阈值干扰本次识别
+    clear_backpack_otsu_ema()
+
     from core.process import ProcessClass
     pc = ProcessClass._instance if hasattr(ProcessClass, '_instance') else ProcessClass()
     debug_mode = getattr(pc, 'debug_input_trace', False)
-    
+
     if debug_mode:
-        logger.info(f"🔍 [DEBUG] 开始枪械识别，分辨率: {current_res}")
-    
-    # ✅ 使用缓存的 ROI 配置（避免重复读取 JSON）
+        logger.info(f"🔍 [DEBUG] 开始多帧两阶段识别（{MULTI_FRAME_COUNT}帧），分辨率: {current_res}")
+
     user_config = _load_roi_config()
-    
     if not user_config:
-        logger.error(f"❌ ROI 配置为空")
+        logger.error("❌ ROI 配置为空")
         return [{}, {}]
-    
-    # 提取当前分辨率的 ROI 配置
+
     Guns_img = user_config.get(current_res, {})
-    
-    # 提取背包区域配置（✅ 用于截取大图）
     backpack_roi = user_config.get('_GUNS_REOLUTION_SETTINGS', {}).get(current_res)
-    
     if not backpack_roi:
-        logger.warning(f"⚠️  未找到分辨率 {current_res} 的背包区域配置（必需）")
+        logger.warning(f"⚠️ 未找到分辨率 {current_res} 的背包区域配置（必需）")
         return [{}, {}]
-    
-    # ✅ 性能优化：先截取背包大图（1次 mss.grab）
+
     norm_backpack = _normalize_roi_ltrb(backpack_roi)
     if not norm_backpack:
         logger.error(f"无效的背包 ROI: {backpack_roi}")
         return [{}, {}]
-    
-    try:
-        backpack_gray, backpack_color = MSS_Img(norm_backpack)
-        logger.debug(f"✅ 截取背包大图成功: {backpack_gray.shape}")
-    except Exception as e:
-        logger.error(f"截取背包大图失败: {e}")
-        return [{}, {}]
-    
-    # ✅ 从大图中裁剪各个 ROI（numpy 切片，零开销）
-    captured_images = []
-    for key, coords in Guns_img.items():
+
+    # ══════════════════════════════════════════════════
+    # 快速截取多帧背包大图
+    # ══════════════════════════════════════════════════
+    frames = []
+    for i in range(MULTI_FRAME_COUNT):
         try:
-            if key == "posture_roi":
-                continue
-            
-            # 解析 ROI 坐标（相对于背包大图的相对坐标）
-            norm = _normalize_roi_ltrb(coords)
-            if not norm:
-                logger.error(f"无效 ROI: {key}={coords}")
-                empty_img = np.zeros((50, 50), dtype=np.uint8)
-                captured_images.append((key, empty_img))
-                continue
-            
-            left, top, right, bottom = norm
-            
-            # ✅ 裁剪时加 PADDING 边距，用于补偿 PUBG 背包 UI 抖动导致的 ±1~2px 偏移
-            # matchTemplate 滑动窗口会自动找最佳对齐位置
-            hs, ws = backpack_gray.shape[:2]
-            left_pad = max(0, left - PADDING)
-            top_pad = max(0, top - PADDING)
-            right_pad = min(ws, right + PADDING)
-            bottom_pad = min(hs, bottom + PADDING)
-            roi_gray = backpack_gray[top_pad:bottom_pad, left_pad:right_pad]
-            roi_color = backpack_color[top_pad:bottom_pad, left_pad:right_pad]
-            
-            # 验证裁剪结果
-            if roi_gray.size == 0:
-                logger.warning(f"裁剪 ROI {key} 为空: ({left},{top},{right},{bottom})")
-                empty_img = np.zeros((50, 50), dtype=np.uint8)
-                captured_images.append((key, empty_img))
-                continue
-            
-            captured_images.append((key, roi_gray))
-            
-            if debug_mode:
-                width = right - left
-                height = bottom - top
-                logger.debug(f"🔄 [DEBUG] {key}: 相对坐标({left},{top},{right},{bottom}), 尺寸: {width}x{height}, 截图尺寸: {roi_gray.shape}")
-                
-                # ✅ 调试模式：保存截取的 ROI 图片（按类型分组）
-                try:
-                    from datetime import datetime
-                    base_debug_dir = res_path('logs', 'roi_debug')
-                    os.makedirs(base_debug_dir, exist_ok=True)
-                    
-                    # 按配件类型分组
-                    category = key.split('_')[0]  # Name, Scope, Muzzle, Grip, Stock
-                    slot = key.split('_')[1] if '_' in key else ''  # 1 or 2
-                    category_dir = os.path.join(base_debug_dir, f'{category}_{slot}')
-                    os.makedirs(category_dir, exist_ok=True)
-                    
-                    # 时间戳格式：精确到秒，可读格式
-                    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                    save_path = os.path.join(category_dir, f"{timestamp}.png")
-                    cv2.imwrite(save_path, roi_color)
-                    logger.debug(f"💾 [DEBUG] 已保存 ROI 图: {save_path}")
-                except Exception as e:
-                    logger.debug(f"保存 ROI 调试图失败: {e}")
-            
+            bg, bc = MSS_Img(norm_backpack)
+            frames.append((bg, bc))
         except Exception as e:
-            logger.error(f"裁剪 ROI {key} 失败: {e}")
-            empty_img = np.zeros((50, 50), dtype=np.uint8)
-            captured_images.append((key, empty_img))
-    
+            logger.error(f"第{i+1}帧截图失败: {e}")
+        if i < MULTI_FRAME_COUNT - 1:
+            time.sleep(MULTI_FRAME_INTERVAL)
+
+    if not frames:
+        logger.error("所有帧截图均失败")
+        return [{}, {}]
+
     t_capture = time.time() - start_time
-    logger.info(f"✅ 成功截取 {len(captured_images)} 个 ROI 区域 (耗时: {t_capture:.3f}s)")
+    logger.info(f"✅ 成功截取 {len(frames)} 帧背包大图 (耗时: {t_capture:.3f}s)")
 
-    # 将捕获的图像数据分组
-    Guns1 = {k: img for k, img in captured_images[0:5]}
-    Guns2 = {k: img for k, img in captured_images[5:10]}
+    # ══════════════════════════════════════════════════
+    # 对每帧独立做两阶段识别
+    # ══════════════════════════════════════════════════
+    t_recognize = time.time()
+    all_results = []  # [(slot1_dict, slot2_dict), ...]
 
-    # ✅ 获取已识别的枪械名称，用于配件限制过滤
-    gun_name_1 = None
-    gun_name_2 = None
-    try:
-        if hasattr(pc, '_Result1') and pc._Result1:
-            gun_name_1 = pc._Result1.get('Name')
-        if hasattr(pc, '_Result2') and pc._Result2:
-            gun_name_2 = pc._Result2.get('Name')
-        if gun_name_1:
-            logger.info(f"✅ 配件限制: 槽位1 枪械={gun_name_1}")
-        if gun_name_2:
-            logger.info(f"✅ 配件限制: 槽位2 枪械={gun_name_2}")
-    except Exception:
-        pass
+    for frame_idx, (bg, bc) in enumerate(frames):
+        is_last = (frame_idx == len(frames) - 1)
+        r1, r2 = await _recognize_single_frame(bg, bc, Guns_img, current_res, debug_mode, is_last)
+        all_results.append((r1, r2))
+        if debug_mode:
+            logger.info(f"[多帧F{frame_idx+1}/{len(frames)}] 槽1={r1}, 槽2={r2}")
 
-    # 对这些图像进行进一步处理
-    t_match = time.time()
-    ReturnData = await asyncio.gather(
-        capture_all_guns(Guns1, current_res, gun_name=gun_name_1),  # ✅ 传入枪械名
-        capture_all_guns(Guns2, current_res, gun_name=gun_name_2)   # ✅ 传入枪械名
+    # ══════════════════════════════════════════════════
+    # 多帧投票（按字段独立 majority vote）
+    # ══════════════════════════════════════════════════
+    final_1 = _vote_frame_results([r[0] for r in all_results], debug_mode)
+    final_2 = _vote_frame_results([r[1] for r in all_results], debug_mode)
+
+    elapsed = time.time() - start_time
+    t_recog = time.time() - t_recognize
+    logger.info(
+        "⏱️ 多帧识别耗时: %.2f 秒 [截图%d帧: %.3fs, 识别+投票: %.3fs]",
+        elapsed, len(frames), t_capture, t_recog,
     )
-    match_time = time.time() - t_match
-    
-    # 发送识别结果到 UI
-    try:
-        from core.process import PC as ProcessPC
-        if hasattr(ProcessPC, '_ui_log_callback') and ProcessPC._ui_log_callback:
-            result_summary = []
-            for data in ReturnData:
-                for key, value in data.items():
-                    result_summary.append(f"{key}: {value}")
-            ProcessPC._ui_log_callback(f"✅ 识别完成: {', '.join(result_summary)}")
-    except Exception:
-        pass
 
-    elapsed_time = time.time() - start_time  # 计算总耗时
-    logger.info("⏱️ 枪械识别耗时: %.2f 秒 [截图: %.3fs, 匹配: %.3fs]", 
-                elapsed_time, t_capture if 't_capture' in locals() else 0, match_time if 'match_time' in locals() else 0)
+    if debug_mode:
+        logger.info(f"[多帧投票] 最终结果: 槽1={final_1}, 槽2={final_2}")
 
-    return ReturnData
+    return [final_1, final_2]
 
 def recogniseif_firearm(current_res):
     """识别是否开镜（通过像素颜色检测）"""
