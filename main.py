@@ -28,10 +28,12 @@ DEBUG_MODE = False  # Nuitka 编译需要模块级声明，默认关闭
 
 def setup_logging():
     log_dir = res_path('logs')
-    # ✅ 每次启动清空整个 logs 文件夹（含 posture_debug、roi_debug、crash 日志等）
+    # ✅ 每次启动清空 logs（posture_debug、roi_debug、crash 等）；保留 training_data（CNN 训练数据采集）
     if os.path.exists(log_dir):
         import shutil
         for entry in os.listdir(log_dir):
+            if entry == 'training_data':
+                continue
             entry_path = os.path.join(log_dir, entry)
             try:
                 if os.path.isdir(entry_path):

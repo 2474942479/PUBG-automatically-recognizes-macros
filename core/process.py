@@ -426,6 +426,39 @@ class ProcessClass:
                 screenshot_roi_gray = screenshot_roi
             
             logger.debug(f"📊 开始模板匹配，截图尺寸: {screenshot_roi_gray.shape}")
+
+            # ONNX 分类优先：姿势识别
+            try:
+                from core.classifier import classify_roi, should_trust
+                oz = classify_roi(screenshot_roi_gray, "zishi")
+                if oz is not None:
+                    if should_trust(oz[1]):
+                        post_lbl = oz[0]
+                        logger.info(f"[ONNX] 姿势识别: {post_lbl} (置信度={oz[1]:.4f})")
+                        if debug:
+                            self._save_debug_screenshot(
+                                screenshot_roi, post_lbl, oz[1], {post_lbl: oz[1]}
+                            )
+                            try:
+                                from datetime import datetime
+                                from core.paths import res_path
+                                train_dir = res_path('logs', 'training_data', 'zishi', post_lbl)
+                                os.makedirs(train_dir, exist_ok=True)
+                                ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')[:-3]
+                                cv2.imwrite(
+                                    os.path.join(train_dir, f"{post_lbl}_{ts}.png"),
+                                    screenshot_roi_gray,
+                                )
+                            except Exception:
+                                pass
+                        return post_lbl
+                    else:
+                        logger.debug(
+                            "[ONNX] 姿势识别: %s 置信度 %.4f 低于阈值，回退模板匹配",
+                            oz[0], oz[1],
+                        )
+            except Exception as e:
+                logger.debug("[ONNX] 姿势推理异常: %s，回退模板匹配", e)
             
             best_match = None
             best_score = -1
@@ -475,6 +508,19 @@ class ProcessClass:
             # 调试模式：保存截图
             if debug:
                 self._save_debug_screenshot(screenshot_roi, best_match, best_score, match_scores)
+            
+            # CNN 训练数据采集：姿势 ROI → logs/training_data/zishi/<class>/（灰度原图）
+            if debug and best_score >= threshold and best_match:
+                try:
+                    from datetime import datetime
+                    from core.paths import res_path
+                    train_dir = res_path('logs', 'training_data', 'zishi', best_match)
+                    os.makedirs(train_dir, exist_ok=True)
+                    ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')[:-3]
+                    raw_path = os.path.join(train_dir, f"{best_match}_{ts}.png")
+                    cv2.imwrite(raw_path, screenshot_roi_gray)
+                except Exception:
+                    pass
             
             # 设置阈值，只有置信度足够高才认为匹配成功
             if best_score >= threshold and best_match:

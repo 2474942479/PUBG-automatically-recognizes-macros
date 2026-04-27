@@ -19,6 +19,7 @@ screeninfo==0.8.1
 
 # 图像处理 / 识别
 opencv-python~=4.9.0.80
+onnxruntime>=1.17.0
 numpy~=1.26.4
 pillow~=10.2.0
 

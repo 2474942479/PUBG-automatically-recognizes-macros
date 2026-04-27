@@ -804,6 +804,53 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
             logger.warning(f"{mode} 图像为空，跳过")
             ReturnData[mode[:-2]] = "None"
             continue
+
+        # ONNX 分类优先：置信度达标则直接采信，跳过后续模板匹配
+        try:
+            from core.classifier import classify_roi, should_trust
+            onnx_hit = classify_roi(img1, slot_type)
+            if onnx_hit is not None:
+                pred_lbl, pred_conf = onnx_hit
+                if should_trust(pred_conf):
+                    pred_lower = pred_lbl.lower().strip()
+                    # 配件类别需校验是否属于当前枪械可用配件
+                    accessory_ok = True
+                    if gun_name and slot_type not in ("Name",):
+                        from data.fire_data import get_allowed_templates
+                        allowed_o = get_allowed_templates(gun_name, slot_type)
+                        if allowed_o is not None and len(allowed_o) > 0:
+                            if pred_lower not in {x.lower() for x in allowed_o} and pred_lower != "none":
+                                accessory_ok = False
+                                logger.debug(
+                                    "[ONNX] %s=%s 不在枪械 %s 的可用配件列表中，回退模板匹配",
+                                    mode, pred_lower, gun_name,
+                                )
+                    if accessory_ok:
+                        ReturnData[slot_type] = pred_lower
+                        logger.info(f"[ONNX] {mode}={pred_lower} (置信度={pred_conf:.4f})")
+                        # debug 模式下保存 ROI 图片用于后续训练数据收集
+                        if debug_mode and img1 is not None and img1.size > 0:
+                            try:
+                                from datetime import datetime
+                                base_train_dir = res_path(
+                                    'logs', 'training_data', slot_type, pred_lower
+                                )
+                                os.makedirs(base_train_dir, exist_ok=True)
+                                timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')[:-3]
+                                cv2.imwrite(
+                                    os.path.join(base_train_dir, f"{pred_lower}_{timestamp}.png"),
+                                    img1,
+                                )
+                            except Exception:
+                                pass
+                        continue
+                else:
+                    logger.debug(
+                        "[ONNX] %s=%s 置信度 %.4f 低于阈值，回退模板匹配",
+                        mode, pred_lbl, pred_conf,
+                    )
+        except Exception as e:
+            logger.debug("[ONNX] %s 推理异常: %s，回退模板匹配", mode, e)
         
         # ✅ 根据分辨率确定模板路径（三级降级）
         # 优先级: 分辨率目录 > 根目录（兼容旧版本）
@@ -1315,7 +1362,7 @@ def capture_gun_icons(current_res):
     if debug_mode:
         logger.info(f"[枪械图标] 亮度: Gun_1={brightness_1:.1f}, Gun_2={brightness_2:.1f} (仅调试，不判活)")
     
-    # 5. 加载枪械图标模板
+    # 5. 加载枪械图标模板（无目录时仍可仅靠 ONNX 识别）
     gun_template_dir = None
     candidate = res_path('_internal', 'data', 'firearms', current_res, 'gun')
     if os.path.exists(candidate):
@@ -1323,29 +1370,26 @@ def capture_gun_icons(current_res):
         if debug_mode:
             logger.info(f"[枪械图标] 使用分辨率特定模板: {candidate}")
     else:
-        # 降级到根目录
         fallback = res_path('_internal', 'data', 'firearms', 'gun')
         if os.path.exists(fallback):
             gun_template_dir = fallback
             if debug_mode:
                 logger.info(f"[枪械图标] 降级使用根目录模板: {fallback}")
-    
+
+    template_files = []
     if not gun_template_dir:
-        logger.warning("枪械图标模板目录不存在")
-        return {"Gun_1": "none", "Gun_2": "none"}
-    
-    # 枚举所有模板文件（.bmp 和 .png）
-    template_files = [f for f in os.listdir(gun_template_dir) 
-                      if f.lower().endswith(('.bmp', '.png'))]
-    
-    if not template_files:
-        logger.warning(f"枪械图标模板目录为空: {gun_template_dir}")
-        return {"Gun_1": "none", "Gun_2": "none"}
-    
-    if debug_mode:
-        logger.info(f"[枪械图标] 模板目录: {gun_template_dir}")
-        logger.info(f"[枪械图标] 模板文件列表: {template_files}")
-        logger.info(f"[枪械图标] 模板总数: {len(template_files)}")
+        logger.warning("枪械图标模板目录不存在，将仅尝试 ONNX")
+    else:
+        template_files = [
+            f for f in os.listdir(gun_template_dir)
+            if f.lower().endswith(('.bmp', '.png'))
+        ]
+        if not template_files:
+            logger.warning(f"枪械图标模板目录为空: {gun_template_dir}")
+        elif debug_mode:
+            logger.info(f"[枪械图标] 模板目录: {gun_template_dir}")
+            logger.info(f"[枪械图标] 模板文件列表: {template_files}")
+            logger.info(f"[枪械图标] 模板总数: {len(template_files)}")
     
     # 5. 对两把枪分别进行模板匹配
     tier, scale = _classify_resolution(current_res) if current_res else ('large', 1.0)
@@ -1358,6 +1402,23 @@ def capture_gun_icons(current_res):
         best_name = "none"
         best_score = 0.0
         scores_detail = []
+
+        try:
+            from core.classifier import classify_roi, should_trust
+            onnx_gun = classify_roi(roi_gray, "gun")
+            if onnx_gun is not None:
+                lb = onnx_gun[0].lower().strip()
+                if should_trust(onnx_gun[1]):
+                    results[slot_key] = lb
+                    logger.info(f"[ONNX][枪械图标] {slot_key}={lb} (置信度={onnx_gun[1]:.4f})")
+                    continue
+                else:
+                    logger.debug(
+                        "[ONNX][枪械图标] %s=%s 置信度 %.4f 低于阈值，回退模板匹配",
+                        slot_key, lb, onnx_gun[1],
+                    )
+        except Exception as e:
+            logger.debug("[ONNX][枪械图标] %s 推理异常: %s，回退模板匹配", slot_key, e)
         
         if debug_mode:
             logger.info(f"[枪械图标] ===== 开始匹配 {slot_key} =====")
@@ -1466,6 +1527,22 @@ def capture_gun_icons(current_res):
                     logger.info(f"[HUD CONSENSUS] {slot_key} {results[slot_key]}→{top} (窗口{_HUD_CONSENSUS_WINDOW}帧中{count}票)")
                 results[slot_key] = top
     
+    # CNN 训练数据采集：HUD 枪械图标 ROI → logs/training_data/gun/<class>/
+    if debug_mode:
+        try:
+            from datetime import datetime
+            for slot_key, roi_gray in (("Gun_1", gun1_gray), ("Gun_2", gun2_gray)):
+                lbl = results.get(slot_key, "none")
+                if lbl in ("none", "", None):
+                    continue
+                base_train_dir = res_path('logs', 'training_data', 'gun', str(lbl).lower())
+                os.makedirs(base_train_dir, exist_ok=True)
+                timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')[:-3]
+                save_path = os.path.join(base_train_dir, f"{lbl}_{timestamp}.png")
+                cv2.imwrite(save_path, roi_gray)
+        except Exception:
+            pass
+
     # 6. 调试模式：保存 HUD 截图和匹配结果分析（按类型分组）
     if debug_mode:
         try:

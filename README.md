@@ -18,6 +18,9 @@
 - Python ≥ 3.8
 - Windows 10/11（依赖 Win32 API + Logitech GHUB 驱动）
 - 安装依赖：`pip install -r requirements.txt`
+- **可选：ONNX 分类器** — 将训练好的 `*.onnx` 放入 `_internal/models/`（见该目录 README），可提高识别准确率；未放置时自动使用原有 OpenCV 模板匹配。
+
+训练流程：`tools/TRAINING_DATA.md`、`tools/prepare_dataset.py`、`tools/train_classifier.py`（训练需 `pip install -r requirements_train.txt`）。
 
 ## 项目结构
 
@@ -31,7 +34,8 @@ project_root/
 ├── core/                    # 核心逻辑
 │   ├── process.py           # 数据加载、开火控制、压枪计算
 │   ├── ghub.py              # Logitech GHUB 驱动封装
-│   └── recognition.py       # SIFT 图像识别、姿势识别
+│   ├── recognition.py       # SIFT / 模板匹配 / ONNX 分类
+│   └── classifier.py        # ONNXRuntime 推理（可选）
 │
 ├── data/                    # 数据定义
 │   ├── fire_data.py         # 配件映射 & 按键编码
@@ -60,9 +64,11 @@ project_root/
 ├── Config/
 │   └── config.json          # 用户配置（分辨率、灵敏度）
 │
-└── _internal/               # 运行时资源（PyInstaller 打包）
+├── tools/                   # 数据集划分与 YOLOv8-cls 训练脚本
+└── _internal/               # 运行时资源（打包时整体复制）
     ├── GunData/*.json        # 各枪械弹道数据
     ├── data/firearms/...     # SIFT 模板图片
+    ├── models/               # 可选 ONNX 分类模型（*.onnx + *_labels.json）
     └── ghub_device_GHUB.dll  # GHUB 驱动 DLL
 ```
 

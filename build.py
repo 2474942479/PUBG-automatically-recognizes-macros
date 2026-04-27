@@ -53,6 +53,7 @@ EXCLUDE_MODULES = [
 
 INCLUDE_DATA_DIRS = [
     ("Config", "Config"),
+    # 含 _internal/data/firearms、_internal/models(ONNX 可选) 等
     ("_internal", "_internal"),
 ]
 
