@@ -775,15 +775,16 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
     :param gun_name: 已识别的枪械名称，用于配件限制过滤
     :return: 识别结果字典
     """
-    # ✅ 提前检查调试模式
+    # ✅ 提前检查调试模式 & 识别引擎开关
     from core.process import ProcessClass
     pc = ProcessClass._instance if hasattr(ProcessClass, '_instance') else ProcessClass()
     debug_mode = getattr(pc, 'debug_input_trace', False)
+    engine = getattr(pc, 'recognize_engine', 'auto')
     
     ReturnData = {}
     for mode, img1 in pathData.items():
         if debug_mode:
-            logger.debug(f"[DEBUG] 开始识别 {mode}")
+            logger.debug(f"[DEBUG][引擎={engine}] 开始识别 {mode}")
         
         # ✅ 配件限制过滤：根据枪械名称跳过不支持的槽位/模板
         slot_type = mode[:-2]  # 'Muzzle_1' -> 'Muzzle'
@@ -791,7 +792,6 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
             from data.fire_data import get_allowed_templates
             allowed = get_allowed_templates(gun_name, slot_type)
             if allowed is not None and len(allowed) == 0:
-                # 该枪不支持此槽位，直接跳过
                 ReturnData[slot_type] = "none"
                 if debug_mode:
                     logger.info(f"[配件限制] {mode} 跳过（{gun_name} 不支持 {slot_type}）")
@@ -805,53 +805,65 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
             ReturnData[mode[:-2]] = "None"
             continue
 
-        # ONNX 分类优先：置信度达标则直接采信，跳过后续模板匹配
-        try:
-            from core.classifier import classify_roi, should_trust
-            onnx_hit = classify_roi(img1, slot_type)
-            if onnx_hit is not None:
-                pred_lbl, pred_conf = onnx_hit
-                if should_trust(pred_conf):
-                    pred_lower = pred_lbl.lower().strip()
-                    # 配件类别需校验是否属于当前枪械可用配件
-                    accessory_ok = True
-                    if gun_name and slot_type not in ("Name",):
-                        from data.fire_data import get_allowed_templates
-                        allowed_o = get_allowed_templates(gun_name, slot_type)
-                        if allowed_o is not None and len(allowed_o) > 0:
-                            if pred_lower not in {x.lower() for x in allowed_o} and pred_lower != "none":
-                                accessory_ok = False
-                                logger.debug(
-                                    "[ONNX] %s=%s 不在枪械 %s 的可用配件列表中，回退模板匹配",
-                                    mode, pred_lower, gun_name,
-                                )
-                    if accessory_ok:
-                        ReturnData[slot_type] = pred_lower
-                        logger.info(f"[ONNX] {mode}={pred_lower} (置信度={pred_conf:.4f})")
-                        # debug 模式下保存 ROI 图片用于后续训练数据收集
-                        if debug_mode and img1 is not None and img1.size > 0:
-                            try:
-                                from datetime import datetime
-                                base_train_dir = res_path(
-                                    'logs', 'training_data', slot_type, pred_lower
-                                )
-                                os.makedirs(base_train_dir, exist_ok=True)
-                                timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')[:-3]
-                                cv2.imwrite(
-                                    os.path.join(base_train_dir, f"{pred_lower}_{timestamp}.png"),
-                                    img1,
-                                )
-                            except Exception:
-                                pass
-                        continue
-                else:
-                    logger.debug(
-                        "[ONNX] %s=%s 置信度 %.4f 低于阈值，回退模板匹配",
-                        mode, pred_lbl, pred_conf,
-                    )
-        except Exception as e:
-            logger.debug("[ONNX] %s 推理异常: %s，回退模板匹配", mode, e)
-        
+        # ═══ ONNX 分类（engine != 'opencv' 时尝试） ═══
+        _onnx_decided = False
+        if engine != 'opencv':
+            try:
+                from core.classifier import classify_roi, should_trust
+                onnx_hit = classify_roi(img1, slot_type)
+                if onnx_hit is not None:
+                    pred_lbl, pred_conf = onnx_hit
+                    if should_trust(pred_conf):
+                        pred_lower = pred_lbl.lower().strip()
+                        accessory_ok = True
+                        if gun_name and slot_type not in ("Name",):
+                            from data.fire_data import get_allowed_templates
+                            allowed_o = get_allowed_templates(gun_name, slot_type)
+                            if allowed_o is not None and len(allowed_o) > 0:
+                                if pred_lower not in {x.lower() for x in allowed_o} and pred_lower != "none":
+                                    accessory_ok = False
+                                    logger.debug(
+                                        "[ONNX] %s=%s 不在枪械 %s 的可用配件列表中，回退模板匹配",
+                                        mode, pred_lower, gun_name,
+                                    )
+                        if accessory_ok:
+                            ReturnData[slot_type] = pred_lower
+                            logger.info(f"[引擎={engine}][ONNX] {mode}={pred_lower} (置信度={pred_conf:.4f})")
+                            if debug_mode and img1 is not None and img1.size > 0:
+                                try:
+                                    from datetime import datetime
+                                    base_train_dir = res_path(
+                                        'logs', 'training_data', slot_type, pred_lower
+                                    )
+                                    os.makedirs(base_train_dir, exist_ok=True)
+                                    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')[:-3]
+                                    cv2.imwrite(
+                                        os.path.join(base_train_dir, f"{pred_lower}_{timestamp}.png"),
+                                        img1,
+                                    )
+                                except Exception:
+                                    pass
+                            _onnx_decided = True
+                    else:
+                        logger.debug(
+                            "[ONNX] %s=%s 置信度 %.4f 低于阈值",
+                            mode, pred_lbl, pred_conf,
+                        )
+            except Exception as e:
+                logger.debug("[ONNX] %s 推理异常: %s", mode, e)
+
+        if _onnx_decided:
+            continue
+        # engine == 'onnx' 强制模式下 ONNX 未命中 → 直接标 none，不回退模板
+        if engine == 'onnx':
+            ReturnData[slot_type] = "none"
+            if debug_mode:
+                logger.info(f"[引擎=onnx] {mode} ONNX 未命中，不回退模板匹配")
+            continue
+
+        # ═══ OpenCV 模板匹配（engine == 'opencv' 或 engine == 'auto' ONNX 未命中） ═══
+        if debug_mode:
+            logger.debug(f"[引擎={engine}] {mode} 进入 OpenCV 模板匹配")
         # ✅ 根据分辨率确定模板路径（三级降级）
         # 优先级: 分辨率目录 > 根目录（兼容旧版本）
         match_Path = None
@@ -1317,6 +1329,7 @@ def capture_gun_icons(current_res):
     from core.process import ProcessClass
     pc = ProcessClass._instance if hasattr(ProcessClass, '_instance') else ProcessClass()
     debug_mode = getattr(pc, 'debug_input_trace', False)
+    engine = getattr(pc, 'recognize_engine', 'auto')
     
     # 1. 读取 HUD 枪械图标区域配置（从独立配置节点读取，类似背包区域）
     user_config = _load_roi_config()
@@ -1403,25 +1416,37 @@ def capture_gun_icons(current_res):
         best_score = 0.0
         scores_detail = []
 
-        try:
-            from core.classifier import classify_roi, should_trust
-            onnx_gun = classify_roi(roi_gray, "gun")
-            if onnx_gun is not None:
-                lb = onnx_gun[0].lower().strip()
-                if should_trust(onnx_gun[1]):
-                    results[slot_key] = lb
-                    logger.info(f"[ONNX][枪械图标] {slot_key}={lb} (置信度={onnx_gun[1]:.4f})")
-                    continue
-                else:
-                    logger.debug(
-                        "[ONNX][枪械图标] %s=%s 置信度 %.4f 低于阈值，回退模板匹配",
-                        slot_key, lb, onnx_gun[1],
-                    )
-        except Exception as e:
-            logger.debug("[ONNX][枪械图标] %s 推理异常: %s，回退模板匹配", slot_key, e)
-        
+        # ═══ ONNX 分类（engine != 'opencv' 时尝试） ═══
+        _hud_onnx_decided = False
+        if engine != 'opencv':
+            try:
+                from core.classifier import classify_roi, should_trust
+                onnx_gun = classify_roi(roi_gray, "gun")
+                if onnx_gun is not None:
+                    lb = onnx_gun[0].lower().strip()
+                    if should_trust(onnx_gun[1]):
+                        results[slot_key] = lb
+                        logger.info(f"[引擎={engine}][ONNX][枪械图标] {slot_key}={lb} (置信度={onnx_gun[1]:.4f})")
+                        _hud_onnx_decided = True
+                    else:
+                        logger.debug(
+                            "[ONNX][枪械图标] %s=%s 置信度 %.4f 低于阈值",
+                            slot_key, lb, onnx_gun[1],
+                        )
+            except Exception as e:
+                logger.debug("[ONNX][枪械图标] %s 推理异常: %s", slot_key, e)
+
+        if _hud_onnx_decided:
+            continue
+        if engine == 'onnx':
+            results[slot_key] = "none"
+            if debug_mode:
+                logger.info(f"[引擎=onnx][枪械图标] {slot_key} ONNX 未命中，不回退模板匹配")
+            continue
+
+        # ═══ OpenCV 模板匹配 ═══
         if debug_mode:
-            logger.info(f"[枪械图标] ===== 开始匹配 {slot_key} =====")
+            logger.info(f"[引擎={engine}][枪械图标] ===== 开始匹配 {slot_key} =====")
             logger.info(f"[枪械图标] {slot_key} ROI 尺寸: {roi_gray.shape[1]}x{roi_gray.shape[0]} (宽x高)")
         
         matched_count = 0

@@ -65,18 +65,13 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
                 # 第二次按 Tab：关闭背包，✅ 不清空识别结果，保留已识别的枪械信息
                 self.keyInfo.emit('l', ("📦 背包已关闭",))
         elif Keys in "12!@":  # 如果按下1、2或Shift+1(!)、Shift+2(@)
-            # 将特殊符号映射回数字
             key_map = {'!': '1', '@': '2'}
             actual_key = key_map.get(Keys, Keys)
-            slot_num = int(actual_key)
-
-            self.PC.StartFire = False  # 设置开镜状态为False
-            self.keyInfo.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
-
-            # 切枪是即时动作：按几就是几号枪
+            self.PC.StartFire = False
+            self.keyInfo.emit('s', (self.PC.StartFire,))
             self.PC.Change_firearms(actual_key)
-            self.keyInfo.emit('e', (self.PC.Current_firearms,))  # 发送枪械信息信号
-            # 后台静默触发 HUD 图标识别（更新 Name_hud）
+            self.keyInfo.emit('e', (self.PC.Current_firearms,))
+            # HUD 图标识别（后台静默，自动更新 Name，无需用户干预）
             Thread(target=self.PC.recognize_gun_icons, args=(self.keyInfo.emit,)).start()
         elif Keys == "f":
             # 手动触发 HUD 识别刷新

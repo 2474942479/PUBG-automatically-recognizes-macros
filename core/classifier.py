@@ -109,6 +109,21 @@ def _load_meta_imgsz(stem: str, default: int) -> int:
     return default
 
 
+def _load_meta_normalize(stem: str) -> bool:
+    """从 meta.json 读取是否需要 ImageNet 归一化（MobileNet 模型需要）"""
+    if stem in _meta_cache:
+        return bool(_meta_cache[stem].get("normalize", False))
+    p = os.path.join(_models_dir(), f"{stem}_meta.json")
+    if os.path.isfile(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                _meta_cache[stem] = json.load(f)
+            return bool(_meta_cache[stem].get("normalize", False))
+        except Exception:
+            pass
+    return False
+
+
 def _get_session(stem: str):
     """获取或创建 ONNX 推理会话（单例缓存）"""
     if stem in _sessions:
@@ -138,26 +153,30 @@ def _get_session(stem: str):
         return None
 
 
-def _preprocess_bgr_or_gray(img: np.ndarray, imgsz: int) -> np.ndarray:
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
+_IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
+
+
+def _preprocess_bgr_or_gray(img: np.ndarray, imgsz: int, normalize: bool = False) -> np.ndarray:
     """
     将 ROI 图像预处理为 ONNX 输入格式。
     输入: HWC BGR 或单通道灰度 uint8
-    输出: NCHW float32 RGB [0,1]，形状 (1, 3, imgsz, imgsz)
+    输出: NCHW float32 RGB，形状 (1, 3, imgsz, imgsz)
+
+    :param normalize: True 时追加 ImageNet 均值/方差归一化（MobileNet 等模型需要）
     """
     import cv2
 
     if img is None or img.size == 0:
         raise ValueError("empty image")
-    # 统一转为 3 通道 BGR
     if len(img.shape) == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     elif img.shape[2] == 4:
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-    # 缩放到模型训练时的输入尺寸
     img = cv2.resize(img, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
-    # BGR -> RGB -> float32 归一化到 [0, 1]
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    # HWC -> CHW -> NCHW
+    if normalize:
+        rgb = (rgb - _IMAGENET_MEAN) / _IMAGENET_STD
     chw = np.transpose(rgb, (2, 0, 1))
     return np.expand_dims(chw, axis=0)
 
@@ -188,12 +207,13 @@ def classify_roi(
     if not labels:
         return None
 
-    # 从 meta.json 读取训练时的 imgsz
+    # 从 meta.json 读取训练时的 imgsz 和归一化标记
     imgsz = _load_meta_imgsz(stem, default_imgsz)
+    normalize = _load_meta_normalize(stem)
 
     # 预处理
     try:
-        blob = _preprocess_bgr_or_gray(img_gray_or_bgr, imgsz)
+        blob = _preprocess_bgr_or_gray(img_gray_or_bgr, imgsz, normalize=normalize)
     except Exception as e:
         logger.debug("[ONNX] 预处理失败(%s): %s", cat, e)
         return None

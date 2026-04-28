@@ -1,5 +1,4 @@
 # 仅训练 CNN 分类器时使用（体积大，玩家机器不必安装）
 -r requirements.txt
-ultralytics>=8.1.0
 torch>=2.0.0
 torchvision>=0.15.0
