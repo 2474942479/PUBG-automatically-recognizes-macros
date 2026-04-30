@@ -28,26 +28,39 @@ DEBUG_MODE = False  # Nuitka 编译需要模块级声明，默认关闭
 
 def setup_logging():
     log_dir = res_path('logs')
-    # ✅ 每次启动清空 logs（posture_debug、roi_debug、crash 等）；保留 training_data（CNN 训练数据采集）
-    if os.path.exists(log_dir):
-        import shutil
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # ✅ 按天存储日志：每次启动不清空，而是按日期创建新文件
+    # 删除 7 天前的旧日志（避免无限增长）
+    from datetime import datetime, timedelta
+    today = datetime.now().strftime('%Y-%m-%d')
+    cutoff_date = datetime.now() - timedelta(days=7)
+    
+    # 清理 7 天前的日志文件
+    try:
         for entry in os.listdir(log_dir):
             if entry == 'training_data':
                 continue
             entry_path = os.path.join(log_dir, entry)
-            try:
-                if os.path.isdir(entry_path):
-                    shutil.rmtree(entry_path)
-                else:
-                    os.remove(entry_path)
-            except Exception:
-                pass  # 文件被占用时跳过
-    os.makedirs(log_dir, exist_ok=True)
+            if os.path.isfile(entry_path):
+                # 从文件名提取日期（如 app_2026-04-28.log）
+                import re
+                date_match = re.search(r'(\d{4}-\d{2}-\d{2})', entry)
+                if date_match:
+                    file_date = datetime.strptime(date_match.group(1), '%Y-%m-%d')
+                    if file_date < cutoff_date:
+                        try:
+                            os.remove(entry_path)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
     
-    # ✅ 通用日志：所有模块都写入 app.log
+    # ✅ 通用日志：按天存储 app_YYYY-MM-DD.log
+    log_filename = f'app_{today}.log'
     app_handler = RotatingFileHandler(
-        os.path.join(log_dir, 'app.log'),
-        mode='w',  # 每次启动清空旧日志
+        os.path.join(log_dir, log_filename),
+        mode='a',  # 追加模式
         maxBytes=5 * 1024 * 1024,
         backupCount=3,
         encoding='utf-8'
@@ -56,10 +69,10 @@ def setup_logging():
         '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     ))
     
-    # ✅ 背包配件识别日志：只记录 core.recognition 模块的输出
+    # ✅ 背包配件识别日志：按天存储
     backpack_handler = RotatingFileHandler(
-        os.path.join(log_dir, 'backpack_recognition.log'),
-        mode='w',
+        os.path.join(log_dir, backpack_filename),
+        mode='a',
         maxBytes=5 * 1024 * 1024,
         backupCount=3,
         encoding='utf-8'
@@ -69,10 +82,11 @@ def setup_logging():
     ))
     backpack_handler.addFilter(_BackpackLogFilter())
     
-    # ✅ HUD 枪械识别日志：只记录 HUD 枪械图标相关的输出
+    # ✅ HUD 枪械识别日志：按天存储
+    hud_filename = f'hud_recognition_{today}.log'
     hud_handler = RotatingFileHandler(
-        os.path.join(log_dir, 'hud_recognition.log'),
-        mode='w',
+        os.path.join(log_dir, hud_filename),
+        mode='a',
         maxBytes=5 * 1024 * 1024,
         backupCount=3,
         encoding='utf-8'
@@ -82,10 +96,11 @@ def setup_logging():
     ))
     hud_handler.addFilter(_HUDLogFilter())
     
-    # ✅ ONNX/YOLO 模型识别日志：只记录含 [ONNX] 标签的日志
+    # ✅ ONNX/YOLO 模型识别日志：按天存储
+    onnx_filename = f'onnx_recognition_{today}.log'
     onnx_handler = RotatingFileHandler(
-        os.path.join(log_dir, 'onnx_recognition.log'),
-        mode='w',
+        os.path.join(log_dir, onnx_filename),
+        mode='a',
         maxBytes=5 * 1024 * 1024,
         backupCount=3,
         encoding='utf-8'

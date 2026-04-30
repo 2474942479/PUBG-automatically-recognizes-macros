@@ -217,6 +217,20 @@ GUN_ACCESSORIES = {
     "dp28":   {"slots": set(),                         "muzzle": None,          "grip": None,       "stock": None},
     "mg3":    {"slots": set(),                         "muzzle": None,          "grip": None,       "stock": None},
 
+    # === 狙击枪 SR ===
+    "m24":    {"slots": {"Muzzle", "Stock"},          "muzzle": MUZZLE_SNIPER, "grip": None,       "stock": STOCK_SNIPER},
+    "98k":    {"slots": {"Muzzle", "Stock"},          "muzzle": MUZZLE_SNIPER, "grip": None,       "stock": STOCK_SNIPER},
+    "kar98k": {"slots": {"Muzzle", "Stock"},          "muzzle": MUZZLE_SNIPER, "grip": None,       "stock": STOCK_SNIPER},
+    "awm":    {"slots": {"Muzzle", "Stock"},          "muzzle": MUZZLE_SNIPER, "grip": None,       "stock": STOCK_SNIPER},
+    "win94":  {"slots": set(),                         "muzzle": None,          "grip": None,       "stock": None},
+    "s1897":  {"slots": {"Stock"},                      "muzzle": None,          "grip": None,       "stock": STOCK_BULLET_BAG},
+    "s686":   {"slots": set(),                         "muzzle": None,          "grip": None,       "stock": None},
+    "s12k":   {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "dbS":    {"slots": set(),                         "muzzle": None,          "grip": None,       "stock": None},
+    "012":    {"slots": set(),                         "muzzle": None,          "grip": None,       "stock": None},
+    "amr":    {"slots": {"Muzzle", "Stock"},          "muzzle": MUZZLE_SNIPER, "grip": None,       "stock": STOCK_SNIPER},
+    "crossbow": {"slots": set(),                       "muzzle": None,          "grip": None,       "stock": None},
+
     # === 特殊 ===
     "zidongzhuangtianbuqiang": {"slots": {"Muzzle", "Stock"},        "muzzle": MUZZLE_RIFLE,          "grip": None,       "stock": STOCK_SNIPER},
 }
