@@ -229,16 +229,6 @@ def save_selected(candidates, selected_indices, resolution, name_overrides=None,
         clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
         img_to_save = clahe.apply(img_to_save)
 
-        # 如果已存在同名模板，调整尺寸保持一致（解决槽1/槽2 ROI框大小不同的问题）
-        if os.path.exists(save_path):
-            existing = cv2.imread(save_path, cv2.IMREAD_GRAYSCALE)
-            if existing is not None:
-                eh, ew = existing.shape[:2]
-                ih, iw = img_to_save.shape[:2]
-                if (eh, ew) != (ih, iw):
-                    img_to_save = cv2.resize(img_to_save, (ew, eh), interpolation=cv2.INTER_AREA)
-                    log(f"📐  {c['roi_type']}: 缩放 {iw}x{ih} → {ew}x{eh} 以匹配现有模板 {save_name}.png")
-
         cv2.imwrite(save_path, img_to_save)
 
         log(f"✅  {c['roi_type']} → {save_name}.png ({img_to_save.shape[1]}x{img_to_save.shape[0]})")

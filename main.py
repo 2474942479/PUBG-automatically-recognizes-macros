@@ -70,6 +70,7 @@ def setup_logging():
     ))
     
     # ✅ 背包配件识别日志：按天存储
+    backpack_filename = f'backpack_recognition_{today}.log'
     backpack_handler = RotatingFileHandler(
         os.path.join(log_dir, backpack_filename),
         mode='a',
@@ -337,6 +338,14 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
     def on_debug_mode_clicked(self):
         from main import debug_hotkey_f9
         debug_hotkey_f9(self.my_key_thread)
+    
+    def on_engine_changed(self, index):
+        """识别引擎切换"""
+        engine_map = {0: 'auto', 1: 'opencv', 2: 'onnx'}
+        engine = engine_map.get(index, 'auto')
+        PC.save_config_data('engine', engine)
+        PC.recognize_engine = engine
+        logger.info(f"识别引擎切换为: {engine}")
 
     def Init_UI_Btn(self):  # 初始化按钮事件
         self.Startbtn.clicked.connect(self.start)  # 绑定开始按钮事件
@@ -346,6 +355,13 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.actionROIConfig.triggered.connect(self.open_roi_config)  # ROI 配置
         self.actionBatchTemplate.triggered.connect(self.batch_generate_templates)  # 批量生成模板
         self.DebugModeBtn.clicked.connect(self.on_debug_mode_clicked)
+        # ═══ 识别引擎切换 ═══
+        if hasattr(self, "EngineSelector"):
+            self.EngineSelector.currentIndexChanged.connect(self.on_engine_changed)
+            # 加载当前配置
+            engine = PC.get_config_data('engine')
+            engine_map = {'auto': 0, 'opencv': 1, 'onnx': 2}
+            self.EngineSelector.setCurrentIndex(engine_map.get(engine, 0))
         self.ResolutionBtn.clicked.connect(self.Save_Config_Resolution)  # 绑定分辨率保存按钮事件
         self.SensitivityBtn.clicked.connect(self.Save_Config_Sensitivity)  # 绑定灵敏度保存按钮事件
         self.PostureBtn.clicked.connect(self.Save_Config_PostureV3)  # 绑定姿态系数保存按钮事件

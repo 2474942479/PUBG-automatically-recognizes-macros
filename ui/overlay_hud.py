@@ -223,7 +223,7 @@ STOCK_CN = {
     'zhanshu': '战术',
     'zhanshuqiangtuo': '战术枪托',
     'zhedieshiqiangtuo': '折叠枪托',
-    'zhongxinqiangtuo': '重型枪托',
+    'zhongxingqiangtuo': '重型枪托',
     'zidandai': '子弹袋',
 }
 

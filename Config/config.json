@@ -1,5 +1,6 @@
 {
   "debug_mode": false,
+  "recognize_engine": "opencv",
   "resolution": "3840x2160",
   "recoil_version": 3,
   "scope_factor_v3": {
@@ -8,7 +9,7 @@
     "quanxi": 1.0,
     "duobei1": 1.0,
     "2bei": 1.76,
-    "3bei": 3.5,
+    "3bei": 3.3,
     "4bei": 4.0,
     "duobei4": 3.8,
     "6bei": 5.76,
@@ -44,7 +45,7 @@
     "tangmuxunchongfengqiang": 0.83,
     "groza": 0.84,
     "m416": 1.05,
-    "aug": 0.9,
+    "aug": 1,
     "g36c": 0.9,
     "k2": 0.88,
     "pp19": 0.88,
@@ -57,7 +58,7 @@
     "scar-l": 0.94,
     "akm": 1.0,
     "dp28": 1.0,
-    "famas": 1.02,
+    "famas": 1.5,
     "mg3": 1.0,
     "mp9": 1.0,
     "p90": 1.0,

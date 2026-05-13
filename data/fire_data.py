@@ -49,7 +49,7 @@ ACCESSORIES_CH = {
     "Stock": {
         "none": "未知",
         "zhanshuqiangtuo": "战术枪托",
-        "zhongxinqiangtuo": "重型枪托",
+        "zhongxingqiangtuo": "重型枪托",
         "tuosaiban": "托腮板",
         "zidandai": "子弹袋",
         "zhedieshiqiangtuo": "折叠式枪托"
@@ -113,7 +113,7 @@ KEY_DATA_V3 = {
         # D 位：0=无, 1=战术枪托/托腮板, 2=子弹袋
         "none": "0",
         "zhanshuqiangtuo": "1",     # 战术枪托 → D=1
-        "zhongxinqiangtuo": "1",    # 重型枪托 → D=1 (Lua中归为同一类)
+        "zhongxingqiangtuo": "1",    # 重型枪托 → D=1 (Lua中归为同一类)
         "tuosaiban": "1",           # 托腮板   → D=1 (Lua: 战术枪托/托腮板)
         "zhedieshiqiangtuo": "1",   # 折叠式枪托 → D=1
         "zidandai": "2",            # 子弹袋   → D=2
@@ -153,7 +153,7 @@ SCOPE_TO_A_CODE = KEY_DATA_V3["Scope"]
 # ═══════════════════════════════════════════════════════════
 
 # 枪口模板分类（步枪/冲锋枪/狙击枪）
-MUZZLE_RIFLE = {"buqiangbuchang", "buqiangxiaoyan", "xiaoyin"}
+MUZZLE_RIFLE = {"buqiangbuchang", "buqiangxiaoyan", "xiaoyin", "zhituiqi"}
 MUZZLE_SMG = {"chongfengqiangbuchang", "chongfengqiangxiaoyan", "xiaoyin"}
 MUZZLE_SNIPER = {"jujiqiangbuchang", "jujiqiangxiaoyan", "xiaoyin"}
 
@@ -161,7 +161,7 @@ MUZZLE_SNIPER = {"jujiqiangbuchang", "jujiqiangxiaoyan", "xiaoyin"}
 GRIP_ALL = {"chuizhi", "banjieshi", "muzhi", "xiexiang"}
 
 # 枪托模板分类（步枪枪托/狙击枪托/冲锋枪枪托/子弹袋/折叠式）
-STOCK_RIFLE = {"zhanshuqiangtuo", "zhongxinqiangtuo"}  # 步枪/冲锋枪通用的战术枪托、重型枪托
+STOCK_RIFLE = {"zhanshuqiangtuo", "zhongxingqiangtuo"}  # 步枪/冲锋枪通用的战术枪托、重型枪托
 STOCK_SNIPER = {"tuosaiban"}  # 狙击枪专用托腮板
 STOCK_FOLDING = {"zhedieshiqiangtuo"}  # 折叠式枪托（仅UZI）
 STOCK_BULLET_BAG = {"zidandai"}  # 子弹袋（仅S1897、98K）
@@ -185,7 +185,7 @@ GUN_ACCESSORIES = {
     "aug":    {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
     "qbz":    {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
     "g36c":   {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
-    "ace32":  {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
+    "ace32":  {"slots": {"Muzzle", "Grip", "Stock"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": STOCK_RIFLE},
     "k2":     {"slots": {"Muzzle", "Grip"},           "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": None},
     "mk47":   {"slots": {"Muzzle", "Grip", "Stock"},  "muzzle": MUZZLE_RIFLE,  "grip": GRIP_ALL,   "stock": STOCK_RIFLE},
     "famas":  {"slots": {"Muzzle"},                   "muzzle": MUZZLE_RIFLE,  "grip": None,       "stock": None},

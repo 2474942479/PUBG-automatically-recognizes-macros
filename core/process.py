@@ -94,26 +94,20 @@ class ProcessClass:
         _cfg = self.get_config_data("a")
         # ✅ 调试模式仅在程序生命周期内有效，默认关闭，不持久化到配置
         self.debug_input_trace = False
+        
         # ═══ 识别引擎开关 ═══
         # "auto"   — ONNX 优先，置信度不足时回退 OpenCV 模板匹配（默认）
         # "opencv" — 强制 OpenCV 模板匹配，跳过 ONNX
         # "onnx"   — 强制 ONNX 分类，不回退模板匹配
         self.recognize_engine = self.get_config_data('engine')
-
+        
         # ═══ 背包识别自愈状态 ═══
-        # _tab_fail_count：连续“全 none”的背包识别次数
+        # _tab_fail_count：连续"全 none"的背包识别次数
         # _recognition_failed：HUD 红字警告标志（连续失败 ≥ 阈值时置位）
         # _TAB_FAIL_THRESHOLD：连续失败几次后触发 HUD 警告
         self._tab_fail_count = 0
         self._recognition_failed = False
         self._TAB_FAIL_THRESHOLD = 2
-
-        # ═══ 双源识别策略（背包优先） ═══
-        # Tab 背包识别 → 全量更新 _Result*（Name + 全部配件），是权威来源
-        # 1/2 HUD 图标识别 →
-        #   背包有 Name → HUD 只写 Name_hud（旁证），不覆盖权威 Name
-        #   背包无 Name → HUD 填补 Name（临时来源，下次 Tab 会被覆盖）
-        # 无需用户干预，背包 UI 是静态渲染，天然比 HUD（半透明+滤镜）更可靠
 
     def move_mouse(self, x, y):
         self._gd.mouse_R(x, y)
@@ -658,7 +652,7 @@ class ProcessClass:
                 self._Result2.get("Name") if self._Result2 else None,
             )
 
-            # ✅ 自愈机制：检测“全 none”的无效识别，避免 Tab 误点导致状态卡死
+            # ✅ 自愈机制：检测"全 none"的无效识别，避免 Tab 误点导致状态卡死
             # 规则：两个槽位的 Name/Scope/Muzzle/Grip/Stock 全部为 none 或空 → 视为失败
             def _slot_all_empty(res):
                 if not res:
@@ -668,23 +662,25 @@ class ProcessClass:
                     if v and v not in ("none", ""):
                         return False
                 return True
-
+            
             both_empty = _slot_all_empty(self._Result1) and _slot_all_empty(self._Result2)
             if both_empty:
                 self._tab_fail_count += 1
-                self.TabKey = False  # 自愈：无效识别重置 Tab 标志，下次按 Tab 即重新识别
+                # 重置 TabKey：允许用户下次按 Tab 即重新识别
+                self.TabKey = False
                 _input_trace.log(
-                    "Tab识别 全none自愈 重置TabKey=False 失败计数=%d/%d",
+                    "Tab识别 全none 重置TabKey=False 失败计数=%d/%d",
                     self._tab_fail_count, self._TAB_FAIL_THRESHOLD,
                 )
                 if self._tab_fail_count >= self._TAB_FAIL_THRESHOLD:
                     self._recognition_failed = True
                     Emit("l", (
                         f"⚠️ 连续 {self._tab_fail_count} 次背包识别全部失败，HUD 已警告。"
-                        f"请确认：(1) 在游戳内按 Tab 打开背包；(2) 分辨率匹配；(3) ROI 区域配置正确。",
+                        f"请确认：(1) 在游戏内按 Tab 打开背包；(2) 分辨率匹配；(3) ROI 区域配置正确。",
                     ))
                 else:
-                    Emit("l", (f"⚠️ 背包识别全部为空，已重置 Tab 标志（失败 {self._tab_fail_count}/{self._TAB_FAIL_THRESHOLD}）",))
+                    # 第一次失败：提示用户再按 Tab 重新识别
+                    Emit("l", (f"⚠️ 背包识别全部为空，请再按 Tab 重新识别（{self._tab_fail_count}/{self._TAB_FAIL_THRESHOLD}）",))
             else:
                 # 识别成功：清除失败计数与警告标志
                 if self._tab_fail_count > 0 or self._recognition_failed:
@@ -719,12 +715,9 @@ class ProcessClass:
 
     def recognize_gun_icons(self, Emit=None):
         """
-        从 HUD 右下角识别枪械图标（1/2 切枪时自动触发）。
-
-        背包优先策略（零用户干预）：
-          - 背包已有 Name → HUD 只写 Name_hud（旁证），不覆盖权威 Name
-          - 背包无 Name   → HUD 填补 Name（临时来源，下次 Tab 会被覆盖）
-          - HUD 识别为 none → 什么都不改
+        从 HUD 右下角识别枪械图标（1/2 切枪时触发）。
+        HUD 识别结果写入 Name_hud 字段，不触碰背包识别的 Name。
+        当前持枪由按键 1/2 驱动。
         """
         try:
             result = capture_gun_icons(self.Monitor)
@@ -744,25 +737,8 @@ class ProcessClass:
                     existing = {}
                     setattr(self, result_attr, existing)
 
-                hud_name_l = str(hud_name or "").lower()
-                has_hud = hud_name_l and hud_name_l not in ("none", "")
-
-                # 始终记录 HUD 最新识别结果（供 overlay 展示对比）
-                existing["Name_hud"] = hud_name_l if has_hud else "none"
-
-                if has_hud:
-                    existing_name = str(existing.get("Name", "") or "").lower()
-                    has_bag = existing_name and existing_name not in ("none", "")
-
-                    if not has_bag:
-                        # 背包没识别过 → HUD 临时填补
-                        existing["Name"] = hud_name_l
-                        logger.info(f"HUD 填补槽{slot_idx} Name={hud_name_l}（背包未识别）")
-                    elif existing_name != hud_name_l:
-                        # 背包已有 → HUD 不覆盖，只记日志
-                        logger.info(
-                            f"HUD 槽{slot_idx}: HUD={hud_name_l} vs 背包={existing_name}（保留背包结果）"
-                        )
+                # 始终更新 Name_hud（供 HUD 面板展示用）
+                existing["Name_hud"] = str(hud_name or "none")
 
             _input_trace.log(
                 "枪械图标识别 完成 Gun_1=%s Gun_2=%s 持枪=%s(按键驱动)",

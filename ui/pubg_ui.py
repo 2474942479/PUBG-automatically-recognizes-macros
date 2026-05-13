@@ -514,6 +514,13 @@ class Ui_PUBG(object):
         self.DebugModeBtn = QtWidgets.QPushButton("调试: 关", content)
         self.DebugModeBtn.setToolTip("与 F9 相同：全量 DEBUG + INPUT_TRACE + 开镜姿势存图 logs/posture_debug/")
         btn_row.addWidget(self.DebugModeBtn, 1)
+        
+        # ═══ 识别引擎切换 ═══
+        self.EngineSelector = QtWidgets.QComboBox(content)
+        self.EngineSelector.addItems(["auto (自动)", "opencv (模板)", "onnx (模型)"])
+        self.EngineSelector.setToolTip("识别引擎：auto=ONNX优先+回退模板, opencv=强制模板, onnx=强制模型")
+        self.EngineSelector.setCurrentIndex(0)  # 默认 auto
+        btn_row.addWidget(self.EngineSelector, 2)
 
         self.Startbtn = QtWidgets.QPushButton("启动", content)
         self.Startbtn.setObjectName("Startbtn")
