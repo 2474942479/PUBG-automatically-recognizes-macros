@@ -807,9 +807,9 @@ class ProcessClass:
         guns_info = self.get_guns_info()
         if not guns_info:
             return Emit("l", ("当前装备不是枪械，无需压枪",))
-        # 获取枪械名称
-        gunsName = guns_info.get("Name", "None")
-        if gunsName == "None" or not gunsName:
+        # 获取枪械名称（识别失败值统一小写，但兼容历史大写）
+        gunsName = guns_info.get("Name", "none")
+        if not gunsName or gunsName.lower() == "none":
             return Emit("l", ("未检测到枪械",))
         # 获取枪械数据 枪械对应json数据
         gun = self.read_gun_data(gunsName)

@@ -34,9 +34,9 @@ PADDING = 2
 
 # 单次 Tab 多帧截图投票（FPS 游戏实时性要求高，不依赖跨次 Tab 累积历史）
 # 每次按 Tab 快速截取 N 帧背包大图，对每帧独立识别，投票取共识结果
-# 帧间隔 ≥ 1 个游戏渲染帧（60fps=16.7ms），确保是不同画面
+# 帧间隔覆盖 ≥ 1 个游戏渲染帧确保不同画面：60Hz=16.7ms / 144Hz=6.9ms / 160Hz=6.25ms
 MULTI_FRAME_COUNT = 3         # 截取帧数
-MULTI_FRAME_INTERVAL = 0.04   # 帧间隔 40ms
+MULTI_FRAME_INTERVAL = 0.012  # 帧间隔 12ms（160Hz≈1.92渲染帧；低刷屏可改回 0.016）
 MULTI_FRAME_MIN_VOTES = 2     # 投票最少一致票数
 
 # ============================================================
@@ -219,23 +219,26 @@ def _match_icon_sobel(src, tmpl, sobel_thresh=20):
     return score
 
 
-def _match_icon_small(src, tmpl, tier, scale):
+def _match_icon_small(src, bundle, tier, scale):
     """
     小图专用匹配 (<=1080p)
     pipeline: CLAHE_bilateral + CCORR_NORMED + ORB_multi_scale
     放弃 Sobel/Canny（40px 边缘太少），改用双边滤波平滑背景
     模板缩放到 90%/100%/110% 三个尺度匹配取 max
+
+    P2 优化：模板侧的 CLAHE+bilateralFilter 在 _build_template_bundle 时一次性算好，
+    通过 bundle.bilateral['small'] 直接拿。
     """
+    # ROI 侧 CLAHE + bilateralFilter 运行时算
     clip_limit, tile_grid = _get_clahe_params(tier, scale)
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
     src_c = clahe.apply(src)
-    tmpl_c = clahe.apply(tmpl)
-    # 双边滤波平滑背景，保留边缘
     src_c = cv2.bilateralFilter(src_c, 5, 50, 50)
-    tmpl_c = cv2.bilateralFilter(tmpl_c, 5, 50, 50)
+    # 模板侧从 bundle 直接拿预处理结果
+    tmpl_c = bundle.bilateral['small']
     # 主通道：CCORR_NORMED
     score_ccorr = _match_icon_ccorr(src_c, tmpl_c)
-    # 多尺度 ORB（模板缩放 90%/100%/110%）
+    # 多尺度 ORB（模板缩放 90%/100%/110%）— 缩放仍运行时算（依赖匹配尺寸对齐）
     score_orb = _match_icon_orb(src_c, tmpl_c)
     ht, wt = tmpl_c.shape
     for r in [0.9, 1.1]:
@@ -417,22 +420,75 @@ def _normalize_roi_ltrb(coords):
     return None
 
 # ✅ 全局缓存：预加载所有模板到内存，避免重复读取磁盘
-_template_cache = {}  # {template_path: img_array}
+# 缓存值是 TemplateBundle，启动时把 CLAHE/Sobel/Canny 等模板侧预处理一次性算好。
+_template_cache = {}  # {template_path: TemplateBundle}
+
+
+class TemplateBundle:
+    """
+    模板预处理缓存：模板加载时按 3 个 tier 一次性算好 CLAHE/Sobel/Canny，
+    运行时 `_match_icon_*` 只对 ROI 算这些算子，不再重复处理模板。
+
+    注意：Otsu 通道仍保留运行时计算（阈值跨 src/tmpl 共享，无法预算）。
+
+    字段：
+      - raw           : 原始灰度模板
+      - clahe[tier]   : CLAHE 增强后的灰度（按 tier 不同参数）
+      - sobel_bin[tier]: Sobel 梯度+阈值二值化（按 tier 不同 sobel_thresh）
+      - canny[tier]   : Canny 边缘（参数与 _match_icon_canny 保持一致 30,100）
+      - bilateral['small']: small tier 用的 CLAHE+bilateralFilter 版本
+    """
+    __slots__ = ('path', 'raw', 'clahe', 'sobel_bin', 'canny', 'bilateral')
+
+    def __init__(self, path, raw):
+        self.path = path
+        self.raw = raw
+        self.clahe = {}
+        self.sobel_bin = {}
+        self.canny = {}
+        self.bilateral = {}
+
+
+def _build_template_bundle(path, raw):
+    """启动时按 3 个 tier 一次性预算模板的 CLAHE/Sobel/Canny。"""
+    bundle = TemplateBundle(path, raw)
+    for tier in ('large', 'medium', 'small'):
+        clip, grid = _get_clahe_params(tier, 1.0)  # CLAHE 参数与 scale 无关
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=grid)
+        c = clahe.apply(raw)
+        bundle.clahe[tier] = c
+
+        # Sobel 梯度二值化（sobel_thresh 因 tier 变 — 与 _match_icon_hybrid 保持一致）
+        sobel_thresh = 20 if tier == 'large' else (15 if tier == 'medium' else 10)
+        gx = cv2.Sobel(c, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(c, cv2.CV_64F, 0, 1, ksize=3)
+        gm = cv2.magnitude(gx, gy).astype(np.uint8)
+        _, sb = cv2.threshold(gm, sobel_thresh, 255, cv2.THRESH_BINARY)
+        bundle.sobel_bin[tier] = sb
+
+        # Canny 边缘（维持 _match_icon_canny 中写死的 30,100）
+        bundle.canny[tier] = cv2.Canny(c, 30, 100)
+
+    # small tier 双边滤波在 CLAHE 之上叠（仅 _match_icon_small 用）
+    bundle.bilateral['small'] = cv2.bilateralFilter(bundle.clahe['small'], 5, 50, 50)
+    return bundle
+
 
 def _load_template_cached(template_path):
     """
-    从缓存加载模板，如果不存在则读取并缓存
+    从缓存加载模板。首次调用时读盘 + 预处理 (CLAHE/Sobel/Canny 各 tier 一份)。
     :param template_path: 模板文件路径
-    :return: 灰度图像数组
+    :return: TemplateBundle 或 None
     """
-    if template_path not in _template_cache:
-        img = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
-        if img is not None:
-            _template_cache[template_path] = img
-        else:
-            logger.warning(f"无法加载模板: {template_path}")
-            return None
-    return _template_cache[template_path]
+    if template_path in _template_cache:
+        return _template_cache[template_path]
+    raw = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+    if raw is None:
+        logger.warning(f"无法加载模板: {template_path}")
+        return None
+    bundle = _build_template_bundle(template_path, raw)
+    _template_cache[template_path] = bundle
+    return bundle
 
 
 def _ensure_min_size(img, min_dim=200):
@@ -566,7 +622,7 @@ def compute_matches_mask(matches, distance_threshold):
     return matchesMask, matchedPoints1
 
 
-def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0, slot_key=None, current_res=None):
+def _match_icon_hybrid(src, bundle, tier='large', scale=1.0, slot_key=None, current_res=None):
     """
     分辨率自适应匹配（4K/2K/1080p 自动分流）
 
@@ -574,24 +630,26 @@ def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0, slot_key=None, curren
     medium (2K):     CLAHE + CCOEFF + CCORR + Sobel  (双路归一化，放弃易噪的 Canny)
     small  (<=1080p): 委托 _match_icon_small           (CCORR + 双边滤波 + 多尺度 ORB)
 
-    Otsu 通道改进（移植自 _match_hud_gun_icon）：
-      - 统一阈值：src 和 tmpl 使用同一个 Otsu 阈值做二值化
-      - EMA 平滑：同一 slot_key 的阈值跨帧平滑，消除帧间波动
-      - 中值滤波：二值化后 medianBlur(3) 去噪
+    P2 优化：模板侧 CLAHE/Sobel/Canny 已在 `_load_template_cached` 时一次性预算，
+    通过 `bundle` 参数传入，运行时只对 src 算这些算子。
+    Otsu 通道仍运行时计算（阈值跨 src/tmpl 共享，无法预算模板侧）。
 
+    :param bundle: TemplateBundle，包含 raw + 各 tier 的 CLAHE/Sobel/Canny 预处理
     :param slot_key: 槽位标识（如 'Muzzle_1'），用于 EMA 缓存隔离
     :param current_res: 当前分辨率字符串，用于 EMA 缓存键
     """
+    raw_tmpl = bundle.raw
     # 尺寸保护：src 任一维小于 tmpl → matchTemplate 会断言失败
     hs, ws = src.shape[:2]
-    ht, wt = tmpl.shape[:2]
+    ht, wt = raw_tmpl.shape[:2]
     if hs < ht or ws < wt:
         return 0.0
 
+    # ROI 侧 CLAHE 运行时算（模板侧从 bundle 直接拿）
     clip_limit, tile_grid = _get_clahe_params(tier, scale)
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
     src_c = clahe.apply(src)
-    tmpl_c = clahe.apply(tmpl)
+    tmpl_c = bundle.clahe[tier]
 
     # --- 方法1：像素级 TM_CCOEFF_NORMED（所有 tier 共用） ---
     result = cv2.matchTemplate(src_c, tmpl_c, cv2.TM_CCOEFF_NORMED)
@@ -599,22 +657,36 @@ def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0, slot_key=None, curren
 
     # --- 小图分支：委托专用 pipeline ---
     if tier == 'small':
-        score_small = _match_icon_small(src, tmpl, tier, scale)
+        score_small = _match_icon_small(src, bundle, tier, scale)
         return max(score_ccoeff, score_small)
 
-    # --- 方法2：梯度级匹配（large + medium） ---
-    sobel_thresh = 20 if tier == 'large' else 15  # medium 用更低阈值
-    score_sobel = _match_icon_sobel(src_c, tmpl_c, sobel_thresh)
+    # --- 方法2：梯度级匹配（large + medium）— ROI 侧算 Sobel，模板侧从 bundle 拿 ---
+    sobel_thresh = 20 if tier == 'large' else 15
+    src_sobel = _compute_sobel_binary(src_c, sobel_thresh)
+    tmpl_sobel = bundle.sobel_bin[tier]
+    if src_sobel.shape == tmpl_sobel.shape:
+        sobel_result = cv2.matchTemplate(src_sobel, tmpl_sobel, cv2.TM_CCOEFF_NORMED)
+        _, score_sobel, _, _ = cv2.minMaxLoc(sobel_result)
+    else:
+        score_sobel = 0.0
 
-    # --- 方法3：Canny 边缘匹配（large + medium，押滤镜端部透明背景） ---
-    score_canny = _match_icon_canny(src_c, tmpl_c)
+    # --- 方法3：Canny 边缘匹配（large + medium）— ROI 侧算 Canny，模板侧从 bundle 拿 ---
+    src_canny = cv2.Canny(src_c, 30, 100)
+    tmpl_canny = bundle.canny[tier]
+    if (src_canny.shape == tmpl_canny.shape
+            and cv2.countNonZero(src_canny) >= 20
+            and cv2.countNonZero(tmpl_canny) >= 20):
+        canny_result = cv2.matchTemplate(src_canny, tmpl_canny, cv2.TM_CCOEFF_NORMED)
+        _, score_canny, _, _ = cv2.minMaxLoc(canny_result)
+    else:
+        score_canny = 0.0
 
     # --- 中图分支：CCORR_NORMED 替代 Canny（更稳定） ---
     if tier == 'medium':
         score_ccorr = _match_icon_ccorr(src_c, tmpl_c)
         return max(score_ccoeff, score_sobel, score_ccorr, score_canny)
 
-    # --- 大图分支：Otsu 二值化（统一阈值 + EMA 平滑 + 中值滤波） ---
+    # --- 大图分支：Otsu 二值化（运行时算，阈值跨 src/tmpl 共享 + EMA 平滑） ---
     score_otsu = 0.0
     try:
         raw_otsu, _ = cv2.threshold(src_c, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -645,33 +717,48 @@ def _match_icon_hybrid(src, tmpl, tier='large', scale=1.0, slot_key=None, curren
 
     return max(score_ccoeff, score_sobel, score_otsu, score_canny)
 
-def match_sift(img1, img2, current_res=None, slot_key=None):
+
+def _compute_sobel_binary(img_gray, sobel_thresh):
+    """对灰度图算 Sobel 梯度幅值并阈值二值化（与 _build_template_bundle 中模板侧逻辑一致）"""
+    gx = cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
+    gy = cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)
+    gm = cv2.magnitude(gx, gy).astype(np.uint8)
+    _, sb = cv2.threshold(gm, sobel_thresh, 255, cv2.THRESH_BINARY)
+    return sb
+
+def match_sift(img1, tmpl_bundle, current_res=None, slot_key=None):
     """
-    SIFT 特征匹配
-    :param img1: 待匹配的图像（灰度图）
-    :param img2: 模板图像（灰度图）
+    SIFT 特征匹配 / 模板匹配（视模板尺寸自动分流）
+
+    P2 优化后：tmpl_bundle 是 TemplateBundle，模板侧的 CLAHE/Sobel/Canny 已预算。
+    向后兼容：若传入 raw ndarray，会即时包成临时 bundle（适配未走缓存的极少数调用）。
+
+    :param img1: 待匹配的图像（灰度图，ROI）
+    :param tmpl_bundle: TemplateBundle（推荐）或 raw 灰度模板 ndarray（兼容）
     :param current_res: 当前分辨率字符串（如 '2560x1440'）
     :param slot_key: 槽位标识（如 'Muzzle_1'），用于 Otsu EMA 缓存隔离
     :return: 匹配率
     """
     # 验证输入图像
-    if img1 is None or img2 is None:
-        logger.warning("match_sift: 输入图像为 None")
+    if img1 is None or tmpl_bundle is None:
+        logger.warning("match_sift: 输入为 None")
         return 0.0
-    
+
+    # 兼容：raw ndarray 包成 TemplateBundle
+    if not isinstance(tmpl_bundle, TemplateBundle):
+        tmpl_bundle = _build_template_bundle('<inline>', tmpl_bundle)
+
+    img2 = tmpl_bundle.raw
+
     if img1.size == 0 or img2.size == 0:
         logger.warning(f"match_sift: 输入图像为空 - img1.shape={img1.shape if hasattr(img1, 'shape') else 'N/A'}, img2.shape={img2.shape if hasattr(img2, 'shape') else 'N/A'}")
         return 0.0
-    
+
     # 确保是 8 位单通道图像
     if img1.dtype != np.uint8:
         logger.warning(f"match_sift: img1 数据类型错误: {img1.dtype}，转换为 uint8")
         img1 = img1.astype(np.uint8)
-    
-    if img2.dtype != np.uint8:
-        logger.warning(f"match_sift: img2 数据类型错误: {img2.dtype}，转换为 uint8")
-        img2 = img2.astype(np.uint8)
-    
+
     # ✅ 小图（任一维度 < 100px）直接用模板匹配 TM_CCOEFF_NORMED
     # SIFT 在 62x65 的图标上特征点太少（0~29个），匹配不可靠
     # 模板匹配在同尺寸图上零特征提取、极快（1ms 10次）、100% 准确
@@ -682,10 +769,10 @@ def match_sift(img1, img2, current_res=None, slot_key=None):
         tier, scale = _classify_resolution(current_res) if current_res else ('large', 1.0)
         # 路径1：尺寸完全一致 → 分辨率自适应多通道融合
         if img1.shape == img2.shape:
-            score_tm = _match_icon_hybrid(img1, img2, tier, scale, slot_key=slot_key, current_res=current_res)
+            score_tm = _match_icon_hybrid(img1, tmpl_bundle, tier, scale, slot_key=slot_key, current_res=current_res)
             score_orb = _match_icon_orb(img1, img2)
             return float(max(score_tm, score_orb))
-        
+
         # 路径2：尺寸在 ±2*PADDING 内 → 滑动窗口匹配
         # ROI 裁剪时每边加了 PADDING px，总差异 = 2*PADDING
         # 用 matchTemplate 滑动窗口找最佳对齐位置，补偿 PUBG 背包 UI 的 ±1~2px 像素抖动
@@ -693,9 +780,12 @@ def match_sift(img1, img2, current_res=None, slot_key=None):
             # 大图为源（滑动窗口 TM），小图为模板
             if h1 >= h2 and w1 >= w2:
                 src, tmpl = img1, img2
+                bundle_for_hybrid = tmpl_bundle
             else:
                 src, tmpl = img2, img1
-            score_tm = _match_icon_hybrid(src, tmpl, tier, scale, slot_key=slot_key, current_res=current_res)
+                # 这种情况罕见（ROI 比模板小），退化为临时 bundle
+                bundle_for_hybrid = _build_template_bundle('<swapped>', tmpl)
+            score_tm = _match_icon_hybrid(src, bundle_for_hybrid, tier, scale, slot_key=slot_key, current_res=current_res)
             # ORB: 裁取源图中心区域（去掉 padding 边距）
             h_s, w_s = src.shape[:2]
             h_t, w_t = tmpl.shape[:2]
@@ -704,14 +794,14 @@ def match_sift(img1, img2, current_res=None, slot_key=None):
             src_center = src[cy:cy+h_t, cx:cx+w_t]
             score_orb = _match_icon_orb(src_center, tmpl)
             return float(max(score_tm, score_orb))
-    
+
     # ✅ 使用全局 SIFT 检测器（避免重复创建）
     sift = _get_sift_detector()
     # ✅ 使用全局 FLANN 匹配器（避免重复创建）
     flann = _get_flann_matcher()
-    
+
     try:
-        # 查找监测点和匹配符
+        # 查找监测点和匹配符（SIFT 用 raw 模板）
         kp1, des1 = sift.detectAndCompute(img1, None)
         kp2, des2 = sift.detectAndCompute(img2, None)
 
@@ -802,7 +892,7 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
         # 验证图像
         if img1 is None or img1.size == 0:
             logger.warning(f"{mode} 图像为空，跳过")
-            ReturnData[mode[:-2]] = "None"
+            ReturnData[mode[:-2]] = "none"
             continue
 
         # ═══ ONNX 分类（engine != 'opencv' 时尝试） ═══
@@ -881,7 +971,7 @@ async def capture_all_guns(pathData, current_res=None, gun_name=None):
         
         if not os.path.exists(match_Path):
             logger.warning(f"模板目录不存在: {match_Path}")
-            ReturnData[mode[:-2]] = "None"
+            ReturnData[mode[:-2]] = "none"
             continue
         
         content = os.listdir(match_Path)
@@ -1101,6 +1191,42 @@ async def _recognize_single_frame(backpack_gray, backpack_color, Guns_img, curre
     return {**name_r1, **acc_r1}, {**name_r2, **acc_r2}
 
 
+def _enforce_final_whitelist(slot_result, debug_mode=False):
+    """
+    A4: 用最终 Name 重过滤每个配件字段。
+
+    背景：跨帧字段独立投票可能拼出 (Name=akm) + (Muzzle=只有 M416 能装的型号)
+    这种无效组合 — Stage2 用的是当帧 Name 做白名单，当帧 Name 错识时
+    Muzzle 选项受污染。投票后用最终 Name 校验，不在白名单的字段置 'none'。
+
+    复用 data/fire_data.py:get_allowed_templates 已有逻辑。
+    """
+    if not slot_result:
+        return slot_result
+    final_name = slot_result.get("Name", "none")
+    if not final_name or final_name.lower() == "none":
+        return slot_result
+    try:
+        from data.fire_data import get_allowed_templates
+    except ImportError:
+        return slot_result
+    for slot_type in ("Scope", "Muzzle", "Grip", "Stock"):
+        val = slot_result.get(slot_type)
+        if not val or val.lower() == "none":
+            continue
+        allowed = get_allowed_templates(final_name, slot_type)
+        if allowed is None:
+            continue  # 该枪在该槽位不限制
+        allowed_lower = {a.lower() for a in allowed}
+        if len(allowed) == 0 or val.lower() not in allowed_lower:
+            if debug_mode:
+                logger.info(
+                    f"[白名单二次校验] {slot_type}={val} 不在 {final_name} 白名单中, 置 none"
+                )
+            slot_result[slot_type] = "none"
+    return slot_result
+
+
 def _vote_frame_results(results_list, debug_mode):
     """
     对多帧识别结果做 majority vote（按字段独立投票）。
@@ -1118,9 +1244,15 @@ def _vote_frame_results(results_list, debug_mode):
         values = [r.get(key, "none") for r in results_list]
         counter = Counter(values)
         top_val, top_count = counter.most_common(1)[0]
-        voted[key] = top_val
-        if debug_mode and top_count < len(results_list):
-            logger.info(f"[多帧投票] {key}: {dict(counter)} → {top_val} ({top_count}/{len(results_list)}票)")
+        # A1: 强制 MIN_VOTES 守卫，避免 1-1-1 平票退化为"按 Counter 插入顺序选第一个"
+        if top_count >= MULTI_FRAME_MIN_VOTES:
+            voted[key] = top_val
+            if debug_mode and top_count < len(results_list):
+                logger.info(f"[多帧投票] {key}: {dict(counter)} → {top_val} ({top_count}/{len(results_list)}票)")
+        else:
+            voted[key] = "none"
+            if debug_mode:
+                logger.info(f"[多帧投票] {key}: {dict(counter)} → none (top_count={top_count}<{MULTI_FRAME_MIN_VOTES})")
     return voted
 
 
@@ -1198,6 +1330,10 @@ async def capture_all_positions_thread(current_res, resolution_settings=None, gu
     # ══════════════════════════════════════════════════
     final_1 = _vote_frame_results([r[0] for r in all_results], debug_mode)
     final_2 = _vote_frame_results([r[1] for r in all_results], debug_mode)
+
+    # A4: 用最终 Name 重过滤每槽位的配件白名单
+    final_1 = _enforce_final_whitelist(final_1, debug_mode)
+    final_2 = _enforce_final_whitelist(final_2, debug_mode)
 
     elapsed = time.time() - start_time
     t_recog = time.time() - t_recognize
@@ -1454,22 +1590,24 @@ def capture_gun_icons(current_res):
         
         for tmpl_file in template_files:
             tmpl_path = os.path.join(gun_template_dir, tmpl_file)
-            tmpl_img = _load_template_cached(tmpl_path)
-            if tmpl_img is None:
+            tmpl_bundle = _load_template_cached(tmpl_path)
+            if tmpl_bundle is None:
                 continue
-            
+            # HUD 路径仍用 raw（_match_hud_gun_icon 未改造）
+            tmpl_img = tmpl_bundle.raw
+
             # 使用 CLAHE + TM_CCOEFF_NORMED 进行匹配
             # 枪械图标尺寸较大 (~284x104)，用 matchTemplate 滑动窗口
             hs, ws = roi_gray.shape[:2]
             ht, wt = tmpl_img.shape[:2]
-            
+
             if hs < ht or ws < wt:
                 # ROI 比模板小，跳过
                 skipped_count += 1
                 if debug_mode:
                     logger.debug(f"[枪械图标]   跳过 {tmpl_file}: 模板尺寸({wt}x{ht}) > ROI尺寸({ws}x{hs})")
                 continue
-            
+
             # ✅ 多通道融合匹配（CLAHE + Sobel + Canny + Otsu EMA）
             # 任一通道失效不影响整体判断，Otsu 阈值跨帧平滑根治分数波动
             score = _match_hud_gun_icon(roi_gray, tmpl_img, tier, scale, slot_key, current_res)

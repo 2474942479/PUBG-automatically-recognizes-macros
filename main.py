@@ -488,9 +488,9 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         logger.info(f"📊 UI 更新枪械数据: Result1={results[0]}, Result2={results[1]}")
         
         for idx, result in enumerate(results, start=1):  # 遍历结果
-            # ✅ 修复：只要 result 不是 None 就更新 UI（包括包含 "None" 值的字典）
+            # ✅ 修复：只要 result 不是 None 就更新 UI（包括包含 "none" 值的字典）
             if result is not None:  # 如果有结果（即使是空状态）
-                name = result.get("Name", "None")
+                name = result.get("Name", "none")
                 scope = result.get("Scope", "none")
                 muzzle = result.get("Muzzle", "none")
                 grip = result.get("Grip", "none")
