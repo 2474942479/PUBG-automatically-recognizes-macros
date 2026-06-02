@@ -354,6 +354,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         # ⚙️ 菜单工具按钮（齿轮图标，标题栏）
         self.actionROIConfig.triggered.connect(self.open_roi_config)  # ROI 配置
         self.actionBatchTemplate.triggered.connect(self.batch_generate_templates)  # 批量生成模板
+        self.actionMacroConfig.triggered.connect(self.open_macro_config)  # 宏配置
         self.DebugModeBtn.clicked.connect(self.on_debug_mode_clicked)
         # ═══ 识别引擎切换 ═══
         if hasattr(self, "EngineSelector"):
@@ -651,6 +652,7 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         self.my_mouse_thread.mouseClicked.connect(self.onKeyPressed)  # 绑定鼠标事件
         self.my_key_thread.roi_config_requested.connect(self.open_roi_config)  # 绑定 ROI 配置快捷键
         self.my_key_thread.batch_template_requested.connect(self.batch_generate_templates)  # 绑定批量生成模板快捷键 (Ctrl+Alt+F8)
+        self.my_key_thread.macro_config_requested.connect(self.open_macro_config)  # 绑定宏配置快捷键 (F7)
         
         self.SetStatus()  # 设置状态
         self.StatusInfo.setText('程序运行中.....')  # 更新状态信息
@@ -780,7 +782,17 @@ class AppManager(QWidget, Ui_PUBG):  # 定义主应用管理类，继承自QWidg
         except Exception as e:
             import traceback
             self.Init_UI_LOG(f"❌ 批量生成模板失败: {e}\n{traceback.format_exc()}")
-    
+
+    def open_macro_config(self):
+        """打开宏配置对话框 (F7 / 菜单)。"""
+        try:
+            from ui.macro_config_dialog import MacroConfigDialog
+            dlg = MacroConfigDialog(PC, parent=self)
+            dlg.exec_()
+        except Exception as e:
+            import traceback
+            self.Init_UI_LOG(f"❌ 打开宏配置失败: {e}\n{traceback.format_exc()}")
+
     def open_roi_config(self):
         """打开 ROI 配置对话框"""
         try:

@@ -97,6 +97,19 @@ class AppMainMouseListener(QThread):  # 定义鼠标监听器类，继承自QThr
                 else:  # 如果释放
                     self.PC.StartFire = False  # 设置开镜状态为False
                 self.mouseClicked.emit('s', (self.PC.StartFire,))  # 发送开镜状态信号
+
+            # ═══ 转发给宏 dispatcher ═══
+            try:
+                btn_name = {
+                    mouse.Button.left: "mouse_left",
+                    mouse.Button.right: "mouse_right",
+                    mouse.Button.x1: "mouse_x1",
+                    mouse.Button.x2: "mouse_x2",
+                }.get(button)
+                if btn_name:
+                    self.PC.macro_dispatcher.on_mouse_event(btn_name, pressed)
+            except AttributeError:
+                pass
         except Exception as e:
             # ✅ 异常处理：记录错误但不中断监听
             import logging

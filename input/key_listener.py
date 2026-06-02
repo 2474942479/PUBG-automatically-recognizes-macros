@@ -11,6 +11,7 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
     keyInfo = pyqtSignal(str, tuple)  # 定义信号，用于发送键盘事件信息
     roi_config_requested = pyqtSignal()  # 定义信号，用于请求打开 ROI 配置
     batch_template_requested = pyqtSignal()  # 定义信号，用于请求批量生成模板
+    macro_config_requested = pyqtSignal()  # 定义信号，用于请求打开宏配置 (F7)
 
     def __init__(self, PCdata):  # 初始化方法
         super().__init__()  # 调用父类的初始化方法
@@ -103,6 +104,8 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
             self.keyInfo.emit('l', ("倍镜模式已重置为默认(低倍)",))
         elif Keys == "home":  # 如果按下Home键
             self.keyInfo.emit('t', (None,))  # 发送切换窗口信号
+        elif Keys == "f7":  # F7 打开宏配置
+            self.macro_config_requested.emit()
         elif Keys == "f8":  # 如果按下F8键
             # 用 keyboard.is_pressed 实时查修饰键状态，避免事件顺序不一致
             if keyboard.is_pressed('ctrl') and keyboard.is_pressed('alt'):
@@ -131,6 +134,12 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
                 self.keyInfo.emit('p', (self.PC.Current_posture,))  # 发送姿态信息信号
         elif Keys in ("alt_l", "alt_r"):  # 如果按下Alt键
             self.alt_pressed = True  # 标记Alt键按下
+
+        # ═══ 转发给宏 dispatcher ═══
+        try:
+            self.PC.macro_dispatcher.on_key_event(Keys, "down")
+        except AttributeError:
+            pass  # 启动早期 dispatcher 还未就绪
 
     def _test_posture_recognition(self):
         """
@@ -171,6 +180,12 @@ class AppMainKeyListener(QThread):  # 定义键盘监听器类，继承自QThrea
             self.ctrl_pressed = False
         elif Keys == "alt_l" or Keys == "alt_r":  # 如果释放Alt键
             self.alt_pressed = False  # 标记Alt键释放
+
+        # ═══ 转发给宏 dispatcher ═══
+        try:
+            self.PC.macro_dispatcher.on_key_event(Keys, "up")
+        except AttributeError:
+            pass
 
     def run(self):  # 线程运行方法
         self.rerun()  # 调用rerun方法

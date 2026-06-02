@@ -331,6 +331,7 @@ class Ui_PUBG(object):
         self.ToolsMenu.setObjectName("ToolsMenu")
         self.actionROIConfig = self.ToolsMenu.addAction("ROI 配置 (F8)")
         self.actionBatchTemplate = self.ToolsMenu.addAction("批量生成模板 (Ctrl+Alt+F8)")
+        self.actionMacroConfig = self.ToolsMenu.addAction("宏配置 (F7)")
         self.ToolsBtn.setMenu(self.ToolsMenu)
 
         tb_layout.addWidget(self.ToolsBtn)

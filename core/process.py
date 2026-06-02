@@ -149,6 +149,11 @@ class ProcessClass:
         self._recognition_failed = False
         self._TAB_FAIL_THRESHOLD = 2
 
+        # ═══ 战术按键宏 ═══
+        from input.macros import MacroDispatcher
+        self.macros_config = self.get_config_data('macros')
+        self.macro_dispatcher = MacroDispatcher(pc=self, gh=self._gd, config=self.macros_config)
+
     def move_mouse(self, x, y):
         self._gd.mouse_R(x, y)
 
