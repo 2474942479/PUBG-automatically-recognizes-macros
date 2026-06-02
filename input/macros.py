@@ -83,35 +83,32 @@ class QuickPeekMacro(BaseMacro):
         self._held_keys = set()
 
     def _execute(self, primary="q", mirror="e"):
-        try:
-            if self.ads_wait_ms > 0:
-                self.gh.mouse_down(2)
-                self._held_keys.add("mouse_right")
-                self._sleep(self.ads_wait_ms / 1000.0)
-                self.gh.key_down(primary)
-                self._held_keys.add(primary)
-            else:
-                self.gh.key_down(primary)
-                self._held_keys.add(primary)
-                self.gh.mouse_down(2)
-                self._held_keys.add("mouse_right")
+        if self.ads_wait_ms > 0:
+            self.gh.mouse_down(2)
+            self._held_keys.add("mouse_right")
+            self._sleep(self.ads_wait_ms / 1000.0)
+            self.gh.key_down(primary)
+            self._held_keys.add(primary)
+        else:
+            self.gh.key_down(primary)
+            self._held_keys.add(primary)
+            self.gh.mouse_down(2)
+            self._held_keys.add("mouse_right")
 
-            self._sleep(self.peek_hold_ms / 1000.0)
+        self._sleep(self.peek_hold_ms / 1000.0)
 
-            self.gh.key_down(mirror)
-            self._sleep(self.reverse_tap_ms / 1000.0)
-            self.gh.key_up(mirror)
+        self.gh.key_down(mirror)
+        self._sleep(self.reverse_tap_ms / 1000.0)
+        self.gh.key_up(mirror)
 
-            self.gh.key_up(primary)
-            self._held_keys.discard(primary)
+        self.gh.key_up(primary)
+        self._held_keys.discard(primary)
 
-            self._sleep(self.release_delay_ms / 1000.0)
-            self.gh.mouse_up(2)
-            self._held_keys.discard("mouse_right")
+        self._sleep(self.release_delay_ms / 1000.0)
+        self.gh.mouse_up(2)
+        self._held_keys.discard("mouse_right")
 
-            self._sleep(self.cooldown_ms / 1000.0)
-        finally:
-            self._cleanup()
+        self._sleep(self.cooldown_ms / 1000.0)
 
     def _cleanup(self):
         if "mouse_right" in self._held_keys:
@@ -136,21 +133,18 @@ class PeekFakeMacro(BaseMacro):
         self._held_keys = set()
 
     def _execute(self, primary="q", mirror="e"):
-        try:
-            self.gh.key_down(primary)
-            self._held_keys.add(primary)
-            self._sleep(self.peek_hold_ms / 1000.0)
+        self.gh.key_down(primary)
+        self._held_keys.add(primary)
+        self._sleep(self.peek_hold_ms / 1000.0)
 
-            self.gh.key_down(mirror)
-            self._sleep(self.reverse_tap_ms / 1000.0)
-            self.gh.key_up(mirror)
+        self.gh.key_down(mirror)
+        self._sleep(self.reverse_tap_ms / 1000.0)
+        self.gh.key_up(mirror)
 
-            self.gh.key_up(primary)
-            self._held_keys.discard(primary)
+        self.gh.key_up(primary)
+        self._held_keys.discard(primary)
 
-            self._sleep(self.cooldown_ms / 1000.0)
-        finally:
-            self._cleanup()
+        self._sleep(self.cooldown_ms / 1000.0)
 
     def _cleanup(self):
         for key in list(self._held_keys):
@@ -177,22 +171,19 @@ class SlideStepMacro(BaseMacro):
         if should_continue is None:
             should_continue = lambda: True
 
-        try:
-            self._sleep(self.startup_delay_ms / 1000.0)
-            count = 0
-            while count < self.max_iterations and should_continue():
-                self.gh.key_down("c")
-                self._held_keys.add("c")
-                self._sleep(self.crouch_hold_ms / 1000.0)
-                self.gh.key_up("c")
-                self._held_keys.discard("c")
-                if count + 1 >= self.max_iterations:
-                    logger.warning("滑步循环达上限 %d，强制退出", self.max_iterations)
-                    break
-                self._sleep(self.crouch_interval_ms / 1000.0)
-                count += 1
-        finally:
-            self._cleanup()
+        self._sleep(self.startup_delay_ms / 1000.0)
+        count = 0
+        while count < self.max_iterations and should_continue():
+            self.gh.key_down("c")
+            self._held_keys.add("c")
+            self._sleep(self.crouch_hold_ms / 1000.0)
+            self.gh.key_up("c")
+            self._held_keys.discard("c")
+            count += 1
+            if count >= self.max_iterations:
+                logger.warning("滑步循环达上限 %d，强制退出", self.max_iterations)
+                break
+            self._sleep(self.crouch_interval_ms / 1000.0)
 
     def _cleanup(self):
         if "c" in self._held_keys:
@@ -217,16 +208,13 @@ class BigJumpMacro(BaseMacro):
         self._held_keys = set()
 
     def _execute(self):
-        try:
-            self._sleep(self.crouch_delay_ms / 1000.0)
-            self.gh.key_down("c")
-            self._held_keys.add("c")
-            self._sleep(self.crouch_hold_ms / 1000.0)
-            self.gh.key_up("c")
-            self._held_keys.discard("c")
-            self._sleep(self.cooldown_ms / 1000.0)
-        finally:
-            self._cleanup()
+        self._sleep(self.crouch_delay_ms / 1000.0)
+        self.gh.key_down("c")
+        self._held_keys.add("c")
+        self._sleep(self.crouch_hold_ms / 1000.0)
+        self.gh.key_up("c")
+        self._held_keys.discard("c")
+        self._sleep(self.cooldown_ms / 1000.0)
 
     def _cleanup(self):
         if "c" in self._held_keys:
@@ -245,11 +233,19 @@ class MacroDispatcher:
     def __init__(self, pc, gh, config):
         self.pc = pc
         self.gh = gh
+        # 线程安全说明：_held_keys / _held_mouse 由 listener 主线程写入，
+        # should_continue lambda 在宏子线程中读取。Python GIL 保证单条字节码原子性，
+        # set.add/discard/__contains__ 均为原子操作，因此无需额外加锁。
         self._held_keys = set()
         self._held_mouse = set()
+        self._macros = {}  # 先初始化，供 reload_config 中 _any_macro_running 使用
         self.reload_config(config)
 
     def reload_config(self, config):
+        """热重载配置。如有宏正在运行则拒绝重载，避免新实例与旧实例并发。"""
+        if self._any_macro_running():
+            logger.warning("有宏正在运行中，跳过配置热重载")
+            return False
         self._config = config or {}
         self._macros = {}
         qp = self._config.get("quick_peek", {})
@@ -286,6 +282,7 @@ class MacroDispatcher:
                 crouch_hold_ms=bj.get("crouch_hold_ms", 80),
                 cooldown_ms=bj.get("cooldown_ms", 300),
             )
+        return True
 
     @staticmethod
     def _normalize_key(key):

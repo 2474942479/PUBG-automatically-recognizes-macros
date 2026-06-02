@@ -122,12 +122,20 @@ class MacroConfigDialog(QtWidgets.QDialog):
         self.global_enable = QtWidgets.QCheckBox("启用宏系统总开关", self)
         root.addWidget(self.global_enable)
 
+        scroll_area = QtWidgets.QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_content = QtWidgets.QWidget()
+        scroll_layout = QtWidgets.QVBoxLayout(scroll_content)
+
         self.qp_box = self._make_quick_peek_group()
         self.pf_box = self._make_peek_fake_group()
         self.ss_box = self._make_slide_step_group()
         self.bj_box = self._make_big_jump_group()
         for b in (self.qp_box, self.pf_box, self.ss_box, self.bj_box):
-            root.addWidget(b)
+            scroll_layout.addWidget(b)
+        scroll_layout.addStretch()
+        scroll_area.setWidget(scroll_content)
+        root.addWidget(scroll_area)
 
         btn_row = QtWidgets.QHBoxLayout()
         self.btn_default = QtWidgets.QPushButton("恢复默认", self)
@@ -154,6 +162,7 @@ class MacroConfigDialog(QtWidgets.QDialog):
         self.qp_hold = QtWidgets.QSpinBox(box); self.qp_hold.setRange(50, 2000); self.qp_hold.setSuffix(" ms")
         self.qp_release = QtWidgets.QSpinBox(box); self.qp_release.setRange(0, 500); self.qp_release.setSuffix(" ms")
         self.qp_cd = QtWidgets.QSpinBox(box); self.qp_cd.setRange(0, 1000); self.qp_cd.setSuffix(" ms")
+        self.qp_reverse = QtWidgets.QSpinBox(box); self.qp_reverse.setRange(0, 200); self.qp_reverse.setSuffix(" ms")
 
         layout.addRow(self.qp_enabled)
         layout.addRow("修饰键", self.qp_modifier)
@@ -161,6 +170,7 @@ class MacroConfigDialog(QtWidgets.QDialog):
         layout.addRow("镜像键 (可选)", self.qp_mirror)
         layout.addRow("ADS 延迟", self.qp_ads)
         layout.addRow("探头保持", self.qp_hold)
+        layout.addRow("反向 tap", self.qp_reverse)
         layout.addRow("释放延迟", self.qp_release)
         layout.addRow("冷却", self.qp_cd)
         return box
@@ -233,6 +243,7 @@ class MacroConfigDialog(QtWidgets.QDialog):
         self.qp_hold.setValue(qp.get("peek_hold_ms", 300))
         self.qp_release.setValue(qp.get("release_delay_ms", 50))
         self.qp_cd.setValue(qp.get("cooldown_ms", 100))
+        self.qp_reverse.setValue(qp.get("reverse_tap_ms", 10))
 
         pf = cfg.get("peek_fake", {})
         self.pf_enabled.setChecked(pf.get("enabled", True))
@@ -272,7 +283,7 @@ class MacroConfigDialog(QtWidgets.QDialog):
                 "ads_wait_ms": self.qp_ads.value(),
                 "peek_hold_ms": self.qp_hold.value(),
                 "release_delay_ms": self.qp_release.value(),
-                "reverse_tap_ms": 10,
+                "reverse_tap_ms": self.qp_reverse.value(),
                 "cooldown_ms": self.qp_cd.value(),
             },
             "peek_fake": {
@@ -317,6 +328,22 @@ class MacroConfigDialog(QtWidgets.QDialog):
             combo = cfg[sub_name]["combo_keys"]
             if combo[0] == combo[1] or not combo[0] or not combo[1]:
                 errors.append(f"{label}：组合键 A 与 B 必须不同且都不能为空")
+
+        # 跨宏冲突：闪身与 Q 弹反的 modifier + primary_key 不能完全相同
+        if cfg["quick_peek"]["enabled"] and cfg["peek_fake"]["enabled"]:
+            qp_sig = (cfg["quick_peek"]["modifier"], cfg["quick_peek"]["primary_key"])
+            pf_sig = (cfg["peek_fake"]["modifier"], cfg["peek_fake"]["primary_key"])
+            if qp_sig == pf_sig:
+                errors.append("闪身宏与 Q 弹反的「修饰键 + 触发键」组合不能完全相同")
+            # 同时检查镜像键
+            qp_mirror = cfg["quick_peek"].get("mirror_key")
+            pf_mirror = cfg["peek_fake"].get("mirror_key")
+            if qp_mirror and pf_mirror:
+                qp_sig_mirror = (cfg["quick_peek"]["modifier"], qp_mirror)
+                pf_sig_mirror = (cfg["peek_fake"]["modifier"], pf_mirror)
+                if qp_sig_mirror == pf_sig_mirror:
+                    errors.append("闪身宏与 Q 弹反的「修饰键 + 镜像键」组合不能完全相同")
+
         return errors
 
     def _on_save(self):
