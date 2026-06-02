@@ -156,3 +156,45 @@ class PeekFakeMacro(BaseMacro):
         for key in list(self._held_keys):
             self.gh.key_up(key)
             self._held_keys.discard(key)
+
+
+class SlideStepMacro(BaseMacro):
+    """滑步循环：Shift+W 同时按下并保持 → 循环 C tap 直到任一键释放。"""
+
+    name = "slide_step"
+
+    def __init__(self, gh, sleep_fn=time.sleep,
+                 startup_delay_ms=200, crouch_hold_ms=50, crouch_interval_ms=300,
+                 max_iterations=200):
+        super().__init__(gh, sleep_fn)
+        self.startup_delay_ms = startup_delay_ms
+        self.crouch_hold_ms = crouch_hold_ms
+        self.crouch_interval_ms = crouch_interval_ms
+        self.max_iterations = max_iterations
+        self._held_keys = set()
+
+    def _execute(self, should_continue=None):
+        if should_continue is None:
+            should_continue = lambda: True
+
+        try:
+            self._sleep(self.startup_delay_ms / 1000.0)
+            count = 0
+            while count < self.max_iterations and should_continue():
+                self.gh.key_down("c")
+                self._held_keys.add("c")
+                self._sleep(self.crouch_hold_ms / 1000.0)
+                self.gh.key_up("c")
+                self._held_keys.discard("c")
+                if count + 1 >= self.max_iterations:
+                    logger.warning("滑步循环达上限 %d，强制退出", self.max_iterations)
+                    break
+                self._sleep(self.crouch_interval_ms / 1000.0)
+                count += 1
+        finally:
+            self._cleanup()
+
+    def _cleanup(self):
+        if "c" in self._held_keys:
+            self.gh.key_up("c")
+            self._held_keys.discard("c")

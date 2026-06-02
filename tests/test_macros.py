@@ -140,3 +140,55 @@ def test_peek_fake_sequence(gh, fake_sleep):
         ("key_up", "q"),
     ]
     assert fake_sleep.durations == [0.12, 0.01, 0.1]
+
+
+# ═══════════════════════════════════════════════════════════════
+# SlideStepMacro
+# ═══════════════════════════════════════════════════════════════
+from input.macros import SlideStepMacro
+
+
+def test_slide_step_loop_runs_until_should_continue_returns_false(gh, fake_sleep):
+    """循环：startup_delay → (key_down c, sleep, key_up c, sleep) × N。"""
+    iterations = [0]
+
+    def cont():
+        iterations[0] += 1
+        return iterations[0] <= 3
+
+    macro = SlideStepMacro(
+        gh=gh, sleep_fn=fake_sleep,
+        startup_delay_ms=200, crouch_hold_ms=50, crouch_interval_ms=300,
+    )
+    macro._execute(should_continue=cont)
+
+    expected_gh = [
+        ("key_down", "c"), ("key_up", "c"),
+        ("key_down", "c"), ("key_up", "c"),
+        ("key_down", "c"), ("key_up", "c"),
+    ]
+    assert gh.calls == expected_gh
+    assert fake_sleep.durations == [0.2, 0.05, 0.3, 0.05, 0.3, 0.05, 0.3]
+
+
+def test_slide_step_immediate_stop_skips_loop(gh, fake_sleep):
+    """should_continue 立刻返回 False，循环不执行。"""
+    macro = SlideStepMacro(
+        gh=gh, sleep_fn=fake_sleep,
+        startup_delay_ms=200, crouch_hold_ms=50, crouch_interval_ms=300,
+    )
+    macro._execute(should_continue=lambda: False)
+    assert gh.calls == []
+    assert fake_sleep.durations == [0.2]
+
+
+def test_slide_step_max_loop_safety(gh, fake_sleep):
+    """超过 max_iterations 兜底退出。"""
+    macro = SlideStepMacro(
+        gh=gh, sleep_fn=fake_sleep,
+        startup_delay_ms=0, crouch_hold_ms=10, crouch_interval_ms=10,
+        max_iterations=5,
+    )
+    macro._execute(should_continue=lambda: True)
+    crouch_downs = [c for c in gh.calls if c == ("key_down", "c")]
+    assert len(crouch_downs) == 5
