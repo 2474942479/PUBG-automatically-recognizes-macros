@@ -192,3 +192,28 @@ def test_slide_step_max_loop_safety(gh, fake_sleep):
     macro._execute(should_continue=lambda: True)
     crouch_downs = [c for c in gh.calls if c == ("key_down", "c")]
     assert len(crouch_downs) == 5
+
+
+# ═══════════════════════════════════════════════════════════════
+# BigJumpMacro
+# ═══════════════════════════════════════════════════════════════
+from input.macros import BigJumpMacro
+
+
+def test_big_jump_only_taps_crouch_after_delay(gh, fake_sleep):
+    """大跳：不注入 Space（用户自己按）；延迟后注入 C tap。"""
+    macro = BigJumpMacro(
+        gh=gh, sleep_fn=fake_sleep,
+        crouch_delay_ms=180, crouch_hold_ms=80, cooldown_ms=300,
+    )
+    macro._execute()
+
+    assert gh.calls == [("key_down", "c"), ("key_up", "c")]
+    assert fake_sleep.durations == [0.18, 0.08, 0.3]
+
+
+def test_big_jump_does_not_inject_space(gh, fake_sleep):
+    macro = BigJumpMacro(gh=gh, sleep_fn=fake_sleep)
+    macro._execute()
+    space_calls = [c for c in gh.calls if c[1] == "space"]
+    assert space_calls == []

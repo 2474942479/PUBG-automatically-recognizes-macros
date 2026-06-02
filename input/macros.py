@@ -198,3 +198,37 @@ class SlideStepMacro(BaseMacro):
         if "c" in self._held_keys:
             self.gh.key_up("c")
             self._held_keys.discard("c")
+
+
+class BigJumpMacro(BaseMacro):
+    """大跳：Shift+Space 触发 → 延迟后注入一次 C tap，让人物空中蹲。
+
+    注意：不注入 Space，让用户原本的 Space 自然到达游戏。
+    """
+
+    name = "big_jump"
+
+    def __init__(self, gh, sleep_fn=time.sleep,
+                 crouch_delay_ms=180, crouch_hold_ms=80, cooldown_ms=300):
+        super().__init__(gh, sleep_fn)
+        self.crouch_delay_ms = crouch_delay_ms
+        self.crouch_hold_ms = crouch_hold_ms
+        self.cooldown_ms = cooldown_ms
+        self._held_keys = set()
+
+    def _execute(self):
+        try:
+            self._sleep(self.crouch_delay_ms / 1000.0)
+            self.gh.key_down("c")
+            self._held_keys.add("c")
+            self._sleep(self.crouch_hold_ms / 1000.0)
+            self.gh.key_up("c")
+            self._held_keys.discard("c")
+            self._sleep(self.cooldown_ms / 1000.0)
+        finally:
+            self._cleanup()
+
+    def _cleanup(self):
+        if "c" in self._held_keys:
+            self.gh.key_up("c")
+            self._held_keys.discard("c")
