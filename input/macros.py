@@ -120,3 +120,39 @@ class QuickPeekMacro(BaseMacro):
         for key in list(self._held_keys):
             self.gh.key_up(key)
             self._held_keys.discard(key)
+
+
+class PeekFakeMacro(BaseMacro):
+    """Q 弹反：用户右键已按住开镜中 + Q/E → 探头 + 反向取消，不开枪不释放右键。"""
+
+    name = "peek_fake"
+
+    def __init__(self, gh, sleep_fn=time.sleep,
+                 peek_hold_ms=120, reverse_tap_ms=10, cooldown_ms=100):
+        super().__init__(gh, sleep_fn)
+        self.peek_hold_ms = peek_hold_ms
+        self.reverse_tap_ms = reverse_tap_ms
+        self.cooldown_ms = cooldown_ms
+        self._held_keys = set()
+
+    def _execute(self, primary="q", mirror="e"):
+        try:
+            self.gh.key_down(primary)
+            self._held_keys.add(primary)
+            self._sleep(self.peek_hold_ms / 1000.0)
+
+            self.gh.key_down(mirror)
+            self._sleep(self.reverse_tap_ms / 1000.0)
+            self.gh.key_up(mirror)
+
+            self.gh.key_up(primary)
+            self._held_keys.discard(primary)
+
+            self._sleep(self.cooldown_ms / 1000.0)
+        finally:
+            self._cleanup()
+
+    def _cleanup(self):
+        for key in list(self._held_keys):
+            self.gh.key_up(key)
+            self._held_keys.discard(key)

@@ -107,3 +107,36 @@ def test_quick_peek_cleanup_releases_all_keys(gh, fake_sleep):
     macro._cleanup()
     assert ("key_up", "q") in gh.calls
     assert ("mouse_up", 2) in gh.calls
+
+
+# ═══════════════════════════════════════════════════════════════
+# PeekFakeMacro
+# ═══════════════════════════════════════════════════════════════
+from input.macros import PeekFakeMacro
+
+
+def test_peek_fake_does_not_touch_mouse(gh, fake_sleep):
+    """Q 弹反：用户已开镜，宏不应注入或释放右键。"""
+    macro = PeekFakeMacro(
+        gh=gh, sleep_fn=fake_sleep,
+        peek_hold_ms=120, reverse_tap_ms=10, cooldown_ms=100,
+    )
+    macro._execute(primary="q", mirror="e")
+
+    mouse_calls = [c for c in gh.calls if c[0] in ("mouse_down", "mouse_up")]
+    assert mouse_calls == []
+
+
+def test_peek_fake_sequence(gh, fake_sleep):
+    macro = PeekFakeMacro(
+        gh=gh, sleep_fn=fake_sleep,
+        peek_hold_ms=120, reverse_tap_ms=10, cooldown_ms=100,
+    )
+    macro._execute(primary="q", mirror="e")
+
+    assert gh.calls == [
+        ("key_down", "q"),
+        ("key_down", "e"), ("key_up", "e"),
+        ("key_up", "q"),
+    ]
+    assert fake_sleep.durations == [0.12, 0.01, 0.1]
