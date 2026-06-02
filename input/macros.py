@@ -56,3 +56,67 @@ class BaseMacro:
     def _cleanup(self):
         """异常清理钩子：子类覆盖以确保所有 key_down 都有匹配 key_up。"""
         pass
+
+
+class QuickPeekMacro(BaseMacro):
+    """闪身宏：侧键(X1) + Q/E 触发 → 自动 ADS + 探头 + 反向取消。
+
+    时序（默认 ads_wait_ms=0，即同时按下）：
+      t=0       key_down(primary) + mouse_down(2)
+      t=peek_hold key_down(mirror); sleep(reverse_tap_ms); key_up(mirror)
+                key_up(primary)
+      t=peek_hold+release_delay mouse_up(2)
+      t=peek_hold+release_delay+cooldown 结束
+    """
+
+    name = "quick_peek"
+
+    def __init__(self, gh, sleep_fn=time.sleep,
+                 ads_wait_ms=0, peek_hold_ms=300, release_delay_ms=50,
+                 reverse_tap_ms=10, cooldown_ms=100):
+        super().__init__(gh, sleep_fn)
+        self.ads_wait_ms = ads_wait_ms
+        self.peek_hold_ms = peek_hold_ms
+        self.release_delay_ms = release_delay_ms
+        self.reverse_tap_ms = reverse_tap_ms
+        self.cooldown_ms = cooldown_ms
+        self._held_keys = set()
+
+    def _execute(self, primary="q", mirror="e"):
+        try:
+            if self.ads_wait_ms > 0:
+                self.gh.mouse_down(2)
+                self._held_keys.add("mouse_right")
+                self._sleep(self.ads_wait_ms / 1000.0)
+                self.gh.key_down(primary)
+                self._held_keys.add(primary)
+            else:
+                self.gh.key_down(primary)
+                self._held_keys.add(primary)
+                self.gh.mouse_down(2)
+                self._held_keys.add("mouse_right")
+
+            self._sleep(self.peek_hold_ms / 1000.0)
+
+            self.gh.key_down(mirror)
+            self._sleep(self.reverse_tap_ms / 1000.0)
+            self.gh.key_up(mirror)
+
+            self.gh.key_up(primary)
+            self._held_keys.discard(primary)
+
+            self._sleep(self.release_delay_ms / 1000.0)
+            self.gh.mouse_up(2)
+            self._held_keys.discard("mouse_right")
+
+            self._sleep(self.cooldown_ms / 1000.0)
+        finally:
+            self._cleanup()
+
+    def _cleanup(self):
+        if "mouse_right" in self._held_keys:
+            self.gh.mouse_up(2)
+            self._held_keys.discard("mouse_right")
+        for key in list(self._held_keys):
+            self.gh.key_up(key)
+            self._held_keys.discard(key)
