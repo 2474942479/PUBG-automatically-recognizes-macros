@@ -329,3 +329,22 @@ def test_dispatcher_normalizes_modifier_key_variants(gh):
     disp.on_key_event("ctrl_l", "down")
     fired = disp._handle_key_down("w")
     assert fired == "slide_step"
+
+
+# ═══════════════════════════════════════════════════════════════
+# build_macros_config (核心 process 模块)
+# ═══════════════════════════════════════════════════════════════
+def test_build_macros_config_returns_defaults_when_empty():
+    from core.process import build_macros_config, DEFAULT_MACROS_CONFIG
+    assert build_macros_config(None) == DEFAULT_MACROS_CONFIG
+    assert build_macros_config({}) == DEFAULT_MACROS_CONFIG
+
+
+def test_build_macros_config_overlays_partial_config():
+    from core.process import build_macros_config
+    raw = {"enabled": False, "quick_peek": {"peek_hold_ms": 999}}
+    merged = build_macros_config(raw)
+    assert merged["enabled"] is False
+    assert merged["quick_peek"]["peek_hold_ms"] == 999
+    assert merged["quick_peek"]["primary_key"] == "q"
+    assert merged["slide_step"]["combo_keys"] == ["shift", "w"]

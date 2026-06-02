@@ -15,13 +15,53 @@ from data.fire_data import KEY_DATA_V3, SCOPE_FACTOR
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MACROS_CONFIG = {
+    "enabled": True,
+    "quick_peek": {
+        "enabled": True, "modifier": "mouse_x1",
+        "primary_key": "q", "mirror_key": "e",
+        "ads_wait_ms": 0, "peek_hold_ms": 300,
+        "release_delay_ms": 50, "reverse_tap_ms": 10, "cooldown_ms": 100,
+    },
+    "peek_fake": {
+        "enabled": True, "modifier": "mouse_right",
+        "primary_key": "q", "mirror_key": "e",
+        "peek_hold_ms": 120, "reverse_tap_ms": 10, "cooldown_ms": 100,
+    },
+    "slide_step": {
+        "enabled": True, "combo_keys": ["shift", "w"],
+        "startup_delay_ms": 200, "crouch_hold_ms": 50, "crouch_interval_ms": 300,
+    },
+    "big_jump": {
+        "enabled": True, "combo_keys": ["shift", "space"],
+        "crouch_delay_ms": 180, "crouch_hold_ms": 80, "cooldown_ms": 300,
+    },
+}
+
 DEFAULT_CONFIG = {
     "resolution": "1920x1080",
     "scope_factor_v3": {},
     "posture_v3": {},
     "gun_ratio_v3": {},
     "debug_mode": False,
+    "macros": DEFAULT_MACROS_CONFIG,
 }
+
+
+def build_macros_config(raw):
+    """合并磁盘配置与默认值。Pure function，便于单元测试。
+
+    缺失的子块/字段一律由 DEFAULT_MACROS_CONFIG 补齐。
+    """
+    if not isinstance(raw, dict):
+        raw = {}
+    merged = {**DEFAULT_MACROS_CONFIG, **raw}
+    for sub_name in ("quick_peek", "peek_fake", "slide_step", "big_jump"):
+        merged[sub_name] = {
+            **DEFAULT_MACROS_CONFIG[sub_name],
+            **(raw.get(sub_name) or {}),
+        }
+    return merged
 
 class ProcessClass:
     _instance_lock = threading.Lock()
@@ -138,6 +178,8 @@ class ProcessClass:
         elif mode == 'engine':
             v = Config_data.get('recognize_engine', 'auto')
             return v if v in ('auto', 'opencv', 'onnx') else 'auto'
+        elif mode == 'macros':
+            return build_macros_config(Config_data.get('macros'))
         elif mode == 'a':
             return Config_data
 
@@ -156,6 +198,9 @@ class ProcessClass:
         elif mode == 'engine':
             if data in ('auto', 'opencv', 'onnx'):
                 save_data['recognize_engine'] = data
+        elif mode == 'macros':
+            if isinstance(data, dict):
+                save_data['macros'] = data
         try:
             with open(self._config_path(), "w", encoding='utf-8') as f:
                 f.write(json.dumps(save_data, ensure_ascii=False, indent=2))
