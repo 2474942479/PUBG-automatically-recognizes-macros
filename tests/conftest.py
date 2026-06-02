@@ -14,11 +14,11 @@ class FakeGhubDevice:
     def key_up(self, key):
         self.calls.append(("key_up", key))
 
-    def mouse_down(self, btn=1):
-        self.calls.append(("mouse_down", int(btn)))
+    def mouse_down(self, key=1):
+        self.calls.append(("mouse_down", int(key)))
 
-    def mouse_up(self, btn=1):
-        self.calls.append(("mouse_up", int(btn)))
+    def mouse_up(self, key=1):
+        self.calls.append(("mouse_up", int(key)))
 
 
 class FakeSleep:
