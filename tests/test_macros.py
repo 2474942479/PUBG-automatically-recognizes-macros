@@ -217,3 +217,115 @@ def test_big_jump_does_not_inject_space(gh, fake_sleep):
     macro._execute()
     space_calls = [c for c in gh.calls if c[1] == "space"]
     assert space_calls == []
+
+
+# ═══════════════════════════════════════════════════════════════
+# MacroDispatcher
+# ═══════════════════════════════════════════════════════════════
+from input.macros import MacroDispatcher
+
+
+class _FakePC:
+    def __init__(self, tab_open=False):
+        self.TabKey = tab_open
+
+
+def _default_macros_config():
+    return {
+        "enabled": True,
+        "quick_peek": {
+            "enabled": True, "modifier": "mouse_x1",
+            "primary_key": "q", "mirror_key": "e",
+            "ads_wait_ms": 0, "peek_hold_ms": 300,
+            "release_delay_ms": 50, "cooldown_ms": 100,
+        },
+        "peek_fake": {
+            "enabled": True, "modifier": "mouse_right",
+            "primary_key": "q", "mirror_key": "e",
+            "peek_hold_ms": 120, "reverse_tap_ms": 10, "cooldown_ms": 100,
+        },
+        "slide_step": {
+            "enabled": True, "combo_keys": ["shift", "w"],
+            "startup_delay_ms": 200, "crouch_hold_ms": 50,
+            "crouch_interval_ms": 300,
+        },
+        "big_jump": {
+            "enabled": True, "combo_keys": ["shift", "space"],
+            "crouch_delay_ms": 180, "crouch_hold_ms": 80,
+            "cooldown_ms": 300,
+        },
+    }
+
+
+def test_dispatcher_quick_peek_triggers_when_modifier_held(gh):
+    pc = _FakePC()
+    disp = MacroDispatcher(pc=pc, gh=gh, config=_default_macros_config())
+    disp.on_mouse_event("mouse_x1", pressed=True)
+    fired = disp._handle_key_down("q")
+    assert fired == "quick_peek"
+
+
+def test_dispatcher_peek_fake_when_right_held_and_q_pressed(gh):
+    pc = _FakePC()
+    disp = MacroDispatcher(pc=pc, gh=gh, config=_default_macros_config())
+    disp.on_mouse_event("mouse_right", pressed=True)
+    fired = disp._handle_key_down("q")
+    assert fired == "peek_fake"
+
+
+def test_dispatcher_slide_step_when_shift_w_both_held(gh):
+    pc = _FakePC()
+    disp = MacroDispatcher(pc=pc, gh=gh, config=_default_macros_config())
+    disp.on_key_event("shift", "down")
+    fired = disp._handle_key_down("w")
+    assert fired == "slide_step"
+
+
+def test_dispatcher_disabled_when_tab_open(gh):
+    pc = _FakePC(tab_open=True)
+    disp = MacroDispatcher(pc=pc, gh=gh, config=_default_macros_config())
+    disp.on_mouse_event("mouse_x1", pressed=True)
+    fired = disp._handle_key_down("q")
+    assert fired is None
+
+
+def test_dispatcher_global_mutex(gh):
+    """一个宏运行中时，第二个触发被忽略。"""
+    import threading
+    pc = _FakePC()
+    cfg = _default_macros_config()
+    cfg["quick_peek"]["peek_hold_ms"] = 50
+    disp = MacroDispatcher(pc=pc, gh=gh, config=cfg)
+    block = threading.Event()
+    for m in disp._macros.values():
+        m._sleep = lambda s: block.wait(2)
+
+    disp.on_mouse_event("mouse_x1", pressed=True)
+    first = disp._handle_key_down("q")
+    assert first == "quick_peek"
+    import time as _t
+    _t.sleep(0.05)
+    disp.on_mouse_event("mouse_right", pressed=True)
+    second = disp._handle_key_down("q")
+    assert second is None
+    block.set()
+
+
+def test_dispatcher_modifier_e_uses_mirror_q(gh):
+    pc = _FakePC()
+    disp = MacroDispatcher(pc=pc, gh=gh, config=_default_macros_config())
+    disp.on_mouse_event("mouse_x1", pressed=True)
+    fired = disp._handle_key_down("e")
+    assert fired == "quick_peek"
+
+
+def test_dispatcher_normalizes_modifier_key_variants(gh):
+    """keyboard 库报 ctrl_l/alt_r/right shift 时应被规范化。"""
+    pc = _FakePC()
+    cfg = _default_macros_config()
+    cfg["slide_step"]["combo_keys"] = ["ctrl", "w"]
+    disp = MacroDispatcher(pc=pc, gh=gh, config=cfg)
+
+    disp.on_key_event("ctrl_l", "down")
+    fired = disp._handle_key_down("w")
+    assert fired == "slide_step"

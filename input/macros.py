@@ -232,3 +232,147 @@ class BigJumpMacro(BaseMacro):
         if "c" in self._held_keys:
             self.gh.key_up("c")
             self._held_keys.discard("c")
+
+
+class MacroDispatcher:
+    """统一管理 4 个宏，处理触发匹配、全局互斥、热重载。
+
+    - 由 listener 调 on_key_event / on_mouse_event 转发原始事件
+    - 自身维护"当前按下键集合"以匹配修饰键 + 触发键的组合
+    - 背包打开（PC.TabKey）或全局禁用（config.enabled=False）时一律不触发
+    """
+
+    def __init__(self, pc, gh, config):
+        self.pc = pc
+        self.gh = gh
+        self._held_keys = set()
+        self._held_mouse = set()
+        self.reload_config(config)
+
+    def reload_config(self, config):
+        self._config = config or {}
+        self._macros = {}
+        qp = self._config.get("quick_peek", {})
+        if qp:
+            self._macros["quick_peek"] = QuickPeekMacro(
+                gh=self.gh,
+                ads_wait_ms=qp.get("ads_wait_ms", 0),
+                peek_hold_ms=qp.get("peek_hold_ms", 300),
+                release_delay_ms=qp.get("release_delay_ms", 50),
+                reverse_tap_ms=qp.get("reverse_tap_ms", 10),
+                cooldown_ms=qp.get("cooldown_ms", 100),
+            )
+        pf = self._config.get("peek_fake", {})
+        if pf:
+            self._macros["peek_fake"] = PeekFakeMacro(
+                gh=self.gh,
+                peek_hold_ms=pf.get("peek_hold_ms", 120),
+                reverse_tap_ms=pf.get("reverse_tap_ms", 10),
+                cooldown_ms=pf.get("cooldown_ms", 100),
+            )
+        ss = self._config.get("slide_step", {})
+        if ss:
+            self._macros["slide_step"] = SlideStepMacro(
+                gh=self.gh,
+                startup_delay_ms=ss.get("startup_delay_ms", 200),
+                crouch_hold_ms=ss.get("crouch_hold_ms", 50),
+                crouch_interval_ms=ss.get("crouch_interval_ms", 300),
+            )
+        bj = self._config.get("big_jump", {})
+        if bj:
+            self._macros["big_jump"] = BigJumpMacro(
+                gh=self.gh,
+                crouch_delay_ms=bj.get("crouch_delay_ms", 180),
+                crouch_hold_ms=bj.get("crouch_hold_ms", 80),
+                cooldown_ms=bj.get("cooldown_ms", 300),
+            )
+
+    @staticmethod
+    def _normalize_key(key):
+        """规范化 keyboard 库的修饰键变体（ctrl_l/ctrl_r → ctrl 等）。"""
+        k = (key or "").lower()
+        if k in ("ctrl_l", "ctrl_r"):
+            return "ctrl"
+        if k in ("alt_l", "alt_r"):
+            return "alt"
+        if k in ("shift_l", "shift_r", "right shift", "left shift"):
+            return "shift"
+        return k
+
+    def on_key_event(self, key, event_type):
+        key = self._normalize_key(key)
+        if event_type == "down":
+            self._held_keys.add(key)
+            self._handle_key_down(key)
+        elif event_type == "up":
+            self._held_keys.discard(key)
+
+    def on_mouse_event(self, button, pressed):
+        if pressed:
+            self._held_mouse.add(button)
+            self._handle_mouse_down(button)
+        else:
+            self._held_mouse.discard(button)
+
+    def _is_enabled(self, name):
+        if not self._config.get("enabled", False):
+            return False
+        if getattr(self.pc, "TabKey", False):
+            return False
+        sub = self._config.get(name, {})
+        return bool(sub.get("enabled", False))
+
+    def _any_macro_running(self):
+        return any(m.is_running() for m in self._macros.values())
+
+    def _handle_key_down(self, key):
+        """键按下事件：检查是否匹配某个宏的触发条件。返回触发的宏 name 或 None。
+
+        注：直接调用时 key 也会被加入 self._held_keys（set add 幂等）。
+        """
+        self._held_keys.add(key)
+        if self._any_macro_running():
+            return None
+
+        if self._is_enabled("quick_peek"):
+            qp_cfg = self._config["quick_peek"]
+            if qp_cfg["modifier"] in self._held_mouse:
+                primary = qp_cfg["primary_key"]
+                mirror = qp_cfg.get("mirror_key") or ""
+                if key == primary:
+                    self._macros["quick_peek"].trigger(primary=primary, mirror=mirror or primary)
+                    return "quick_peek"
+                if mirror and key == mirror:
+                    self._macros["quick_peek"].trigger(primary=mirror, mirror=primary)
+                    return "quick_peek"
+
+        if self._is_enabled("peek_fake"):
+            pf_cfg = self._config["peek_fake"]
+            if pf_cfg["modifier"] in self._held_mouse:
+                primary = pf_cfg["primary_key"]
+                mirror = pf_cfg.get("mirror_key") or ""
+                if key == primary:
+                    self._macros["peek_fake"].trigger(primary=primary, mirror=mirror or primary)
+                    return "peek_fake"
+                if mirror and key == mirror:
+                    self._macros["peek_fake"].trigger(primary=mirror, mirror=primary)
+                    return "peek_fake"
+
+        if self._is_enabled("slide_step"):
+            combo = self._config["slide_step"]["combo_keys"]
+            if key in combo and all(k in self._held_keys for k in combo):
+                m = self._macros["slide_step"]
+                m.trigger(should_continue=lambda: all(k in self._held_keys for k in combo))
+                return "slide_step"
+
+        if self._is_enabled("big_jump"):
+            combo = self._config["big_jump"]["combo_keys"]
+            if key in combo and all(k in self._held_keys for k in combo):
+                self._macros["big_jump"].trigger()
+                return "big_jump"
+
+        return None
+
+    def _handle_mouse_down(self, button):
+        """鼠标键按下：仅更新状态，不直接触发宏（宏触发都在键盘 key_down 路径）。"""
+        return None
